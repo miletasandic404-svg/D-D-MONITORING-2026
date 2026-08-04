@@ -375,7 +375,7 @@ module.exports = async (req, res) => {
         rtspPasswordEnc = extracted.password ? encryptCreds(extracted.password) : null;
       }
 
-      const existing = await db.queryAsPlatformAdmin("SELECT organization_id, media_node_id, rtsp_url FROM cameras WHERE id = $1", [id]);
+      const existing = await db.queryAsOrg(auth.organizationId, "SELECT organization_id, media_node_id, rtsp_url FROM cameras WHERE id = $1", [id]);
       if (existing.rows.length > 0 && existing.rows[0].organization_id !== auth.organizationId) {
         return sendError(res, 403, "A camera with this id belongs to a different organization");
       }

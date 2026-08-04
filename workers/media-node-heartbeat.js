@@ -68,6 +68,7 @@ function sendHeartbeat() {
   const req = lib.request(url, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(body) },
+    timeout: 10000,
   }, (res) => {
     let data = '';
     res.on('data', (chunk) => { data += chunk; });
@@ -87,3 +88,8 @@ function sendHeartbeat() {
 console.log(`[heartbeat] starting, node ${MEDIA_NODE_ID}, every ${INTERVAL_SECONDS}s -> ${API_BASE_URL}`);
 sendHeartbeat();
 setInterval(sendHeartbeat, INTERVAL_SECONDS * 1000);
+
+process.on('SIGTERM', () => {
+  console.log('[heartbeat] received SIGTERM, shutting down');
+  process.exit(0);
+});

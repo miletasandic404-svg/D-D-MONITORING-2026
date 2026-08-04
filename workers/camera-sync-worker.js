@@ -159,10 +159,10 @@ async function runFullSync() {
       continue;
     }
     try {
-      console.log(`[camera-sync] adding path ${cam.id} -> ${cam.rtsp_url}`);
+      console.log(`[camera-sync] adding path ${cam.id} -> (credentials redacted)`);
       const res = await addOrUpdateCameraPath(cam.id, cam.rtsp_url);
       added += 1;
-      console.log(`[camera-sync] MediaMTX response for ${cam.id}: HTTP ${res.status} ${JSON.stringify(res.body || {})}`);
+      console.log(`[camera-sync] MediaMTX response for ${cam.id}: HTTP ${res.status}`);
     } catch (err) {
       failed += 1;
       console.error(`[camera-sync] Failed to sync path for camera ${cam.id}:`, err.message);

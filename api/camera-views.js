@@ -1,5 +1,5 @@
 const db = require('../db/index');
-const { requireAuth } = require('../lib/_auth');
+const { requireAuth, canAccessCamera } = require('../lib/_auth');
 const { z } = require('zod');
 const { sendError, sendSuccess } = require('../lib/_error');
 const crypto = require('crypto');
@@ -30,6 +30,12 @@ module.exports = async (req, res) => {
         throw zodErr;
       }
       const { camera_id } = data;
+
+      // Authorization: verify the user has access to this camera before issuing a token
+      const allowed = await canAccessCamera(auth, camera_id);
+      if (!allowed) {
+        return sendError(res, 403, 'You do not have access to this camera');
+      }
 
       // Generate a short-lived stream token
       const streamToken = crypto.randomBytes(32).toString('hex');

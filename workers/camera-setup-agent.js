@@ -143,7 +143,7 @@ async function queryAsTaskOrg(task, text, params) {
   try {
     await client.query('BEGIN');
     if (task.organization_id) {
-      await client.query(`SET LOCAL app.current_org_id = '${task.organization_id}'`);
+      await client.query(`SELECT set_config('app.current_org_id', $1, true)`, [task.organization_id]);
     }
     const result = await client.query(text, params);
     await client.query('COMMIT');
@@ -203,9 +203,17 @@ async function claimNextTask() {
 }
 
 async function setTaskStatus(taskId, status, extra = {}) {
+  const allowedColumns = new Set([
+    'result', 'error', 'camera_id', 'assigned_node_id',
+    'ip', 'rtsp_url', 'camera_name', 'updated_at',
+  ]);
   const sets = ['status = $1', 'updated_at = now()'];
   const vals = [status];
   for (const [k, v] of Object.entries(extra)) {
+    if (!allowedColumns.has(k)) {
+      console.warn(`[agent] setTaskStatus: rejecting unknown column "${k}"`);
+      continue;
+    }
     vals.push(v);
     sets.push(`${k} = ${vals.length}`);
   }
