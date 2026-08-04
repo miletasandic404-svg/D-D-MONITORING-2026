@@ -28,6 +28,8 @@
 const { Pool } = require('pg');
 const { addOrUpdateCameraPath, deleteCameraPath, listConfiguredPaths } = require('../lib/_mediamtx_client');
 const { decrypt, extractCredentialsFromUrl } = require('../lib/_crypto');
+const L = require('../lib/_logger');
+const logger = L.makeLogger('camera-sync');
 
 // =========================================================
 // Camera Sync Worker
@@ -57,12 +59,12 @@ const MEDIA_NODE_ID = process.env.MEDIA_NODE_ID || null;
 const WORKER_DB_URL = process.env.MEDIA_NODE_DATABASE_URL || process.env.DATABASE_URL;
 
 if (!WORKER_DB_URL) {
-  console.error('[camera-sync] DATABASE_URL (or MEDIA_NODE_DATABASE_URL) is not set -- worker cannot start');
+  logger.error('worker.database_url_missing');
   process.exit(1);
 }
 
 if (!process.env.MEDIA_NODE_DATABASE_URL) {
-  console.warn('[camera-sync] WARNING: MEDIA_NODE_DATABASE_URL not set — using owner role (DATABASE_URL). For production, create a restricted media_node_worker role and set MEDIA_NODE_DATABASE_URL.');
+  logger.warn('worker.owner_role_fallback');
 }
 
 const pool = new Pool({ connectionString: WORKER_DB_URL, max: 2 });
@@ -103,20 +105,22 @@ async function runFullSync() {
   try {
     cameras = await fetchCamerasFromDb();
   } catch (err) {
-    console.error('[camera-sync] Failed to read cameras from database:', err.message);
+    logger.error('sync.cameras_read_failed', { error: err.message });
     return;
   }
 
   // Log how many cameras were found and flag any with unassigned media_node_id.
   const unassigned = cameras.filter((c) => c.media_node_id === null);
-  console.log(
-    `[camera-sync] Found ${cameras.length} camera(s) to sync` +
-    (MEDIA_NODE_ID ? ` (node ${MEDIA_NODE_ID}, including ${unassigned.length} with NULL media_node_id)` : ' (all cameras, no MEDIA_NODE_ID filter)')
-  );
+  logger.info('sync.found_cameras', {
+    count: cameras.length,
+    node_id: MEDIA_NODE_ID || null,
+    unassigned: unassigned.length,
+  });
   if (unassigned.length > 0) {
-    console.warn(
-      `[camera-sync] Registering ${unassigned.length} camera(s) with NULL media_node_id (will be healed on next API update): ${unassigned.map((c) => c.id).join(', ')}`
-    );
+    logger.warn('sync.unassigned_cameras', {
+      count: unassigned.length,
+      camera_ids: unassigned.map((c) => c.id),
+    });
   }
 
   // VAZNO: POST /v3/config/paths/add/{name} radi PUN RELOAD putanje
@@ -137,11 +141,11 @@ async function runFullSync() {
   try {
     currentPaths = await listConfiguredPaths();
   } catch (firstErr) {
-    console.warn('[camera-sync] listConfiguredPaths failed, retrying once:', firstErr.message);
+    logger.warn('sync.mediamtx_list_retry', { error: firstErr.message });
     try {
       currentPaths = await listConfiguredPaths();
     } catch (secondErr) {
-      console.error('[camera-sync] listConfiguredPaths failed twice -- skipping this entire cycle to avoid unnecessary reloads:', secondErr.message);
+      logger.error('sync.mediamtx_list_failed', { error: secondErr.message });
       return;
     }
   }
@@ -151,7 +155,7 @@ async function runFullSync() {
   let unchanged = 0;
   let failed = 0;
   for (const cam of cameras) {
-    console.log(`[camera-sync] syncing camera ${cam.id}`);
+    logger.info('sync.syncing_camera', { camera_id: cam.id });
     const existing = currentByName.get(cam.id);
     const alreadyCorrect = existing && existing.source === cam.rtsp_url;
     if (alreadyCorrect) {
@@ -159,13 +163,13 @@ async function runFullSync() {
       continue;
     }
     try {
-      console.log(`[camera-sync] adding path ${cam.id} -> (credentials redacted)`);
+      logger.info('sync.adding_path', { camera_id: cam.id });
       const res = await addOrUpdateCameraPath(cam.id, cam.rtsp_url);
       added += 1;
-      console.log(`[camera-sync] MediaMTX response for ${cam.id}: HTTP ${res.status}`);
+      logger.info('sync.mediamtx_response', { camera_id: cam.id, http_status: res.status });
     } catch (err) {
       failed += 1;
-      console.error(`[camera-sync] Failed to sync path for camera ${cam.id}:`, err.message);
+      logger.error('sync.path_failed', { camera_id: cam.id, error: err.message });
     }
   }
 
@@ -189,24 +193,29 @@ async function runFullSync() {
           await deleteCameraPath(pathName);
           removed += 1;
         } catch (err) {
-          console.error(`[camera-sync] Failed to remove orphaned path ${pathName}:`, err.message);
+          logger.error('sync.orphan_remove_failed', { path: pathName, error: err.message });
         }
       }
     }
   } catch (err) {
     // MediaMTX API moze biti privremeno nedostupan -- ne fatalno,
     // pokusacemo ponovo na sledecem ciklusu.
-    console.error('[camera-sync] Failed to list configured MediaMTX paths (skipping orphan cleanup):', err.message);
+    logger.error('sync.orphan_cleanup_skipped', { error: err.message });
   }
 
   const durationMs = Date.now() - startedAt;
-  console.log(
-    `[camera-sync] Full sync complete in ${durationMs}ms: ${added} added/updated, ${unchanged} already correct (skipped), ${failed} failed, ${removed} orphaned paths removed (${cameras.length} cameras in DB)`
-  );
+  logger.info('sync.complete', {
+    duration_ms: durationMs,
+    added,
+    unchanged,
+    failed,
+    removed,
+    cameras_in_db: cameras.length,
+  });
 }
 
 async function main() {
-  console.log(`[camera-sync] Starting. Interval: ${SYNC_INTERVAL_SECONDS}s. MEDIA_NODE_ID: ${MEDIA_NODE_ID || '(none -- syncing all cameras)'}`);
+  logger.info('worker.start', { interval_seconds: SYNC_INTERVAL_SECONDS, media_node_id: MEDIA_NODE_ID || null });
 
   // Puni resync ODMAH pri startu -- ovo je "recovery" korak (D/E).
   await runFullSync();
@@ -222,23 +231,23 @@ async function main() {
   let syncInProgress = false;
   setInterval(() => {
     if (syncInProgress) {
-      console.warn('[camera-sync] Previous sync cycle still running -- skipping this tick. Consider increasing CAMERA_SYNC_INTERVAL_SECONDS if this happens often.');
+      logger.warn('sync.cycle_skipped');
       return;
     }
     syncInProgress = true;
     runFullSync()
-      .catch((err) => console.error('[camera-sync] Unexpected error during sync cycle:', err))
+      .catch((err) => logger.error('sync.cycle_unexpected', { error: err.message }))
       .finally(() => { syncInProgress = false; });
   }, SYNC_INTERVAL_SECONDS * 1000);
 }
 
 main().catch((err) => {
-  console.error('[camera-sync] Fatal error, exiting:', err);
+  logger.error('worker.fatal', { error: err.message });
   process.exit(1);
 });
 
 process.on('SIGTERM', async () => {
-  console.log('[camera-sync] SIGTERM received, shutting down');
+  logger.info('worker.sigterm');
   await pool.end();
   process.exit(0);
 });

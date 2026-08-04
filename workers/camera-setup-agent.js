@@ -77,8 +77,23 @@ if (!process.env.MEDIA_NODE_DATABASE_URL) {
 
 const pool = new Pool({ connectionString: WORKER_DB_URL, max: 2 });
 
+const L = require('../lib/_logger');
+const logger = L.makeLogger('camera-setup');
+
 function log(...args) {
-  console.log('[camera-setup]', ...args);
+  logger.info('message', { text: args.map(String).join(' ') });
+}
+
+// Structured task-scoped log: always carries task_id + camera_id so failures
+// are traceable end-to-end (Phase 9).
+function logTask(event, task, extra = {}) {
+  logger.info(event, {
+    task_id: task && task.id ? task.id : null,
+    mode: task && task.mode ? task.mode : null,
+    camera_id: task && task.camera_id ? task.camera_id : null,
+    ip: task && task.ip ? task.ip : null,
+    ...extra,
+  });
 }
 
 // ─── LAN helpers ─────────────────────────────────────────────────────────────
@@ -165,7 +180,7 @@ async function reclaimStuckTasks() {
     [STUCK_TASK_TIMEOUT_MINUTES],
   );
   if (result.rowCount > 0) {
-    log(`reclaimed ${result.rowCount} stuck task(s) (working > ${STUCK_TASK_TIMEOUT_MINUTES}min)`);
+    logger.info('tasks.reclaimed', { count: result.rowCount, threshold_minutes: STUCK_TASK_TIMEOUT_MINUTES });
   }
   // Phase 7: abandoned pending tasks (wizard closed before the agent claimed
   // them) are cancelled and their temporary credentials are wiped.
@@ -179,7 +194,7 @@ async function reclaimStuckTasks() {
     [MAX_TASK_AGE_MINUTES],
   );
   if (abandoned.rowCount > 0) {
-    log(`cancelled ${abandoned.rowCount} abandoned pending task(s) (> ${MAX_TASK_AGE_MINUTES}min) and cleared credentials`);
+    logger.info('tasks.abandoned_cancelled', { count: abandoned.rowCount, max_age_minutes: MAX_TASK_AGE_MINUTES });
   }
   return result.rowCount;
 }
@@ -288,17 +303,17 @@ async function registerMediaPath(cameraId, rtspUrl) {
       const s = await getPathStatus(cameraId);
       state = s && (s.ready !== undefined) ? (s.ready ? 'ready' : 'registered (starts on first view)') : null;
     } catch (e) { /* runtime status not critical */ }
-    log(`path ${cameraId} registered in MediaMTX${state ? ` [${state}]` : ''}`);
+    logger.info('mediamtx.path_registered', { camera_id: cameraId, state: state || null });
   } catch (err) {
     // Not fatal: camera-sync-worker re-registers the path within 60s.
-    log(`MediaMTX path registration deferred (worker will retry): ${err.message}`);
+    logger.warn('mediamtx.path_deferred', { camera_id: cameraId, error: err.message });
   }
 }
 
 async function runScan(task) {
   const subnet = detectSubnet();
   if (!subnet) throw new Error('Cannot detect local subnet (no private IPv4 interface on this node)');
-  log(`scanning subnet ${subnet}`);
+  logTask('scan.start', task, { subnet });
   const found = await scanSubnet(subnet);
   const cameras = (found || []).map((c) => ({
     ip: c.ip || c.host || null,
@@ -307,7 +322,7 @@ async function runScan(task) {
     model: c.model || 'Unknown',
     rtsp_urls: Array.isArray(c.rtsp_urls) ? c.rtsp_urls.slice(0, 3) : [],
   }));
-  log(`scan complete: ${cameras.length} camera(s) found`);
+  logTask('scan.complete', task, { cameras: cameras.length });
   await setTaskStatus(task.id, 'done', { result: JSON.stringify({ subnet, cameras }) });
 }
 
@@ -326,7 +341,7 @@ async function runOnvif(task) {
   const ip = task.ip;
   if (!ip) throw new Error('Camera IP is required for ONVIF mode');
   const port = task.onvif_port || 80;
-  log(`ONVIF discovery ${ip}:${port}`);
+  logTask('onvif.discover', task, { ip, port });
   const creds = getTaskCredentials(task);
   const cam = await discoverCamera(ip, port, creds.username, creds.password);
   if (!cam || !Array.isArray(cam.rtsp_urls) || cam.rtsp_urls.length === 0) {
@@ -348,7 +363,7 @@ async function runOnvif(task) {
       model: cam.model || 'Unknown',
     }),
   });
-  log(`camera ${cameraId} registered`);
+  logTask('task.done', task, { camera_id: cameraId });
 }
 
 async function runManual(task) {
@@ -365,7 +380,7 @@ async function runManual(task) {
     camera_id: cameraId,
     result: JSON.stringify({ camera_id: cameraId, rtsp_url: stripCredentialsFromUrl(task.rtsp_url) }),
   });
-  log(`camera ${cameraId} registered (manual)`);
+  logTask('task.done', task, { camera_id: cameraId });
 }
 
 // ─── V3 task modes (Camera Setup Wizard V3) ─────────────────────────────────
@@ -386,7 +401,7 @@ async function runProbe(task) {
   const ip = task.ip;
   if (!ip) throw new Error('Camera IP is required for probe mode');
   const port = task.onvif_port || 80;
-  log(`probing streams for ${ip}:${port}`);
+  logTask('probe.start', task, { ip, port });
   const creds = getTaskCredentials(task);
 
   let manufacturer = 'Unknown';
@@ -425,7 +440,7 @@ async function runProbe(task) {
       });
     }
   } catch (err) {
-    log(`ONVIF probe failed for ${ip} (${err.message}); trying common RTSP paths`);
+    logger.warn('probe.onvif_failed_fallback', { task_id: task.id, ip, error: err.message });
   }
 
   // 2) Fallback for cameras WITHOUT ONVIF — well-known vendor RTSP paths,
@@ -452,7 +467,7 @@ async function runProbe(task) {
     need_credentials: needCredentials,
   };
   await setTaskStatus(task.id, 'done', { result: JSON.stringify(result) });
-  log(`probe done: ${streams.length} stream(s) for ${ip} (onvif=${onvif_supported})`);
+  logTask('probe.done', task, { streams: streams.length, onvif_supported });
 }
 
 /**
@@ -474,7 +489,7 @@ async function runPreview(task) {
     camera_id: cameraId,
     result: JSON.stringify({ camera_id: cameraId, rtsp_url: stripCredentialsFromUrl(task.rtsp_url), rtsp_ok: true }),
   });
-  log(`preview camera ${cameraId} registered`);
+  logTask('task.done', task, { camera_id: cameraId });
 }
 
 /**
@@ -496,7 +511,7 @@ async function runCleanup(task) {
   await setTaskStatus(task.id, 'done', {
     result: JSON.stringify({ removed, camera_id: task.camera_id }),
   });
-  log(`cleanup camera ${task.camera_id}: ${removed ? 'removed' : 'not found on this node'}`);
+  logTask('cleanup.done', task, { removed });
 }
 
 /**
@@ -513,7 +528,7 @@ async function runStartTunnel(task) {
   if (!args) {
     throw new Error('Tunnel is not configured on this node. Set CLOUDFLARE_TUNNEL_NAME (or CLOUDFLARE_TUNNEL_CONFIG) in the media app .env, then press Start Tunnel again.');
   }
-  log(`launching cloudflared: cloudflared ${args.join(' ')}`);
+  logger.info('tunnel.launch', { task_id: task.id, command: 'cloudflared ' + args.join(' ') });
   const child = spawn('cloudflared', args, { detached: true, stdio: 'ignore', windowsHide: true });
   child.unref();
   // Give the tunnel a few seconds to establish, then re-check.
@@ -529,7 +544,7 @@ async function runStartTunnel(task) {
     detail: tunnel.reason ? { reason: tunnel.reason } : { status: tunnel.status },
   };
   await setTaskStatus(task.id, 'done', { result: JSON.stringify(result) });
-  log(`tunnel start requested; online=${tunnel.ok}`);
+  logTask('tunnel.start_requested', task, { online: tunnel.ok });
 }
 
 async function processTask(task) {
@@ -537,7 +552,7 @@ async function processTask(task) {
   // and wipe any temporary credentials — a cancelled task never registers a camera.
   const fresh = await pool.query('SELECT status FROM camera_setup_tasks WHERE id = $1', [task.id]);
   if (fresh.rows[0] && fresh.rows[0].status === 'cancelled') {
-    log(`task ${task.id} cancelled before execution — skipping and clearing credentials`);
+    logTask('task.cancelled_abort', task);
     await pool.query(
       `UPDATE camera_setup_tasks
        SET username = NULL, password = NULL, encrypted_credentials = NULL, updated_at = now()
@@ -546,7 +561,7 @@ async function processTask(task) {
     );
     return;
   }
-  log(`claiming task ${task.id} (mode=${task.mode}, ip=${task.ip || '-'})`);
+  logTask('task.claimed', task);
   try {
     if (task.mode === 'scan') return await runScan(task);
     if (task.mode === 'onvif') return await runOnvif(task);
@@ -557,11 +572,11 @@ async function processTask(task) {
     if (task.mode === 'start_tunnel') return await runStartTunnel(task);
     throw new Error(`Unknown mode: ${task.mode}`);
   } catch (err) {
-    log(`task ${task.id} failed: ${err.message}`);
+    logTask('task.failed', task, { error: err.message });
     try {
       await setTaskStatus(task.id, 'failed', { error: err.message });
     } catch (statusErr) {
-      log('failed to write failure status:', statusErr.message);
+      logger.error('task.status_write_failed', { error: statusErr.message });
     }
   }
 }
@@ -574,11 +589,11 @@ async function healthTick() {
   if (now - lastHealthAt < HEARTBEAT_LOOP_MS) return;
   lastHealthAt = now;
   const h = await reportNodeHealth(pool, MEDIA_NODE_ID);
-  if (h) log(`health: mediamtx=${h.mediamtx_online} tunnel=${h.tunnel_online}`);
+  if (h) logger.info('health.report', { mediamtx: h.mediamtx_online, tunnel: h.tunnel_online });
 }
 
 async function main() {
-  log(`starting. poll every ${POLL_INTERVAL_MS}ms. MEDIA_NODE_ID: ${MEDIA_NODE_ID || '(unassigned)'}`);
+  logger.info('worker.start', { poll_interval_ms: POLL_INTERVAL_MS, media_node_id: MEDIA_NODE_ID || null });
   let busy = false;
 
   const tick = async () => {
@@ -590,7 +605,7 @@ async function main() {
       if (task) await processTask(task);
       await healthTick();
     } catch (err) {
-      log('loop error:', err.message);
+      logger.error('worker.loop_error', { error: err.message });
     } finally {
       busy = false;
     }
@@ -607,7 +622,7 @@ main().catch((err) => {
 });
 
 process.on('SIGTERM', async () => {
-  console.log('[camera-setup] SIGTERM received, shutting down');
+  logger.info('worker.sigterm');
   await pool.end();
   process.exit(0);
 });

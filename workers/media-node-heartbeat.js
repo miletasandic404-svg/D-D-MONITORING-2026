@@ -49,6 +49,8 @@
 const https = require('https');
 const http = require('http');
 const { URL } = require('url');
+const L = require('../lib/_logger');
+const logger = L.makeLogger('heartbeat');
 
 const API_BASE_URL = process.env.API_BASE_URL;
 const MEDIA_NODE_ID = process.env.MEDIA_NODE_ID;
@@ -56,7 +58,7 @@ const HEARTBEAT_SECRET = process.env.MEDIA_NODE_HEARTBEAT_SECRET;
 const INTERVAL_SECONDS = parseInt(process.env.HEARTBEAT_INTERVAL_SECONDS || '30', 10);
 
 if (!API_BASE_URL || !MEDIA_NODE_ID || !HEARTBEAT_SECRET) {
-  console.error('[heartbeat] API_BASE_URL, MEDIA_NODE_ID, and MEDIA_NODE_HEARTBEAT_SECRET are all required. Exiting.');
+  logger.error('worker.config_missing');
   process.exit(1);
 }
 
@@ -74,22 +76,22 @@ function sendHeartbeat() {
     res.on('data', (chunk) => { data += chunk; });
     res.on('end', () => {
       if (res.statusCode === 200) {
-        console.log(`[heartbeat] ok (${new Date().toISOString()})`);
+        logger.info('heartbeat.ok', { at: new Date().toISOString() });
       } else {
-        console.error(`[heartbeat] rejected: HTTP ${res.statusCode} ${data}`);
+        logger.error('heartbeat.rejected', { http_status: res.statusCode, body: data });
       }
     });
   });
-  req.on('error', (err) => console.error('[heartbeat] request failed:', err.message));
+  req.on('error', (err) => logger.error('heartbeat.request_failed', { error: err.message }));
   req.write(body);
   req.end();
 }
 
-console.log(`[heartbeat] starting, node ${MEDIA_NODE_ID}, every ${INTERVAL_SECONDS}s -> ${API_BASE_URL}`);
+logger.info('worker.start', { node_id: MEDIA_NODE_ID, interval_seconds: INTERVAL_SECONDS, api_base_url: API_BASE_URL });
 sendHeartbeat();
 setInterval(sendHeartbeat, INTERVAL_SECONDS * 1000);
 
 process.on('SIGTERM', () => {
-  console.log('[heartbeat] received SIGTERM, shutting down');
+  logger.info('worker.sigterm');
   process.exit(0);
 });
