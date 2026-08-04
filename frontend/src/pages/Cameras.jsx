@@ -196,6 +196,9 @@ function AddCameraForm({ onSuccess, onCancel }) {
     if (/unreachable/i.test(msg)) {
       return '❌ Camera not reachable on the network — check the IP address and that it is powered on.';
     }
+    if (/already exists/i.test(msg)) {
+      return '⚠️ A camera with this RTSP URL already exists in your organization.';
+    }
     return msg;
   };
 

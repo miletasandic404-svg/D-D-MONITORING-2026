@@ -167,6 +167,20 @@ async function reclaimStuckTasks() {
   if (result.rowCount > 0) {
     log(`reclaimed ${result.rowCount} stuck task(s) (working > ${STUCK_TASK_TIMEOUT_MINUTES}min)`);
   }
+  // Phase 7: abandoned pending tasks (wizard closed before the agent claimed
+  // them) are cancelled and their temporary credentials are wiped.
+  const abandoned = await pool.query(
+    `UPDATE camera_setup_tasks
+     SET status = 'cancelled', updated_at = now(),
+         username = NULL, password = NULL, encrypted_credentials = NULL
+     WHERE status = 'pending'
+       AND created_at < now() - ($1 * interval '1 minute')
+     RETURNING id`,
+    [MAX_TASK_AGE_MINUTES],
+  );
+  if (abandoned.rowCount > 0) {
+    log(`cancelled ${abandoned.rowCount} abandoned pending task(s) (> ${MAX_TASK_AGE_MINUTES}min) and cleared credentials`);
+  }
   return result.rowCount;
 }
 
@@ -242,17 +256,27 @@ async function insertCamera(task, rtspUrl, manufacturer, model) {
   const encPassword = password ? encrypt(password) : null;
 
   // Use queryAsTaskOrg so FORCE RLS on cameras/sites passes tenant_isolation
-  const result = await queryAsTaskOrg(task,
-    `INSERT INTO cameras (id, name, rtsp_url, enabled, organization_id, site_id, media_node_id,
-         rtsp_username, rtsp_password_encrypted)
-     VALUES ($1, $2, $3, true, $4,
-       COALESCE($5, (SELECT id FROM sites WHERE organization_id = $4 ORDER BY created_at ASC LIMIT 1)),
-       $6, $7, $8)
-     ON CONFLICT (id) DO NOTHING
-     RETURNING id`,
-    [cameraId, name, cleanUrl, task.organization_id, task.site_id || null, MEDIA_NODE_ID,
-     username || null, encPassword],
-  );
+  let result;
+  try {
+    result = await queryAsTaskOrg(task,
+      `INSERT INTO cameras (id, name, rtsp_url, enabled, organization_id, site_id, media_node_id,
+           rtsp_username, rtsp_password_encrypted)
+       VALUES ($1, $2, $3, true, $4,
+         COALESCE($5, (SELECT id FROM sites WHERE organization_id = $4 ORDER BY created_at ASC LIMIT 1)),
+         $6, $7, $8)
+       ON CONFLICT (id) DO NOTHING
+       RETURNING id`,
+      [cameraId, name, cleanUrl, task.organization_id, task.site_id || null, MEDIA_NODE_ID,
+       username || null, encPassword],
+    );
+  } catch (err) {
+    // Phase 7: unique index uq_cameras_org_rtsp — the same RTSP source is
+    // already registered in this organization.
+    if (err.code === '23505') {
+      throw new Error('A camera with this RTSP URL already exists in this organization');
+    }
+    throw err;
+  }
   return result.rows[0] ? result.rows[0].id : cameraId;
 }
 
@@ -509,6 +533,19 @@ async function runStartTunnel(task) {
 }
 
 async function processTask(task) {
+  // Phase 7: if the user cancelled this task before we executed it, abort
+  // and wipe any temporary credentials — a cancelled task never registers a camera.
+  const fresh = await pool.query('SELECT status FROM camera_setup_tasks WHERE id = $1', [task.id]);
+  if (fresh.rows[0] && fresh.rows[0].status === 'cancelled') {
+    log(`task ${task.id} cancelled before execution — skipping and clearing credentials`);
+    await pool.query(
+      `UPDATE camera_setup_tasks
+       SET username = NULL, password = NULL, encrypted_credentials = NULL, updated_at = now()
+       WHERE id = $1`,
+      [task.id],
+    );
+    return;
+  }
   log(`claiming task ${task.id} (mode=${task.mode}, ip=${task.ip || '-'})`);
   try {
     if (task.mode === 'scan') return await runScan(task);

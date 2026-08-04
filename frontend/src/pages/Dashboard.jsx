@@ -243,6 +243,11 @@ export default function Dashboard() {
     startWizardScan();
   };
   const closeWizard = (skipCleanup = false) => {
+    // Phase 7: cancel any in-flight setup task (scan/probe/preview) so the
+    // agent stops processing it and wipes temporary credentials.
+    if (wizardTaskId && !skipCleanup) {
+      try { api.post('/camera-setup/cancel', { task_id: wizardTaskId }); } catch { /* best effort */ }
+    }
     const cameraId = wizardPreview?.cameraId;
     if (cameraId && !skipCleanup) {
       try { api.post('/camera-setup', { mode: 'cleanup', camera_id: cameraId }); } catch { /* best effort */ }

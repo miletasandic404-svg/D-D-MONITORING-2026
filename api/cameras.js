@@ -104,6 +104,16 @@ module.exports = async (req, res) => {
         }
       }
 
+      // Phase 7: reject duplicate registrations (organization_id + rtsp_url)
+      if (cleanRtspUrl) {
+        const dup = await db.queryAsOrg(auth.organizationId,
+          'SELECT 1 FROM cameras WHERE organization_id = $1 AND rtsp_url = $2 AND rtsp_url IS NOT NULL LIMIT 1',
+          [auth.organizationId, cleanRtspUrl]);
+        if (dup.rows.length > 0) {
+          return sendError(res, 409, 'A camera with this RTSP URL already exists in your organization');
+        }
+      }
+
       const inserted = await db.queryAsOrg(
         auth.organizationId,
         `INSERT INTO camera_setup_tasks
@@ -131,6 +141,40 @@ module.exports = async (req, res) => {
       });
     } catch (err) {
       console.error('POST /api/cameras?path=setup-create error:', err.message);
+      return sendError(res, 500, err.message);
+    }
+  }
+
+  // ── POST /api/camera-setup/cancel — cancel an in-flight setup task ────────
+  // Phase 7: the wizard cancels scan/probe/preview tasks when the user closes
+  // it. Cancelled tasks are never claimed by the agent (only 'pending' is
+  // claimed) and the agent aborts a task that turns 'cancelled' mid-flight.
+  // Temporary credentials are wiped here so no orphan credentials remain.
+  if (req.query.path === 'setup-cancel') {
+    if (req.method !== 'POST') return sendError(res, 405, 'Method Not Allowed');
+    const auth = await requireAuth(req, res);
+    if (!auth) return;
+    const taskId = req.body?.task_id || req.query.id;
+    if (!taskId) return sendError(res, 400, 'task_id is required');
+    try {
+      const result = await db.queryAsOrg(auth.organizationId,
+        `UPDATE camera_setup_tasks
+         SET status = 'cancelled', updated_at = now(),
+             username = NULL, password = NULL, encrypted_credentials = NULL
+         WHERE id = $1 AND organization_id = $2
+           AND status IN ('pending', 'working')
+         RETURNING id, status`,
+        [taskId, auth.organizationId]);
+      if (result.rows.length === 0) {
+        const existing = await db.queryAsOrg(auth.organizationId,
+          'SELECT status FROM camera_setup_tasks WHERE id = $1 AND organization_id = $2',
+          [taskId, auth.organizationId]);
+        if (existing.rows.length === 0) return sendError(res, 404, 'Setup task not found');
+        return sendSuccess(res, { task: existing.rows[0], already_cancelled: true });
+      }
+      return sendSuccess(res, { task: result.rows[0] });
+    } catch (err) {
+      console.error('POST /api/cameras?path=setup-cancel error:', err.message);
       return sendError(res, 500, err.message);
     }
   }
@@ -373,6 +417,16 @@ module.exports = async (req, res) => {
         cleanUrl = extracted.url;
         rtspUsername = extracted.username || null;
         rtspPasswordEnc = extracted.password ? encryptCreds(extracted.password) : null;
+      }
+
+      // Phase 7: reject duplicate registrations (organization_id + rtsp_url)
+      if (cleanUrl) {
+        const dup = await db.queryAsOrg(auth.organizationId,
+          'SELECT 1 FROM cameras WHERE organization_id = $1 AND rtsp_url = $2 AND id <> $3 LIMIT 1',
+          [auth.organizationId, cleanUrl, id]);
+        if (dup.rows.length > 0) {
+          return sendError(res, 409, 'A camera with this RTSP URL already exists in your organization');
+        }
       }
 
       const existing = await db.queryAsOrg(auth.organizationId, "SELECT organization_id, media_node_id, rtsp_url FROM cameras WHERE id = $1", [id]);

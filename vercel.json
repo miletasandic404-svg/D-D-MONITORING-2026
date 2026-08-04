@@ -47,6 +47,7 @@
     { "source": "/api/camera-setup", "destination": "/api/cameras?path=setup-create" },
     { "source": "/api/camera-setup/tasks", "destination": "/api/cameras?path=setup-list" },
     { "source": "/api/camera-setup/node", "destination": "/api/cameras?path=setup-node" },
+    { "source": "/api/camera-setup/cancel", "destination": "/api/cameras?path=setup-cancel" },
     { "source": "/api/camera-setup/:id", "destination": "/api/cameras?path=setup-get&id=:id" },
     { "source": "/api/cameras/discover", "destination": "/api/cameras?path=discover" },
     { "source": "/api/cameras/auto-register", "destination": "/api/cameras?path=auto-register" },
