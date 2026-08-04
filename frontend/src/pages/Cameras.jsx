@@ -67,7 +67,7 @@ function AddCameraForm({ onSuccess, onCancel }) {
   const [registering, setRegistering] = useState(false);
 
   // Manual form state
-  const [newCamera, setNewCamera] = useState({ name: '', stream_url: '', location: '', lat: '', lng: '' });
+  const [newCamera, setNewCamera] = useState({ name: '', stream_url: '', username: '', password: '', location: '', lat: '', lng: '' });
   const [saving, setSaving] = useState(false);
 
   // ── Subnet scan handler (via task queue → local media node) ────────────────
@@ -116,7 +116,7 @@ function AddCameraForm({ onSuccess, onCancel }) {
         setAddedIps((prev) => new Set([...prev, camera.ip]));
         onSuccess();
       } else {
-        setError(`Failed to add ${camera.ip}: ${result.error || 'Registration failed'}`);
+        setError(`Failed to add ${camera.ip}: ${friendlySetupError(result)}`);
       }
     } catch (err) {
       setError(
@@ -150,7 +150,7 @@ function AddCameraForm({ onSuccess, onCancel }) {
           rtsp_reachable: parsed.rtsp_reachable !== false,
         });
       } else {
-        setError(result.error || 'Discovery failed. Check the camera IP and credentials.');
+        setError(friendlySetupError(result));
       }
     } catch (err) {
       setError(err.response?.data?.error || err.message || 'Discovery failed. Ensure your media node is online.');
@@ -187,22 +187,63 @@ function AddCameraForm({ onSuccess, onCancel }) {
     return { status: 'failed', error: 'Timed out waiting for the media node to respond. Ensure it is online.' };
   };
 
+  // Map agent task failures to clear, human-readable messages.
+  const friendlySetupError = (task) => {
+    const msg = task?.error || 'Setup failed. Ensure your media node is online.';
+    if (/authentication failed|wrong username or password/i.test(msg)) {
+      return '❌ Authentication failed — wrong camera username or password.';
+    }
+    if (/unreachable/i.test(msg)) {
+      return '❌ Camera not reachable on the network — check the IP address and that it is powered on.';
+    }
+    return msg;
+  };
+
+  // Manual RTSP add — goes through the LOCAL media node agent (preview task)
+  // so the camera is verified with a real RTSP handshake (reachability +
+  // authentication) BEFORE it is saved. Wrong credentials or an unreachable
+  // stream fail with a clear error and nothing is saved.
   const handleManualAdd = async () => {
     if (!newCamera.name) { setError('Camera name is required'); return; }
+    if (!newCamera.stream_url) { setError('RTSP stream URL is required (rtsp://...)'); return; }
     setError('');
     setSaving(true);
     try {
-      const res = await api.post('/cameras', {
-        id: `CAM-${Date.now().toString(36).toUpperCase()}`,
-        name: newCamera.name,
-        stream_url: newCamera.stream_url || null,
-        location: newCamera.location || null,
-        lat: newCamera.lat ? parseFloat(newCamera.lat) : null,
-        lng: newCamera.lng ? parseFloat(newCamera.lng) : null,
+      const createRes = await api.post('/cameras?path=setup-create', {
+        mode: 'preview',
+        rtsp_url: newCamera.stream_url.trim(),
+        camera_name: newCamera.name.trim(),
+        username: newCamera.username || undefined,
+        password: newCamera.password || undefined,
       });
-      onSuccess(res.data);
+      const taskId = createRes.data.task_id;
+      const result = await pollTask(taskId, 60000);
+      if (result.status === 'done') {
+        const parsed = result.result && typeof result.result === 'string'
+          ? JSON.parse(result.result)
+          : result.result;
+        const cameraId = parsed?.camera_id;
+        // The preview task registers name + stream. Preserve location/lat/lng
+        // via the upsert endpoint (encrypted credentials are kept because the
+        // update URL carries none).
+        if (cameraId && (newCamera.location || newCamera.lat || newCamera.lng)) {
+          try {
+            await api.post('/cameras', {
+              id: cameraId,
+              name: newCamera.name,
+              stream_url: newCamera.stream_url,
+              location: newCamera.location || null,
+              lat: newCamera.lat ? parseFloat(newCamera.lat) : null,
+              lng: newCamera.lng ? parseFloat(newCamera.lng) : null,
+            });
+          } catch { /* location update is best-effort */ }
+        }
+        onSuccess({ camera_id: cameraId });
+      } else {
+        setError(friendlySetupError(result));
+      }
     } catch (err) {
-      setError(err.response?.data?.error || 'Failed to add camera. Please try again.');
+      setError(err.response?.data?.error || err.message || 'Failed to add camera. Please try again.');
     } finally {
       setSaving(false);
     }
@@ -439,17 +480,31 @@ function AddCameraForm({ onSuccess, onCancel }) {
             />
             <input
               type="text"
-              placeholder="Location (e.g., Entrance, Parking)"
-              value={newCamera.location}
-              onChange={(e) => setNewCamera({ ...newCamera, location: e.target.value })}
+              placeholder="RTSP Stream URL * (rtsp://ip/...)"
+              value={newCamera.stream_url}
+              onChange={(e) => setNewCamera({ ...newCamera, stream_url: e.target.value })}
               style={inputStyle}
             />
             <input
               type="text"
-              placeholder="Stream URL (rtsp://...)"
-              value={newCamera.stream_url}
-              onChange={(e) => setNewCamera({ ...newCamera, stream_url: e.target.value })}
-              style={{ ...inputStyle, gridColumn: '1 / -1' }}
+              placeholder="Username"
+              value={newCamera.username}
+              onChange={(e) => setNewCamera({ ...newCamera, username: e.target.value })}
+              style={inputStyle}
+            />
+            <input
+              type="password"
+              placeholder="Password"
+              value={newCamera.password}
+              onChange={(e) => setNewCamera({ ...newCamera, password: e.target.value })}
+              style={inputStyle}
+            />
+            <input
+              type="text"
+              placeholder="Location (e.g., Entrance, Parking)"
+              value={newCamera.location}
+              onChange={(e) => setNewCamera({ ...newCamera, location: e.target.value })}
+              style={inputStyle}
             />
             <input
               type="number"
@@ -463,12 +518,15 @@ function AddCameraForm({ onSuccess, onCancel }) {
               placeholder="Longitude"
               value={newCamera.lng}
               onChange={(e) => setNewCamera({ ...newCamera, lng: e.target.value })}
-              style={inputStyle}
+              style={{ ...inputStyle, gridColumn: '1 / -1' }}
             />
           </div>
-          <div style={{ display: 'flex', gap: '1rem', marginTop: '1.5rem' }}>
+          <p style={{ color: '#8ab0c9', fontSize: '.8rem', marginTop: '.75rem' }}>
+            The camera is verified with a real RTSP handshake (reachability + authentication) before it is saved. Wrong credentials are rejected with a clear error.
+          </p>
+          <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
             <button className="add-cam-btn" onClick={handleManualAdd} disabled={saving}>
-              {saving ? 'Adding...' : 'Add Camera'}
+              {saving ? 'Verifying...' : '🔌 Verify & Add Camera'}
             </button>
           </div>
         </>

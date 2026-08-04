@@ -49,10 +49,11 @@
 })();
 
 const { Pool } = require('pg');
-const net = require('net');
 const os = require('os');
 const crypto = require('crypto');
 const { discoverCamera, scanSubnet } = require('../lib/_onvif_client');
+const { probeRtspUrl, embedCredentials } = require('../lib/_rtsp_probe');
+const { rtspCommonConnector } = require('../lib/_camera_connectors');
 const { addOrUpdateCameraPath, deleteCameraPath, getPathStatus } = require('../lib/_mediamtx_client');
 const { reportNodeHealth, checkTunnel, HEARTBEAT_LOOP_MS } = require('../lib/_node_health');
 const { encrypt, decrypt, extractCredentialsFromUrl, stripCredentialsFromUrl } = require('../lib/_crypto');
@@ -101,30 +102,27 @@ function detectSubnet() {
   return null;
 }
 
-function probeTcp(host, port, timeoutMs = 4000) {
-  return new Promise((resolve) => {
-    const socket = new net.Socket();
-    const timer = setTimeout(() => { socket.destroy(); resolve(false); }, timeoutMs);
-    socket.once('connect', () => { clearTimeout(timer); socket.destroy(); resolve(true); });
-    socket.once('error', () => { clearTimeout(timer); socket.destroy(); resolve(false); });
-    socket.connect(port, host);
+/**
+ * Real RTSP verification (OPTIONS + DESCRIBE handshake) before a camera is
+ * registered. Wrong credentials or an unavailable stream fail with a clear
+ * error — a camera that cannot authenticate is NEVER saved.
+ */
+async function verifyRtsp(rtspUrl, creds, what) {
+  const r = await probeRtspUrl(rtspUrl, {
+    username: (creds && creds.username) || undefined,
+    password: (creds && creds.password) || undefined,
+    timeoutMs: 5000,
   });
-}
-
-function parseRtspTarget(rtspUrl) {
-  try {
-    const u = new URL(rtspUrl);
-    return { host: u.hostname, port: u.port ? parseInt(u.port, 10) : 554 };
-  } catch (err) {
-    return null;
+  if (!r.reachable) {
+    throw new Error(`${what} — RTSP unreachable at ${r.host || '?'}:${r.port || 554}${r.error ? ` (${r.error})` : ''}`);
   }
-}
-
-async function testRtsp(rtspUrl) {
-  const t = parseRtspTarget(rtspUrl);
-  if (!t || !t.host) return { ok: false, error: 'invalid RTSP URL' };
-  const ok = await probeTcp(t.host, t.port);
-  return { ok, host: t.host, port: t.port };
+  if (r.auth_required) {
+    throw new Error(`${what} — RTSP authentication failed (HTTP ${r.status}) — wrong username or password`);
+  }
+  if (!r.stream_available) {
+    throw new Error(`${what} — RTSP stream not available at this path (HTTP ${r.status || 'no response'})`);
+  }
+  return r;
 }
 
 function makeCameraId() {
@@ -280,6 +278,7 @@ async function runScan(task) {
   const found = await scanSubnet(subnet);
   const cameras = (found || []).map((c) => ({
     ip: c.ip || c.host || null,
+    onvif_port: c.onvif_port || 80,
     manufacturer: c.manufacturer || 'Unknown',
     model: c.model || 'Unknown',
     rtsp_urls: Array.isArray(c.rtsp_urls) ? c.rtsp_urls.slice(0, 3) : [],
@@ -309,11 +308,8 @@ async function runOnvif(task) {
   if (!cam || !Array.isArray(cam.rtsp_urls) || cam.rtsp_urls.length === 0) {
     throw new Error(`No RTSP streams found on ${ip} via ONVIF (check credentials and ONVIF port)`);
   }
-  const rtspUrl = cam.rtsp_urls[0];
-  const rtsp = await testRtsp(rtspUrl);
-  if (!rtsp.ok) {
-    throw new Error(`RTSP unreachable at ${rtsp.host || ip}:${rtsp.port || 554} on ${ip} — check camera credentials/stream`);
-  }
+  const rtspUrl = embedCredentials(cam.rtsp_urls[0], creds.username, creds.password);
+  await verifyRtsp(rtspUrl, creds, `Camera ${ip}`);
   if (!await verifyTaskOwnership(task.id)) {
     throw new Error('Task was reclaimed by another node — aborting to prevent duplicate registration');
   }
@@ -333,15 +329,14 @@ async function runOnvif(task) {
 
 async function runManual(task) {
   if (!task.rtsp_url) throw new Error('rtsp_url is required for manual mode');
-  const rtsp = await testRtsp(task.rtsp_url);
-  if (!rtsp.ok) {
-    throw new Error(`RTSP unreachable at ${rtsp.host}:${rtsp.port}`);
-  }
+  const creds = getTaskCredentials(task);
+  const rtspUrl = embedCredentials(task.rtsp_url, creds.username, creds.password);
+  await verifyRtsp(rtspUrl, creds, 'Camera');
   if (!await verifyTaskOwnership(task.id)) {
     throw new Error('Task was reclaimed by another node — aborting to prevent duplicate registration');
   }
-  const cameraId = await insertCamera(task, task.rtsp_url, '', '');
-  await registerMediaPath(cameraId, task.rtsp_url);
+  const cameraId = await insertCamera(task, rtspUrl, '', '');
+  await registerMediaPath(cameraId, rtspUrl);
   await setTaskStatus(task.id, 'done', {
     camera_id: cameraId,
     result: JSON.stringify({ camera_id: cameraId, rtsp_url: stripCredentialsFromUrl(task.rtsp_url) }),
@@ -369,28 +364,71 @@ async function runProbe(task) {
   const port = task.onvif_port || 80;
   log(`probing streams for ${ip}:${port}`);
   const creds = getTaskCredentials(task);
-  const cam = await discoverCamera(ip, port, creds.username, creds.password);
-  const streams = (cam.rtsp_urls || []).map((url, i) => ({
-    url: stripCredentialsFromUrl(url),
-    label: streamLabel(url, i),
-  }));
-  const withReach = [];
-  for (const s of streams) {
-    const t = await testRtsp(s.url);
-    withReach.push({ ...s, reachable: t.ok, host: t.host, port: t.port });
+
+  let manufacturer = 'Unknown';
+  let model = 'Unknown';
+  let firmware_version = null;
+  let onvif_supported = false;
+  let streams = [];
+
+  // 1) ONVIF first — full discovery (manufacturer/model/streams). Each stream
+  //    is then verified with a real RTSP handshake (auth + availability).
+  try {
+    const cam = await discoverCamera(ip, port, creds.username, creds.password);
+    onvif_supported = true;
+    manufacturer = cam.manufacturer || 'Unknown';
+    model = cam.model || 'Unknown';
+    firmware_version = cam.firmware_version || null;
+    const candidates = (cam.rtsp_urls || []).map((url, i) => ({
+      url: stripCredentialsFromUrl(url),
+      label: streamLabel(url, i),
+    }));
+    for (const s of candidates) {
+      const r = await probeRtspUrl(s.url, {
+        username: creds.username || undefined,
+        password: creds.password || undefined,
+        timeoutMs: 2500,
+      });
+      streams.push({
+        ...s,
+        reachable: r.reachable,
+        authenticated: r.stream_available,
+        stream_available: r.stream_available,
+        status: r.status,
+        error: r.error || null,
+        host: r.host,
+        port: r.port,
+      });
+    }
+  } catch (err) {
+    log(`ONVIF probe failed for ${ip} (${err.message}); trying common RTSP paths`);
   }
+
+  // 2) Fallback for cameras WITHOUT ONVIF — well-known vendor RTSP paths,
+  //    each verified with a real handshake. ONVIF stays primary.
+  if (streams.length === 0) {
+    const fallback = await rtspCommonConnector(ip, {
+      username: creds.username,
+      password: creds.password,
+    });
+    streams = fallback.streams;
+  }
+
+  const needCredentials = streams.length === 0 ||
+    streams.every((s) => s.status === 401 || s.status === 403);
   const result = {
     ip,
     onvif_port: port,
-    manufacturer: cam.manufacturer || 'Unknown',
-    model: cam.model || 'Unknown',
-    firmware_version: cam.firmware_version || null,
-    rtsp_reachable: cam.rtsp_reachable,
-    streams: withReach,
-    need_credentials: withReach.length === 0,
+    manufacturer,
+    model,
+    firmware_version,
+    onvif_supported,
+    rtsp_reachable: streams.some((s) => s.reachable),
+    streams,
+    need_credentials: needCredentials,
   };
   await setTaskStatus(task.id, 'done', { result: JSON.stringify(result) });
-  log(`probe done: ${withReach.length} stream(s) for ${ip}`);
+  log(`probe done: ${streams.length} stream(s) for ${ip} (onvif=${onvif_supported})`);
 }
 
 /**
@@ -400,15 +438,14 @@ async function runProbe(task) {
  */
 async function runPreview(task) {
   if (!task.rtsp_url) throw new Error('rtsp_url is required for preview mode');
-  const rtsp = await testRtsp(task.rtsp_url);
-  if (!rtsp.ok) {
-    throw new Error(`RTSP unreachable at ${rtsp.host}:${rtsp.port} — check camera credentials and stream path`);
-  }
+  const creds = getTaskCredentials(task);
+  const rtspUrl = embedCredentials(task.rtsp_url, creds.username, creds.password);
+  await verifyRtsp(rtspUrl, creds, 'Camera');
   if (!await verifyTaskOwnership(task.id)) {
     throw new Error('Task was reclaimed by another node — aborting to prevent duplicate registration');
   }
-  const cameraId = await insertCamera(task, task.rtsp_url, '', '');
-  await registerMediaPath(cameraId, task.rtsp_url);
+  const cameraId = await insertCamera(task, rtspUrl, '', '');
+  await registerMediaPath(cameraId, rtspUrl);
   await setTaskStatus(task.id, 'done', {
     camera_id: cameraId,
     result: JSON.stringify({ camera_id: cameraId, rtsp_url: stripCredentialsFromUrl(task.rtsp_url), rtsp_ok: true }),

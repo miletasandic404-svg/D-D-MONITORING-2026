@@ -398,7 +398,9 @@ module.exports = async (req, res) => {
            lat=EXCLUDED.lat, lng=EXCLUDED.lng,
            enabled=EXCLUDED.enabled, resolution=EXCLUDED.resolution, fps=EXCLUDED.fps,
            codec=EXCLUDED.codec, updated_at=now(),
-           rtsp_username=EXCLUDED.rtsp_username, rtsp_password_encrypted=EXCLUDED.rtsp_password_encrypted,
+           -- Preserve existing encrypted credentials when the update carries no new ones
+           rtsp_username=COALESCE(EXCLUDED.rtsp_username, cameras.rtsp_username),
+           rtsp_password_encrypted=COALESCE(EXCLUDED.rtsp_password_encrypted, cameras.rtsp_password_encrypted),
            media_node_id = CASE
              WHEN cameras.media_node_id IS NULL THEN EXCLUDED.media_node_id
              ELSE cameras.media_node_id

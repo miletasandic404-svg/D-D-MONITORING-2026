@@ -65,6 +65,10 @@ copy C:\dnd-monitoring-repo\workers\media-node-heartbeat.js      C:\dnd-media\ap
 copy C:\dnd-monitoring-repo\workers\camera-setup-agent.js        C:\dnd-media\app\workers\
 copy C:\dnd-monitoring-repo\lib\_mediamtx_client.js              C:\dnd-media\app\lib\
 copy C:\dnd-monitoring-repo\lib\_onvif_client.js                 C:\dnd-media\app\lib\
+copy C:\dnd-monitoring-repo\lib\_node_health.js                C:\dnd-media\app\lib\
+copy C:\dnd-monitoring-repo\lib\_crypto.js                     C:\dnd-media\app\lib\
+copy C:\dnd-monitoring-repo\lib\_rtsp_probe.js                 C:\dnd-media\app\lib\
+copy C:\dnd-monitoring-repo\lib\_camera_connectors.js          C:\dnd-media\app\lib\
 copy C:\dnd-monitoring-repo\laptop\app\package.json              C:\dnd-media\app\
 copy C:\dnd-monitoring-repo\laptop\mediamtx.yml                  C:\dnd-media\mediamtx\
 copy C:\dnd-monitoring-repo\laptop\start-laptop.bat              C:\dnd-media\

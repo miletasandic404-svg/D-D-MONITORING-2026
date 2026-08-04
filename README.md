@@ -200,3 +200,23 @@ cd frontend && npm run build   # production bundle
 - Wizard LAN steps (scan/probe) need a real camera on the same network —
   they cannot be exercised from CI or Vercel.
 - Public HLS requires a Cloudflare Tunnel (or equivalent) configured on the node.
+
+
+---
+
+## Camera onboarding — real RTSP verification (Phase 6)
+
+- `lib/_rtsp_probe.js` — dependency-free RTSP OPTIONS/DESCRIBE handshake
+  (reachability, HTTP Basic + Digest authentication, stream availability) run
+  on the media node. Wrong credentials fail with HTTP 401 and the camera is
+  **never saved**.
+- `lib/_camera_connectors.js` — connector registry: `onvif` (primary) and
+  `rtsp-common` (fallback for cameras without ONVIF, probing well-known vendor
+  RTSP paths: Hikvision, Dahua, Uniview, Axis, generic).
+- Manual / preview camera registration in `workers/camera-setup-agent.js`
+  verifies the stream with a real handshake before inserting the camera row;
+  credentials are embedded into the RTSP URL only at probe/pull time and
+  stored encrypted at rest (migration 030).
+- Media node copy list: include `lib/_rtsp_probe.js` and
+  `lib/_camera_connectors.js` in `C:\dnd-media\app\lib\` — see
+  `laptop/README.md`.
