@@ -1,0 +1,69 @@
+# MediaMTX config za D&D Monitoring - V2 (dinamicka registracija kamera)
+# Puna referenca: https://github.com/bluenviron/mediamtx/blob/main/mediamtx.yml
+#
+# KLJUCNA RAZLIKA OD V1: `paths:` blok ostaje PRAZAN. Kamere se VISE
+# NE definisu rucno ovde -- dodaje ih dinamicki `camera-sync-worker.js`
+# preko MediaMTX REST API-ja (POST /v3/config/paths/add/{id}), na
+# osnovu `cameras` tabele u Postgres bazi. Videti workers/camera-sync-worker.js
+# i media-server/DEPLOYMENT.md za punu arhitekturu.
+
+logLevel: info
+
+# --- RTSP (kamere pull-uju se preko "source" polja u dinamicki
+#     dodatim putanjama; ova sekcija samo definise da MediaMTX ima
+#     RTSP server ukljucen ako je ikad potreban za publish-side) ---
+rtsp: yes
+rtspAddress: :8554
+
+# --- HLS izlaz koji brauzer konzumira preko hls.js ---
+hls: yes
+hlsAddress: :8888
+hlsAlwaysRemux: yes
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+# Ogranici na stvarni domen dashboard-a u produkciji (ne '*').
+hlsAllowOrigin: 'https://www.dnd-monitoring.com'
+
+# --- WebRTC (nizi latency ako se ikad iskoristi na frontendu; trenutno
+#     konfigurisan ali dashboard ga ne koristi -- vidi DEPLOYMENT.md) ---
+webrtc: yes
+webrtcAddress: :8889
+
+# --- REST API za dinamicko upravljanje putanjama ---
+# KRITICNO: apiAddress mora biti dostupan camera-sync-worker.js
+# procesu (isti kontejner preko localhost, ili Fly.io 6PN privatna
+# mreza ako su odvojene masine) -- NE sme biti javno izlozen kroz
+# fly.toml [[services]] blok (bezbednosni razlog: bez toga bi bilo
+# ko mogao da doda/obrise proizvoljne RTSP izvore).
+api: yes
+apiAddress: :9997
+
+# --- Autentifikacija za citanje (HLS/WebRTC gledanje) ---
+# Svaki HLS/WebRTC "read" zahtev se proverava preko platforminog API-ja
+# pre nego sto se dozvoli. Publish (kamere koje guraju RTSP unutra) i
+# api/metrics akcije su izuzete iz ove provere (publish je na
+# poverljivoj kamera-mrezi, ne javnom internetu; api/metrics imaju
+# svoju internu izolaciju preko mreznog nivoa, ne HTTP auth-a).
+authMethod: http
+authHTTPAddress: https://www.dnd-monitoring.com/api/verify-stream-token
+authHTTPExclude:
+  - action: publish
+  - action: api
+  - action: metrics
+
+# --- Podrazumevana podesavanja za SVE dinamicki dodate putanje ---
+# Ovo se primenjuje na svaku putanju koju camera-sync-worker doda
+# preko REST API-ja (koji ne salje sopstveni pathDefaults po pozivu).
+pathDefaults:
+  sourceOnDemand: true
+  sourceOnDemandStartTimeout: 10s
+  sourceOnDemandCloseAfter: 60s
+
+# --- Putanje ---
+# NAMERNO PRAZNO. Sve kamere se dodaju dinamicki od strane
+# camera-sync-worker.js na osnovu `cameras` tabele u bazi. Rucno
+# dodavanje ovde bi bilo pregazeno/zbunjujuce jer worker radi pun
+# resync (ukljucujuci brisanje "osirotelih" putanja koje ne postoje
+# u bazi) na svakih CAMERA_SYNC_INTERVAL_SECONDS (podrazumevano 60s).
+paths: {}

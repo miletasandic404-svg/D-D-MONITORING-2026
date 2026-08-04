@@ -1,0 +1,62 @@
+version: "3.8"
+
+# Lokalni development/test setup za D&D Monitoring media server (V2).
+#
+# ZA PRODUKCIJU (Fly.io) koristi se root-level fly.toml + media-server/Dockerfile
+# umesto ovog fajla -- oni pakuju MediaMTX i camera-sync-worker u JEDAN
+# kontejner (preko start.sh). Ovaj docker-compose.yml postoji samo za
+# brzo lokalno testiranje sa dva odvojena kontejnera.
+#
+# VAZNA RAZLIKA OD STARIJE VERZIJE OVOG FAJLA: kamere se VISE NE dodaju
+# rucnim uredjivanjem mediamtx.yml. `paths:` mora ostati prazan -- kamere
+# dodaje DINAMICKI camera-sync-worker servis ispod, na osnovu `cameras`
+# tabele u bazi. Videti media-server/DEPLOYMENT.md za punu arhitekturu.
+#
+# Upotreba:
+#   1. export DATABASE_URL="postgresql://...tvoja Neon/lokalna baza..."
+#   2. docker compose up -d
+#   3. Proveri da su kamere iz baze automatski registrovane:
+#      curl http://localhost:9997/v3/paths/list
+#   4. Proveri HLS: curl -I http://localhost:8888/<cameraId>/index.m3u8
+
+services:
+  mediamtx:
+    image: bluenviron/mediamtx:latest
+    container_name: dnd-mediamtx
+    restart: unless-stopped
+    volumes:
+      - ./mediamtx.yml:/mediamtx.yml:ro
+    ports:
+      - "8554:8554"       # RTSP
+      - "8888:8888"       # HLS
+      - "8889:8889"       # WebRTC (HTTP)
+      - "8189:8189/udp"   # WebRTC ICE
+      - "9997:9997"       # REST API -- NE mapirati/otvarati u produkciji
+                          # (vidi media-server/DEPLOYMENT.md, "Zasto REST
+                          # API nije javno izlozen"); ovde je OK jer je
+                          # ovo lokalni docker-compose za razvoj, ne
+                          # produkcioni Fly.io deploy.
+    # NAPOMENA: eksplicitna `ports:` lista (ne `network_mode: host`) je
+    # namerna -- camera-sync-worker servis ispod mora da dohvati
+    # mediamtx preko Docker Compose internog DNS-a (http://mediamtx:9997),
+    # sto NE radi ako mediamtx koristi host networking (host networking
+    # ga izbacuje iz compose interne mreze).
+
+  camera-sync-worker:
+    build:
+      context: ..
+      dockerfile: media-server/Dockerfile
+    container_name: dnd-camera-sync-worker
+    restart: unless-stopped
+    depends_on:
+      - mediamtx
+    environment:
+      DATABASE_URL: "${DATABASE_URL:?postavi DATABASE_URL pre pokretanja}"
+      MEDIAMTX_API_URL: "http://mediamtx:9997"
+      CAMERA_SYNC_INTERVAL_SECONDS: "${CAMERA_SYNC_INTERVAL_SECONDS:-60}"
+    # Koristi isti Dockerfile kao produkcija, ali samo camera-sync-worker
+    # deo -- pokreni ga direktno umesto celog start.sh (mediamtx je vec
+    # gore kao poseban servis u ovom docker-compose setup-u). Dockerfile
+    # definise samo CMD (ne ENTRYPOINT), pa se ovde ispravno prepisuje
+    # sa `command:`, ne `entrypoint:`.
+    command: ["node", "/app/workers/camera-sync-worker.js"]

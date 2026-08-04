@@ -1,0 +1,54 @@
+# MediaMTX config za D&D Monitoring — LAPTOP media node (V2, dinamicke putanje)
+# Identican produkcijskom (media-server/mediamtx.yml na Fly-u), uz napomene za Windows.
+# Referenca: https://github.com/bluenviron/mediamtx/blob/main/mediamtx.yml
+#
+# `paths:` blok je PRAZAN — kamere dodaje dinamicki camera-sync-worker.js
+# preko REST API-ja (POST /v3/config/paths/add/{id}) na osnovu `cameras`
+# tabele u Neon bazi. Ne definisite kamere rucno ovde.
+
+logLevel: info
+
+# --- RTSP (server; kamere se PULL-uju preko "source" u dinamickim
+#     putanjama, ali server ostaje ukljucen za event. publish strane) ---
+rtsp: yes
+rtspAddress: :8554
+
+# --- HLS izlaz koji dashboard konzumira preko hls.js ---
+hls: yes
+hlsAddress: :8888
+hlsAlwaysRemux: yes
+hlsVariant: lowLatency
+hlsSegmentCount: 7
+hlsSegmentDuration: 1s
+# Samo dashboard domen (ne '*'). Ako gledate i sa lokalnog dev okruzenja,
+# dodajte i njega (npr. http://localhost:5173) u listu.
+hlsAllowOrigin: 'https://www.dnd-monitoring.com'
+
+# --- WebRTC (konfigurisan radi pariteta; dashboard ga trenutno ne koristi) ---
+webrtc: yes
+webrtcAddress: :8889
+
+# --- REST API za dinamicko upravljanje putanjama ---
+# KRITICNO: apiAddress ostaje LOKALAN (127.0.0.1). Windows Firewall NIKAKO
+# ne otvaraj za 9997 — worker mu pristupa preko localhost-a.
+api: yes
+apiAddress: :9997
+
+# --- Autentifikacija za citanje (HLS/WebRTC gledanje) ---
+# Svaki read zahtev proverava platformin API pre nego sto se dozvoli.
+# Publish (kamere koje guraju RTSP) i api/metrics su izuzeti (authHTTPExclude).
+authMethod: http
+authHTTPAddress: https://www.dnd-monitoring.com/api/verify-stream-token
+authHTTPExclude:
+  - action: publish
+  - action: api
+  - action: metrics
+
+# --- Podrazumevana podesavanja za SVE dinamicki dodate putanje ---
+pathDefaults:
+  sourceOnDemand: true
+  sourceOnDemandStartTimeout: 10s
+  sourceOnDemandCloseAfter: 60s
+
+# --- Putanje: NAMERNO PRAZNO (vidi komentar na vrhu) ---
+paths: {}

@@ -1,0 +1,26 @@
+# media-server/Dockerfile only needs: media-server/, workers/*.js,
+# lib/_mediamtx_client.js, start.sh. Everything below is irrelevant to
+# that build but was still being uploaded to the Fly/Depot builder on
+# every `fly deploy`, making builds much slower than necessary.
+
+# React Native / Expo mobile app (separate project, not used by media-server)
+mobile/
+
+# Frontend web app (separate Vercel deployment, not used by media-server)
+frontend/
+
+# Git metadata
+.git/
+.gitignore
+
+# Dependency directories (rebuilt inside the Docker build itself where needed)
+node_modules/
+**/node_modules/
+
+# Editor/tooling cruft
+.vscode/
+.claude/
+*.log
+
+# Docs not needed inside the image
+*.md

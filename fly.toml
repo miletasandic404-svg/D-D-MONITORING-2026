@@ -1,0 +1,80 @@
+# =========================================================
+# Fly.io konfiguracija za D&D Monitoring media server (V2).
+#
+# BITNO: ovaj fly.toml je namerno na ROOT-u repozitorijuma (ne u
+# media-server/), da bi Docker build kontekst obuhvatio i workers/ i
+# lib/_mediamtx_client.js (koje media-server/Dockerfile kopira).
+#
+# Deploy sa: fly deploy --config fly.toml --dockerfile media-server/Dockerfile
+# (ili fly deploy iz root-a repozitorijuma, ako je ovo jedini fly.toml)
+# =========================================================
+
+app = "dnd-media-server"
+primary_region = "fra"  # Frankfurt - blizu ostatka infrastrukture (Neon EU, Vercel)
+
+[build]
+  dockerfile = "media-server/Dockerfile"
+
+[env]
+  # Sledece varijable se postavljaju kao Fly.io secrets, NE ovde
+  # (ne u plain-text .toml):
+  #   fly secrets set DATABASE_URL="postgresql://..." -a dnd-media-server
+  #   fly secrets set MEDIA_NODE_ID="<uuid iz media_nodes tabele>" -a dnd-media-server
+  #   fly secrets set API_BASE_URL="https://www.dnd-monitoring.com/api" -a dnd-media-server
+  #   fly secrets set MEDIA_NODE_HEARTBEAT_SECRET="<secret iz POST /api/media-nodes>" -a dnd-media-server
+  # API_BASE_URL + MEDIA_NODE_ID + MEDIA_NODE_HEARTBEAT_SECRET su potrebni
+  # za media-node-heartbeat worker (multi-node setup). Bez njih, heartbeat
+  # se preskace i node ostaje "offline" u registru (single-node setup koji
+  # koristi VITE_HLS_BASE_URL ne zahteva ovo).
+  PORT = "8888"
+
+# =========================================================
+# NAMERNO NEMA [[services]] bloka za port 8554 (RTSP).
+# MediaMTX u ovom deploymentu koristi PULL mod: povlaci video sa
+# kamera preko rtsp_url koji cuvamo u bazi (source polje u dinamicki
+# dodatim putanjama). Kamere ne push-uju na nas RTSP server -- nema
+# razloga da port 8554 bude javno dostupan. Ostaje dostupan unutar
+# Fly.io masine i 6PN privatne mreze ako ikad zatreba interno.
+# =========================================================
+
+# --- HLS: dashboard citta video ovde (hls.js) ---
+[[services]]
+  internal_port = 8888
+  protocol = "tcp"
+  [[services.ports]]
+    port = 80
+    handlers = ["http"]
+  [[services.ports]]
+    port = 443
+    handlers = ["tls", "http"]
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 500
+    soft_limit = 400
+
+# --- WebRTC (konfigurisan, trenutno nekoriscen od strane frontenda) ---
+[[services]]
+  internal_port = 8889
+  protocol = "tcp"
+  [[services.ports]]
+    port = 8889
+
+# =========================================================
+# NAMERNO NEMA [[services]] bloka za port 9997 (MediaMTX REST API).
+# Taj port ostaje dostupan SAMO unutar kontejnera (localhost, gde ga
+# camera-sync-worker.js koristi) -- nikad javno izlozen. Ovo je
+# svesna bezbednosna odluka: REST API dozvoljava dodavanje/brisanje
+# proizvoljnih RTSP izvora, sto ne sme biti dostupno sa interneta.
+# =========================================================
+
+[[vm]]
+  size = "shared-cpu-1x"
+  memory = "512mb"
+
+[checks]
+  [checks.hls_ready]
+    port = 8888
+    type = "tcp"
+    interval = "15s"
+    timeout = "5s"
+    grace_period = "30s"

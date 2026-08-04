@@ -1,0 +1,12 @@
+# Force LF line endings for files that run inside Linux containers,
+# regardless of the local machine's core.autocrlf setting. Without this,
+# a Windows checkout (core.autocrlf=true, the Git-for-Windows default)
+# silently converts these to CRLF, which corrupts shebang lines
+# (#!/bin/bash\r is not a valid interpreter path) and breaks the file
+# the moment it's baked into a Docker image and executed on Linux --
+# exact symptom: "No such file or directory" even though the file
+# demonstrably exists and is chmod +x.
+*.sh text eol=lf
+Dockerfile text eol=lf
+*.yml text eol=lf
+*.yaml text eol=lf

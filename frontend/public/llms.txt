@@ -1,0 +1,32 @@
+# D&D Global AI Surveillance
+
+D&D Global AI Surveillance is a production-ready Security Operations Center (SOC) interface for advanced AI-powered security monitoring and threat detection.
+
+## Pages
+
+- [Dashboard](https://d-d-monitoring-2026.vercel.app/dashboard) - Main monitoring dashboard
+- [Cameras](https://d-d-monitoring-2026.vercel.app/cameras) - Camera management
+- [Live Streams](https://d-d-monitoring-2026.vercel.app/live-streams) - Live video feeds
+- [Video Playback](https://d-d-monitoring-2026.vercel.app/video-playback) - Recorded footage
+- [Alerts](https://d-d-monitoring-2026.vercel.app/alerts) - Security alerts
+- [Incidents](https://d-d-monitoring-2026.vercel.app/incidents) - Incident management
+- [Map](https://d-d-monitoring-2026.vercel.app/map) - Geographic view
+- [AI Detection](https://d-d-monitoring-2026.vercel.app/ai-detection) - AI threat detection
+- [Face Recognition](https://d-d-monitoring-2026.vercel.app/face-recognition) - Face identification
+- [LPR](https://d-d-monitoring-2026.vercel.app/license-plates) - License plate recognition
+- [Emergency](https://d-d-monitoring-2026.vercel.app/emergency) - Emergency dispatch
+- [Reports](https://d-d-monitoring-2026.vercel.app/reports) - Security reports
+- [Users](https://d-d-monitoring-2026.vercel.app/users) - User management
+- [Settings](https://d-d-monitoring-2026.vercel.app/settings) - System settings
+
+## Features
+
+- **Real-time Camera Monitoring**: Live HLS video streams from surveillance cameras
+- **AI Detection**: Automated threat detection using AI and machine learning
+- **Face Recognition**: Face identification and tracking
+- **License Plate Recognition**: Automatic LPR system
+- **Incident Management**: Comprehensive incident tracking and response workflow
+- **Emergency Dispatch**: Emergency services coordination
+- **Video Playback**: Review recorded footage
+- **User Management**: Multi-user access with role-based permissions
+- **White-label Branding**: Custom branding support

@@ -1,0 +1,6 @@
+User-agent: *
+Allow: /
+Allow: /terms-of-service.html
+Allow: /privacy-policy.html
+
+Sitemap: https://d-d-monitoring-2026.vercel.app/sitemap.xml
