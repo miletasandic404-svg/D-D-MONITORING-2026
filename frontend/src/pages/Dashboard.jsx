@@ -1310,6 +1310,20 @@ export default function Dashboard() {
                   {it.ok === false && it.hint && <span style={{ color: 'var(--color-warn, #f59e0b)' }}>{it.hint}</span>}
                 </div>
               ))}
+              {wizardNode?.health?.system && (
+                <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.08)', fontSize: 12 }}>
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', opacity: 0.95 }}>
+                    <span>🖥️ CPU {wizardNode.health.system.cpu_usage_percent != null ? `${wizardNode.health.system.cpu_usage_percent}%` : '—'}</span>
+                    <span>🧠 RAM {wizardNode.health.system.memory ? `${wizardNode.health.system.memory.used_mb} MB / ${wizardNode.health.system.memory.total_mb} MB` : '—'}</span>
+                    <span>💾 Disk {wizardNode.health.system.disk ? `${wizardNode.health.system.disk.free_mb} MB free` : '—'}</span>
+                  </div>
+                  <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', opacity: 0.95, marginTop: 2 }}>
+                    <span>📷 Cameras {wizardNode.health.cameras ? `${wizardNode.health.cameras.active}/${wizardNode.health.cameras.total} active` : `${wizardNode.current_cameras || 0}`}</span>
+                    <span>⏱️ Uptime {wizardNode.health.system.uptime_seconds ? `${Math.floor(wizardNode.health.system.uptime_seconds / 60)} min` : '—'}</span>
+                    <span>💓 Last heartbeat {wizardNode.health_checked_at ? new Date(wizardNode.health_checked_at).toLocaleTimeString() : '—'}</span>
+                  </div>
+                </div>
+              )}
               {wizardNodeError && <p style={{ color: 'var(--color-danger, #ef4444)', fontSize: 12, margin: '4px 0' }}>⚠️ {wizardNodeError}</p>}
               {wizardNode && !wizardNode.tunnel_online && (
                 <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>

@@ -25,7 +25,8 @@ async function handleGetMediaNodes(req, res) {
     const { rows } = await db.queryAsPlatformAdmin(`
       SELECT
         n.id, n.region, n.hostname, n.name, n.public_hls_url, n.capacity,
-        n.last_heartbeat_at,
+        n.last_heartbeat_at, n.mediamtx_online, n.tunnel_online,
+        n.health_json, n.health_checked_at,
         count(c.id)::int AS current_cameras,
         COALESCE(n.last_heartbeat_at > now() - interval '${HEARTBEAT_FRESHNESS_SECONDS} seconds', false) AS online
       FROM media_nodes n
