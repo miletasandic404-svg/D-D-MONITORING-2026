@@ -229,23 +229,14 @@ async function claimNextTask() {
   return result.rows[0] || null;
 }
 
+const { buildTaskStatusQuery } = require('../lib/_task_status_sql');
+
 async function setTaskStatus(taskId, status, extra = {}) {
-  const allowedColumns = new Set([
-    'result', 'error', 'camera_id', 'assigned_node_id',
-    'ip', 'rtsp_url', 'camera_name', 'updated_at',
-  ]);
-  const sets = ['status = $1', 'updated_at = now()'];
-  const vals = [status];
-  for (const [k, v] of Object.entries(extra)) {
-    if (!allowedColumns.has(k)) {
-      console.warn(`[agent] setTaskStatus: rejecting unknown column "${k}"`);
-      continue;
-    }
-    vals.push(v);
-    sets.push(`${k} = ${vals.length}`);
+  const { sql, vals, rejected } = buildTaskStatusQuery(taskId, status, extra);
+  for (const k of rejected) {
+    console.warn(`[agent] setTaskStatus: rejecting unknown column "${k}"`);
   }
-  vals.push(taskId);
-  await pool.query(`UPDATE camera_setup_tasks SET ${sets.join(', ')} WHERE id = ${vals.length}`, vals);
+  await pool.query(sql, vals);
 
   // Security: clear plaintext credentials after task reaches a terminal state
   if (status === 'done' || status === 'failed') {
