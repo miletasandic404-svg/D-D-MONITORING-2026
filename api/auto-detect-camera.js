@@ -29,7 +29,7 @@ const autoDetectSchema = z.object({
 });
 
 module.exports = async (req, res) => {
-  if (!rateLimit(req, res)) return;
+  if (!(await rateLimit(req, res))) return;
 
   if (req.method !== 'POST') {
     return sendError(res, 405, 'Method Not Allowed');

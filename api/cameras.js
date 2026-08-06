@@ -41,7 +41,7 @@ const cameraSchema = z.object({
 });
 
 module.exports = async (req, res) => {
-  if (!rateLimit(req, res)) return;
+  if (!(await rateLimit(req, res))) return;
   // ── Camera Setup Wizard (V2): create a setup task ───────────────────────
   // The wizard UI creates a task; the LOCAL camera-setup-agent on the media
   // node (the only process that can reach LAN cameras) executes it:

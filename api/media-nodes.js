@@ -125,7 +125,7 @@ async function handlePostHeartbeat(req, res) {
 }
 
 module.exports = async (req, res) => {
-  if (!rateLimit(req, res)) return;
+  if (!(await rateLimit(req, res))) return;
 
   if (req.method === 'GET') {
     return handleGetMediaNodes(req, res);

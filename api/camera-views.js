@@ -12,7 +12,7 @@ const createViewSchema = z.object({
 });
 
 module.exports = async (req, res) => {
-  if (!rateLimit(req, res)) return;
+  if (!(await rateLimit(req, res))) return;
   if (req.method === 'POST') {
     const auth = await requireAuth(req, res);
     if (!auth) return;

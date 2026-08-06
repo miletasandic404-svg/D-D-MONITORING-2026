@@ -20,7 +20,7 @@ const updateSchema = z.object({
 });
 
 module.exports = async (req, res) => {
-  if (!rateLimit(req, res)) return;
+  if (!(await rateLimit(req, res))) return;
   const { path } = req.query;
 
   // ===== OPERATOR ASSIGNMENTS ROUTES =====

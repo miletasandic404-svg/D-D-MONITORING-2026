@@ -37,7 +37,7 @@ const VALID_PLANS = ['starter', 'growth', 'enterprise'];
 // ─── Route handler ────────────────────────────────────────────────────────────
 
 module.exports = async (req, res) => {
-  if (!rateLimit(req, res)) return;
+  if (!(await rateLimit(req, res))) return;
 
   // ── POST /api/onboarding/register ─────────────────────────────────────────
   // Creates a new organization + default site, then links the authenticated

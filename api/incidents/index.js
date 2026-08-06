@@ -24,7 +24,7 @@ const statusUpdateSchema = z.object({
 //   PATCH /api/incidents/:eventId/status         → update incident status
 //   GET /api/incidents/:eventId/evidence         → get evidence (recordings + snapshots)
 module.exports = async (req, res) => {
-  if (!rateLimit(req, res)) return;
+  if (!(await rateLimit(req, res))) return;
   const { eventId, path: pathInfo } = req.query;
 
   // ── Event-specific routes (merged from [eventId]/index.js) ─────────
