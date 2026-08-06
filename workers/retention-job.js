@@ -23,6 +23,13 @@
 const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const db = require('../db/index');
 const { keyFromPublicUrl } = require('../lib/_storage');
+const { makeLogger } = require('../lib/_logger');
+const Sentry = require('@sentry/node');
+const { initSentry } = require('../lib/_sentry');
+
+const logger = makeLogger('worker-retention-job');
+
+initSentry();
 
 async function deleteFromStorage(key) {
   const client = new S3Client({
@@ -39,7 +46,7 @@ async function deleteFromStorage(key) {
 
 async function run() {
   if (!process.env.DATABASE_URL) {
-    console.error('[retention-job] DATABASE_URL is not set. Exiting.');
+    logger.error('DATABASE_URL is not set. Exiting.');
     process.exit(1);
   }
 
@@ -48,7 +55,7 @@ async function run() {
      WHERE status = 'completed' AND retention_expires_at IS NOT NULL AND retention_expires_at < now()`,
   );
 
-  console.log(`[retention-job] found ${expired.rows.length} expired recording(s)`);
+  logger.info('Found expired recordings', { count: expired.rows.length });
 
   let deleted = 0;
   let failed = 0;
@@ -59,17 +66,18 @@ async function run() {
       if (key) {
         await deleteFromStorage(key);
       } else {
-        console.warn(`[retention-job] recording ${row.id}: could not derive storage key from ${row.storage_url}, deleting DB row anyway`);
+        logger.warn('Could not derive storage key from URL', { recording_id: row.id, storage_url: row.storage_url });
       }
       await db.queryAsPlatformAdmin('DELETE FROM recordings WHERE id = $1', [row.id]);
       deleted += 1;
     } catch (err) {
-      console.error(`[retention-job] failed to delete recording ${row.id}:`, err.message);
+      logger.error('Failed to delete recording', { recording_id: row.id, error: err.message });
+      Sentry.captureException(err);
       failed += 1;
     }
   }
 
-  console.log(`[retention-job] done: ${deleted} deleted, ${failed} failed`);
+  logger.info('Retention job completed', { deleted, failed, total: expired.rows.length });
   return { deleted, failed, total: expired.rows.length };
 }
 
@@ -77,7 +85,8 @@ if (require.main === module) {
   run()
     .then(() => process.exit(0))
     .catch((err) => {
-      console.error('[retention-job] fatal error:', err.message);
+      logger.error('Fatal error', { error: err.message });
+      Sentry.captureException(err);
       process.exit(1);
     });
 }

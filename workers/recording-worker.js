@@ -39,6 +39,13 @@ const { spawn } = require('child_process');
 const { Client } = require('pg');
 const db = require('../db/index');
 const { uploadObject } = require('../lib/_storage');
+const { makeLogger } = require('../lib/_logger');
+const Sentry = require('@sentry/node');
+const { initSentry } = require('../lib/_sentry');
+
+const logger = makeLogger('worker-recording-worker');
+
+initSentry();
 
 const RECORDING_DURATION_SECONDS = parseInt(process.env.RECORDING_DURATION_SECONDS || '15', 10);
 
@@ -66,23 +73,23 @@ function recordSegment(rtspUrl, outputPath, durationSeconds) {
 
 async function handleEvent(payload) {
   const { camera_id: cameraId, event_id: eventId, organization_id: organizationId } = payload;
-  console.log(`[recording-worker] event ${eventId} on camera ${cameraId} (org ${organizationId})`);
+  logger.info('Handling camera event', { event_id: eventId, camera_id: cameraId, organization_id: organizationId });
 
   const cameraResult = await db.queryAsPlatformAdmin(
     'SELECT rtsp_url, recording_mode, retention_days FROM cameras WHERE id = $1',
     [cameraId],
   );
   if (cameraResult.rows.length === 0) {
-    console.warn(`[recording-worker] camera ${cameraId} not found, skipping`);
+    logger.warn('Camera not found', { camera_id: cameraId });
     return;
   }
   const camera = cameraResult.rows[0];
   if (camera.recording_mode === 'off') {
-    console.log(`[recording-worker] camera ${cameraId} has recording_mode=off, skipping`);
+    logger.info('Camera recording mode is off', { camera_id: cameraId });
     return;
   }
   if (!camera.rtsp_url) {
-    console.warn(`[recording-worker] camera ${cameraId} has no rtsp_url, skipping`);
+    logger.warn('Camera has no RTSP URL', { camera_id: cameraId });
     return;
   }
 
@@ -115,9 +122,10 @@ async function handleEvent(payload) {
        WHERE id = $1`,
       [recordingId, endTime, Math.round((endTime - startTime) / 1000), stats.size, storageUrl, retentionExpiresAt],
     );
-    console.log(`[recording-worker] recording ${recordingId} completed (${stats.size} bytes) -> ${storageUrl}`);
+    logger.info('Recording completed', { recording_id: recordingId, size_bytes: stats.size, storage_url });
   } catch (err) {
-    console.error(`[recording-worker] recording ${recordingId} failed:`, err.message);
+    logger.error('Recording failed', { recording_id: recordingId, error: err.message });
+    Sentry.captureException(err);
     await db.queryAsPlatformAdmin(`UPDATE recordings SET status = 'failed', end_time = now() WHERE id = $1`, [recordingId]);
   } finally {
     fs.promises.unlink(tempFile).catch(() => {});
@@ -126,32 +134,34 @@ async function handleEvent(payload) {
 
 async function main() {
   if (!process.env.DATABASE_URL) {
-    console.error('[recording-worker] DATABASE_URL is not set. Exiting.');
+    logger.error('DATABASE_URL is not set. Exiting.');
     process.exit(1);
   }
 
   const listenClient = new Client({ connectionString: process.env.DATABASE_URL });
   await listenClient.connect();
   await listenClient.query('LISTEN new_camera_event');
-  console.log('[recording-worker] listening on new_camera_event...');
+  logger.info('Listening on new_camera_event channel');
 
   listenClient.on('notification', (msg) => {
     let payload;
     try {
       payload = JSON.parse(msg.payload);
     } catch {
-      console.error('[recording-worker] could not parse notification payload:', msg.payload);
+      logger.error('Could not parse notification payload', { payload: msg.payload });
       return;
     }
     // Handle each event independently -- one failing recording must
     // not block the listener from picking up the next notification.
     handleEvent(payload).catch((err) => {
-      console.error('[recording-worker] unhandled error processing event:', err.message);
+      logger.error('Unhandled error processing event', { error: err.message });
+      Sentry.captureException(err);
     });
   });
 
   listenClient.on('error', (err) => {
-    console.error('[recording-worker] Postgres connection error:', err.message);
+    logger.error('Postgres connection error', { error: err.message });
+    Sentry.captureException(err);
     process.exit(1); // let a process manager (systemd/pm2/docker) restart it
   });
 }

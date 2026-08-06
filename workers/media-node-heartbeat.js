@@ -50,7 +50,12 @@ const https = require('https');
 const http = require('http');
 const { URL } = require('url');
 const L = require('../lib/_logger');
+const Sentry = require('@sentry/node');
+const { initSentry } = require('../lib/_sentry');
+
 const logger = L.makeLogger('heartbeat');
+
+initSentry();
 
 const API_BASE_URL = process.env.API_BASE_URL;
 const MEDIA_NODE_ID = process.env.MEDIA_NODE_ID;

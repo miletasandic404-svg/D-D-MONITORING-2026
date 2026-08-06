@@ -29,7 +29,12 @@ const { Pool } = require('pg');
 const { addOrUpdateCameraPath, deleteCameraPath, listConfiguredPaths } = require('../lib/_mediamtx_client');
 const { decrypt, extractCredentialsFromUrl } = require('../lib/_crypto');
 const L = require('../lib/_logger');
+const Sentry = require('@sentry/node');
+const { initSentry } = require('../lib/_sentry');
+
 const logger = L.makeLogger('camera-sync');
+
+initSentry();
 
 // =========================================================
 // Camera Sync Worker

@@ -58,6 +58,10 @@ const { addOrUpdateCameraPath, deleteCameraPath, getPathStatus } = require('../l
 const { reportNodeHealth, checkTunnel, HEARTBEAT_LOOP_MS } = require('../lib/_node_health');
 const { encrypt, decrypt, extractCredentialsFromUrl, stripCredentialsFromUrl } = require('../lib/_crypto');
 const { spawn } = require('child_process');
+const Sentry = require('@sentry/node');
+const { initSentry } = require('../lib/_sentry');
+
+initSentry();
 
 const POLL_INTERVAL_MS = parseInt(process.env.CAMERA_SETUP_POLL_INTERVAL_MS || '3000', 10);
 const MAX_TASK_AGE_MINUTES = parseInt(process.env.CAMERA_SETUP_MAX_AGE_MINUTES || '30', 10);

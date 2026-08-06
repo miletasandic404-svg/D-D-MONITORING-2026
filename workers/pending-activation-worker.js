@@ -29,14 +29,21 @@
 
 const db = require('../db/index');
 const { retryAllPendingActivations } = require('../lib/payment_service');
+const { makeLogger } = require('../lib/_logger');
+const Sentry = require('@sentry/node');
+const { initSentry } = require('../lib/_sentry');
+
+const logger = makeLogger('worker-pending-activation');
+
+initSentry();
 
 async function run() {
   if (!process.env.DATABASE_URL) {
-    console.error('[pending-activation-worker] DATABASE_URL is not set. Exiting.');
+    logger.error('DATABASE_URL is not set. Exiting.');
     process.exit(1);
   }
 
-  console.log('[pending-activation-worker] scanning for pending activations...');
+  logger.info('Scanning for pending activations');
 
   const results = await retryAllPendingActivations({ limit: 100 });
 
@@ -44,15 +51,10 @@ async function run() {
   const failed = results.filter((r) => r.activationStatus === 'failed').length;
 
   for (const r of results.filter((r) => r.activationStatus === 'failed')) {
-    console.error(
-      `[pending-activation-worker] payment ${r.paymentId} org ${r.organizationId}: ${r.error}`,
-    );
+    logger.error('Payment activation failed', { payment_id: r.paymentId, organization_id: r.organizationId, error: r.error });
   }
 
-  console.log(
-    `[pending-activation-worker] done: ${results.length} processed, ` +
-    `${activated} activated, ${failed} still failed`,
-  );
+  logger.info('Pending activation scan completed', { total: results.length, activated, failed });
 
   return { total: results.length, activated, failed };
 }
@@ -61,7 +63,8 @@ if (require.main === module) {
   run()
     .then(() => process.exit(0))
     .catch((err) => {
-      console.error('[pending-activation-worker] fatal error:', err.message);
+      logger.error('Fatal error', { error: err.message });
+      Sentry.captureException(err);
       process.exit(1);
     });
 }
