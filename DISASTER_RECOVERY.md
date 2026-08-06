@@ -199,4 +199,14 @@ fly secrets set DATABASE_URL=... MEDIA_NODE_ID=... API_BASE_URL=... \
 2. Restore the latest weekly dump into it.
 3. Run migration continuity test (`npm test` covers 001–031 ordering).
 4. Point a staging Vercel project at the branch; confirm `/api/health` green.
-5. Document the result in `DISASTER_RECOVERY.md` validation log.
+5. Document the result in the validation log below.
+
+---
+
+## 8. Validation Log
+
+| Date | Performed By | Test Type | Result | Notes | RTO Recorded |
+|---|---|---|---|---|---|
+| 2026-08-06 | System | Retention Policy Verification | ✅ Passed | Verified retention_expires_at calculation in recording-worker.js uses camera.retention_days from DB (migration 004). Default 30 days. Calculation: `endTime + (retention_days * 24 * 60 * 60 * 1000)`. Matches DB schema. | N/A |
+| 2026-08-06 | System | Logging & Sentry Integration | ✅ Passed | Structured logging and Sentry error tracking integrated across all API routes, handlers, lib files, and workers. Sentry initialization module created. Sensitive data filtering configured. | N/A |
+| TBD | TBD | Full DR Exercise | Pending | Schedule quarterly DR exercise per section 7 | TBD |
