@@ -4,6 +4,13 @@ const { z } = require('zod');
 const { sendError, sendSuccess } = require('../lib/_error');
 const crypto = require('crypto');
 const { rateLimit } = require('../lib/_rate_limit');
+const { makeLogger } = require('../lib/_logger');
+const Sentry = require('@sentry/node');
+const { initSentry } = require('../lib/_sentry');
+
+const logger = makeLogger('api-camera-views');
+
+initSentry();
 
 
 // ─── Zod schema for camera view creation ────────────────────────
@@ -68,7 +75,8 @@ module.exports = async (req, res) => {
         expiresAt: expiresAt.toISOString(),
       }, 201);
     } catch (err) {
-      console.error('POST /api/camera-views error:', err.message);
+      logger.error('POST /api/camera-views error', { error: err.message });
+      Sentry.captureException(err);
       return sendError(res, 500, err.message);
     }
   }
@@ -91,7 +99,8 @@ module.exports = async (req, res) => {
 
       return sendSuccess(res);
     } catch (err) {
-      console.error('PATCH /api/camera-views error:', err.message);
+      logger.error('PATCH /api/camera-views error', { error: err.message });
+      Sentry.captureException(err);
       return sendError(res, 500, err.message);
     }
   }

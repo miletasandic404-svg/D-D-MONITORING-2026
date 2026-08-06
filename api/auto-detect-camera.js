@@ -22,6 +22,13 @@ const { sendError, sendSuccess } = require('../lib/_error');
 const { rateLimit } = require('../lib/_rate_limit');
 const { z } = require('zod');
 const crypto = require('crypto');
+const { makeLogger } = require('../lib/_logger');
+const Sentry = require('@sentry/node');
+const { initSentry } = require('../lib/_sentry');
+
+const logger = makeLogger('api-auto-detect-camera');
+
+initSentry();
 
 const autoDetectSchema = z.object({
   ip_address: z.string().ip('Invalid IP address'),
@@ -55,7 +62,7 @@ module.exports = async (req, res) => {
   const { ip_address, camera_name } = data;
 
   try {
-    console.log(`[auto-detect-camera] POST za org: ${auth.organizationId}, IP: ${ip_address}`);
+    logger.info('POST auto-detect-camera', { organization_id: auth.organizationId, ip_address });
 
     // ===== DETEKTUJ KAMERU =====
     const detectionResult = await autoDetectCamera(ip_address);
@@ -121,7 +128,7 @@ module.exports = async (req, res) => {
       },
     });
 
-    console.log(`[auto-detect-camera] ✅ Kamera uspešno kreirana: ${cameraId}`);
+    logger.info('Camera auto-detected successfully', { camera_id: cameraId });
 
     // ===== ODGOVORI =====
     return sendSuccess(res, {
@@ -145,7 +152,8 @@ module.exports = async (req, res) => {
     }, 201);
 
   } catch (error) {
-    console.error(`[auto-detect-camera] Error:`, error.message);
+    logger.error('Auto-detect-camera error', { error: error.message });
+    Sentry.captureException(error);
     return sendError(res, 500, error.message);
   }
 };

@@ -17,6 +17,13 @@ const {
 } = require('../lib/payment_service');
 const { verifyStripeWebhookSignature } = require('../stripe');
 const { verifyPayPalWebhookSignature } = require('../paypal');
+const { makeLogger } = require('../lib/_logger');
+const Sentry = require('@sentry/node');
+const { initSentry } = require('../lib/_sentry');
+
+const logger = makeLogger('api-payments');
+
+initSentry();
 
 async function getOptionalSession(req) {
   try {
@@ -250,7 +257,8 @@ module.exports = async (req, res) => {
 
     return sendError(res, 404, 'Unknown payment action');
   } catch (err) {
-    console.error('Payments API error:', err.message);
+    logger.error('Payments API error', { error: err.message });
+    Sentry.captureException(err);
     return sendError(res, err.statusCode || 500, err.message);
   }
 };

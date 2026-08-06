@@ -7,6 +7,14 @@ const { logAudit, getIp } = require("../lib/_audit");
 const { z } = require("zod");
 const { sendError, sendSuccess, tryCatch } = require("../lib/_error");
 const { rateLimit } = require("../lib/_rate_limit");
+const { makeLogger } = require("../lib/_logger");
+const Sentry = require("@sentry/node");
+const { initSentry } = require("../lib/_sentry");
+
+const logger = makeLogger('api-cameras');
+
+// Initialize Sentry for error tracking
+initSentry();
 
 // ─── Zod schema ──────────────────────────────────────────────────────────
 const cameraSchema = z.object({
@@ -531,12 +539,14 @@ module.exports = async (req, res) => {
       try {
         await deleteCameraPath(id);
       } catch (mtxErr) {
-        console.error(`[mediamtx-sync] Failed to delete path for camera ${id}:`, mtxErr.message);
+        logger.error('Failed to delete MediaMTX path', { camera_id: id, error: mtxErr.message });
+        Sentry.captureException(mtxErr);
       }
 
       return sendSuccess(res, { message: "Camera deleted" });
     } catch (err) {
-      console.error("Error deleting camera:", err);
+      logger.error('Error deleting camera', { error: err.message });
+      Sentry.captureException(err);
       return sendError(res, 500, err.message);
     }
   }

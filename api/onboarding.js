@@ -25,6 +25,8 @@ const { requireAuth } = require('../lib/_auth');
 const { logAudit, getIp } = require('../lib/_audit');
 const { sendError, sendSuccess } = require('../lib/_error');
 const { rateLimit } = require('../lib/_rate_limit');
+const { makeLogger } = require('../lib/_logger');
+const Sentry = require('@sentry/node');
 const {
   getPlanLimits,
   linkRegistrationToOrganization,
@@ -33,6 +35,11 @@ const {
 } = require('../lib/_payment_activation');
 
 const VALID_PLANS = ['starter', 'growth', 'enterprise'];
+
+const logger = makeLogger('api-onboarding');
+const { initSentry } = require('../lib/_sentry');
+
+initSentry();
 
 // ─── Route handler ────────────────────────────────────────────────────────────
 
@@ -144,7 +151,8 @@ module.exports = async (req, res) => {
         });
       }
     } catch (dbErr) {
-      console.error('[onboarding/register] DB error:', dbErr.message);
+      logger.error('[onboarding/register] DB error', { error: dbErr.message });
+      Sentry.captureException(dbErr);
       return sendError(res, 500, `Failed to create organization: ${dbErr.message}`);
     }
 
@@ -231,7 +239,8 @@ module.exports = async (req, res) => {
         cameras,
       });
     } catch (err) {
-      console.error('[onboarding/status] Error:', err.message);
+      logger.error('[onboarding/status] Error', { error: err.message });
+      Sentry.captureException(err);
       return sendError(res, 500, err.message);
     }
   }
@@ -256,7 +265,8 @@ module.exports = async (req, res) => {
         [auth.organizationId],
       );
     } catch (err) {
-      console.error('[onboarding/complete] DB error:', err.message);
+      logger.error('[onboarding/complete] DB error', { error: err.message });
+      Sentry.captureException(err);
       return sendError(res, 500, err.message);
     }
 

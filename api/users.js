@@ -4,6 +4,13 @@ const { createUser } = require('../lib/auth');
 const { z } = require('zod');
 const { sendError, sendSuccess } = require('../lib/_error');
 const { rateLimit } = require('../lib/_rate_limit');
+const { makeLogger } = require('../lib/_logger');
+const Sentry = require('@sentry/node');
+const { initSentry } = require('../lib/_sentry');
+
+const logger = makeLogger('api-users');
+
+initSentry();
 
 
 // ─── Zod schema for user invite ────────────────────────────────
@@ -49,7 +56,8 @@ module.exports = async (req, res) => {
         const result = await db.queryAsOrg(auth.organizationId, query, params);
         return sendSuccess(res, { count: result.rows.length, assignments: result.rows });
       } catch (err) {
-        console.error('GET /api/operator-assignments error:', err.message);
+        logger.error('GET /api/operator-assignments error', { error: err.message });
+        Sentry.captureException(err);
         return sendError(res, 500, err.message);
       }
     }
@@ -98,7 +106,8 @@ module.exports = async (req, res) => {
         if (result.rows.length === 0) return sendError(res, 404, 'Assignment not found');
         return sendSuccess(res, { message: 'Assignment deleted' });
       } catch (err) {
-        console.error('DELETE /api/operator-assignments error:', err.message);
+        logger.error('DELETE /api/operator-assignments error', { error: err.message });
+        Sentry.captureException(err);
         return sendError(res, 500, err.message);
       }
     }
@@ -144,6 +153,8 @@ module.exports = async (req, res) => {
         return sendSuccess(res, { operator: result.rows[0] }, 201);
       } catch (err) {
         if (err.code === '23505') return sendError(res, 409, 'An operator with this email already exists.');
+        logger.error('POST /api/operators error', { error: err.message });
+        Sentry.captureException(err);
         return sendError(res, 500, err.message);
       }
     }
@@ -167,7 +178,8 @@ module.exports = async (req, res) => {
       );
       return res.json({ users: result.rows });
     } catch (dbErr) {
-      console.error('Database query failed:', dbErr);
+      logger.error('Database query failed', { error: dbErr.message });
+      Sentry.captureException(dbErr);
       return sendError(res, 500, 'Failed to fetch users');
     }
   }
@@ -191,7 +203,8 @@ module.exports = async (req, res) => {
           return sendError(res, 409, 'This email is already registered. User already exists.');
         }
       } catch (checkErr) {
-        console.error('Error checking existing user:', checkErr);
+        logger.error('Error checking existing user', { error: checkErr.message });
+        Sentry.captureException(checkErr);
       }
 
       // Generate a temporary password
@@ -223,7 +236,8 @@ module.exports = async (req, res) => {
         tempPassword,
       });
     } catch (err) {
-      console.error('Error inviting user:', err.message);
+      logger.error('Error inviting user', { error: err.message });
+      Sentry.captureException(err);
       if (err.name === 'ZodError') {
         return sendError(res, 400, 'Validation failed',
           err.errors.map(e => ({ field: e.path.join('.'), message: e.message }))
@@ -278,7 +292,8 @@ module.exports = async (req, res) => {
           err.errors.map(e => ({ field: e.path.join('.'), message: e.message }))
         );
       }
-      console.error('Error updating user:', err);
+      logger.error('Error updating user', { error: err.message });
+      Sentry.captureException(err);
       return sendError(res, 500, err.message);
     }
   }

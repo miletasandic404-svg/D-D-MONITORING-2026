@@ -11,6 +11,14 @@ try {
   // dotenv not available, env vars come from host
 }
 
+const { makeLogger } = require('../lib/_logger');
+const Sentry = require('@sentry/node');
+const { initSentry } = require('../lib/_sentry');
+
+const logger = makeLogger('db-index');
+
+initSentry();
+
 const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 // SET LOCAL does not support parameterized placeholders ($1), so the
@@ -41,7 +49,8 @@ const pool = hasDatabase
 // ── Graceful pool error handling ─────────────────────────────────────────
 if (pool) {
   pool.on('error', (err) => {
-    console.error('[db] Unexpected pool error:', err.message);
+    logger.error('Unexpected pool error', { error: err.message });
+    Sentry.captureException(err);
   });
 }
 
@@ -76,7 +85,7 @@ async function withRetry(fn, maxRetries = 2) {
       if (!isTransient || attempt >= maxRetries) {
         throw err;
       }
-      console.error(`[db] Transient error (attempt ${attempt + 1}/${maxRetries + 1}):`, err.message);
+      logger.error('Transient error', { attempt: attempt + 1, max_retries: maxRetries + 1, error: err.message });
     }
   }
   throw lastError;

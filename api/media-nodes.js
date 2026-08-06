@@ -5,6 +5,13 @@ const { logPlatformAudit, getIp } = require('../lib/_audit');
 const { z } = require('zod');
 const { sendError, sendSuccess } = require('../lib/_error');
 const { rateLimit } = require('../lib/_rate_limit');
+const { makeLogger } = require('../lib/_logger');
+const Sentry = require('@sentry/node');
+const { initSentry } = require('../lib/_sentry');
+
+const logger = makeLogger('api-media-nodes');
+
+initSentry();
 
 
 // ─── Zod schema for media node creation ─────────────────────────
@@ -119,7 +126,8 @@ async function handlePostHeartbeat(req, res) {
 
     return sendSuccess(res, { synced: true });
   } catch (err) {
-    console.error('POST /api/media-nodes/heartbeat error:', err.message);
+    logger.error('POST /api/media-nodes/heartbeat error', { error: err.message });
+    Sentry.captureException(err);
     return sendError(res, 500, err.message);
   }
 }

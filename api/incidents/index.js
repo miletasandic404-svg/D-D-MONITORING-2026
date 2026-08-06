@@ -5,6 +5,13 @@ const { keyFromPublicUrl, getPresignedDownloadUrl, isConfigured } = require('../
 const { z } = require('zod');
 const { sendError, sendSuccess } = require('../../lib/_error');
 const { rateLimit } = require('../../lib/_rate_limit');
+const { makeLogger } = require('../../lib/_logger');
+const Sentry = require('@sentry/node');
+const { initSentry } = require('../../lib/_sentry');
+
+const logger = makeLogger('api-incidents');
+
+initSentry();
 
 
 const ALLOWED_STATUSES = ['New', 'Acknowledged', 'In Progress', 'Resolved', 'False Alarm'];
@@ -98,7 +105,8 @@ module.exports = async (req, res) => {
 
     return sendSuccess(res, { count: incidents.length, incidents, statuses: ALLOWED_STATUSES });
   } catch (err) {
-    console.error('GET /api/incidents error:', err.message);
+    logger.error('GET /api/incidents error', { error: err.message });
+    Sentry.captureException(err);
     return sendError(res, 500, err.message);
   }
 };
@@ -136,7 +144,8 @@ async function handleActivity(req, res, eventId) {
 
     return sendSuccess(res, { event_id: eventId, activity: rows });
   } catch (err) {
-    console.error('GET /api/incidents/:eventId/activity error:', err.message);
+    logger.error('GET /api/incidents/:eventId/activity error', { error: err.message });
+    Sentry.captureException(err);
     return sendError(res, 500, err.message);
   }
 }
@@ -227,7 +236,8 @@ async function handleStatus(req, res, eventId) {
         err.errors.map(e => ({ field: e.path.join('.'), message: e.message }))
       );
     }
-    console.error('PATCH /api/incidents/:eventId/status error:', err.message);
+    logger.error('PATCH /api/incidents/:eventId/status error', { error: err.message });
+    Sentry.captureException(err);
     return sendError(res, 500, err.message);
   }
 }
@@ -275,7 +285,7 @@ async function handleEvidence(req, res, eventId) {
         const key = keyFromPublicUrl(r.storage_url);
         if (key) {
           try { downloadUrl = await getPresignedDownloadUrl(key, { expiresInSeconds: 3600 }); }
-          catch { console.error('[evidence] presign failed for recording', r.id); }
+          catch { logger.error('[evidence] presign failed for recording', { recording_id: r.id }); }
         }
       }
       return {
@@ -290,7 +300,7 @@ async function handleEvidence(req, res, eventId) {
         const key = keyFromPublicUrl(s.storage_url);
         if (key) {
           try { downloadUrl = await getPresignedDownloadUrl(key, { expiresInSeconds: 3600 }); }
-          catch { console.error('[evidence] presign failed for snapshot', s.id); }
+          catch { logger.error('[evidence] presign failed for snapshot', { snapshot_id: s.id }); }
         }
       }
       return { id: s.id, taken_at: s.taken_at, trigger: s.trigger, download_url: downloadUrl };
@@ -303,7 +313,8 @@ async function handleEvidence(req, res, eventId) {
       storage_configured: storageReady,
     });
   } catch (err) {
-    console.error('GET /api/incidents/:eventId/evidence error:', err.message);
+    logger.error('GET /api/incidents/:eventId/evidence error', { error: err.message });
+    Sentry.captureException(err);
     return sendError(res, 500, err.message);
   }
 }
