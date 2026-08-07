@@ -122,7 +122,7 @@ async function handleEvent(payload) {
        WHERE id = $1`,
       [recordingId, endTime, Math.round((endTime - startTime) / 1000), stats.size, storageUrl, retentionExpiresAt],
     );
-    logger.info('Recording completed', { recording_id: recordingId, size_bytes: stats.size, storage_url });
+    logger.info('Recording completed', { recording_id: recordingId, size_bytes: stats.size, storage_url: storageUrl });
   } catch (err) {
     logger.error('Recording failed', { recording_id: recordingId, error: err.message });
     Sentry.captureException(err);
