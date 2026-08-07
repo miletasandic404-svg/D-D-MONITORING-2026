@@ -2,6 +2,9 @@ const globals = require("globals");
 
 module.exports = [
   {
+    ignores: ["frontend/dist/**", "frontend/node_modules/**", "node_modules/**"],
+  },
+  {
     languageOptions: {
       ecmaVersion: "latest",
       sourceType: "module",
