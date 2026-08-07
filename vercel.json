@@ -6,16 +6,46 @@
     {
       "source": "/(.*)",
       "headers": [
-        { "key": "X-Robots-Tag", "value": "index, follow" },
-        { "key": "Cross-Origin-Opener-Policy", "value": "same-origin-allow-popups" },
-        { "key": "X-Content-Type-Options", "value": "nosniff" },
-        { "key": "X-Frame-Options", "value": "DENY" },
-        { "key": "Referrer-Policy", "value": "strict-origin-when-cross-origin" },
-        { "key": "Permissions-Policy", "value": "camera=(), microphone=(), geolocation=()" },
-        { "key": "Content-Security-Policy", "value": "default-src 'self'; script-src 'self' https://www.paypal.com https://www.paypalobjects.com https://js.stripe.com https://vercel.live; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://vercel.live data:; img-src 'self' data: https:; media-src 'self' blob: https://*.fly.dev https://*.railway.app; connect-src 'self' https://*.fly.dev https://*.railway.app https://api.paypal.com https://api-m.paypal.com https://api-m.sandbox.paypal.com https://www.paypal.com https://api.stripe.com https://r.stripe.com https://js.stripe.com https://vercel.live https://*.pusher.com wss://*.pusher.com https://*.sentry.io https://*.ingest.sentry.io; frame-src https://www.paypal.com https://www.sandbox.paypal.com https://js.stripe.com https://hooks.stripe.com https://vercel.live; worker-src 'self' blob:; object-src 'none';" },
-        { "key": "Access-Control-Allow-Origin", "value": "https://www.dnd-monitoring.com" },
-        { "key": "Access-Control-Allow-Methods", "value": "GET, POST, PATCH, DELETE, OPTIONS" },
-        { "key": "Access-Control-Allow-Headers", "value": "Content-Type, Authorization" }
+        {
+          "key": "X-Robots-Tag",
+          "value": "index, follow"
+        },
+        {
+          "key": "Cross-Origin-Opener-Policy",
+          "value": "same-origin-allow-popups"
+        },
+        {
+          "key": "X-Content-Type-Options",
+          "value": "nosniff"
+        },
+        {
+          "key": "X-Frame-Options",
+          "value": "DENY"
+        },
+        {
+          "key": "Referrer-Policy",
+          "value": "strict-origin-when-cross-origin"
+        },
+        {
+          "key": "Permissions-Policy",
+          "value": "camera=(), microphone=(), geolocation=()"
+        },
+        {
+          "key": "Content-Security-Policy",
+          "value": "default-src 'self'; script-src 'self' https://www.paypal.com https://www.paypalobjects.com https://js.stripe.com https://vercel.live; style-src 'self' 'unsafe-inline' https://fonts.googleapis.com; font-src 'self' https://fonts.gstatic.com https://vercel.live data:; img-src 'self' data: https:; media-src 'self' blob: https://*.fly.dev https://*.railway.app; connect-src 'self' https://*.fly.dev https://*.railway.app https://api.paypal.com https://api-m.paypal.com https://api-m.sandbox.paypal.com https://www.paypal.com https://api.stripe.com https://r.stripe.com https://js.stripe.com https://vercel.live https://*.pusher.com wss://*.pusher.com https://*.sentry.io https://*.ingest.sentry.io; frame-src https://www.paypal.com https://www.sandbox.paypal.com https://js.stripe.com https://hooks.stripe.com https://vercel.live; worker-src 'self' blob:; object-src 'none';"
+        },
+        {
+          "key": "Access-Control-Allow-Origin",
+          "value": "https://www.dnd-monitoring.com"
+        },
+        {
+          "key": "Access-Control-Allow-Methods",
+          "value": "GET, POST, PATCH, DELETE, OPTIONS"
+        },
+        {
+          "key": "Access-Control-Allow-Headers",
+          "value": "Content-Type, Authorization"
+        }
       ]
     }
   ],
@@ -23,50 +53,184 @@
     {
       "path": "/api/cron-pending-activations",
       "schedule": "0 3 * * *"
+    },
+    {
+      "path": "/api/cron-retention",
+      "schedule": "0 4 * * *"
     }
   ],
   "rewrites": [
-    { "source": "/api/auth/:path*", "destination": "/api/auth-all" },
-    { "source": "/api/verify-stream-token", "destination": "/api/meta" },
-    { "source": "/api/cron-pending-activations", "destination": "/api/meta" },
-    { "source": "/api/health", "destination": "/api/meta" },
-    { "source": "/api/ai-detections", "destination": "/api/resources" },
-    { "source": "/api/snapshots", "destination": "/api/resources" },
-    { "source": "/api/recordings", "destination": "/api/resources" },
-    { "source": "/robots.txt", "destination": "/robots.txt" },
-    { "source": "/sitemap.xml", "destination": "/sitemap.xml" },
-    { "source": "/llms.txt", "destination": "/llms.txt" },
-    { "source": "/api/incidents/:eventId/activity", "destination": "/api/incidents/:eventId?path=activity" },
-    { "source": "/api/incidents/:eventId/status", "destination": "/api/incidents/:eventId?path=status" },
-    { "source": "/api/incidents/:eventId/evidence", "destination": "/api/incidents/:eventId?path=evidence" },
-    { "source": "/api/sites", "destination": "/api/cameras?path=sites" },
-    { "source": "/api/onboarding/register", "destination": "/api/onboarding?path=register" },
-    { "source": "/api/onboarding/connect-camera", "destination": "/api/onboarding?path=connect-camera" },
-    { "source": "/api/onboarding/status", "destination": "/api/onboarding?path=status" },
-    { "source": "/api/onboarding/complete", "destination": "/api/onboarding?path=complete" },
-    { "source": "/api/camera-setup", "destination": "/api/cameras?path=setup-create" },
-    { "source": "/api/camera-setup/tasks", "destination": "/api/cameras?path=setup-list" },
-    { "source": "/api/camera-setup/node", "destination": "/api/cameras?path=setup-node" },
-    { "source": "/api/camera-setup/cancel", "destination": "/api/cameras?path=setup-cancel" },
-    { "source": "/api/camera-setup/:id", "destination": "/api/cameras?path=setup-get&id=:id" },
-    { "source": "/api/cameras/discover", "destination": "/api/cameras?path=discover" },
-    { "source": "/api/cameras/auto-register", "destination": "/api/cameras?path=auto-register" },
-    { "source": "/api/cameras/subnet-scan", "destination": "/api/cameras?path=subnet-scan" },
-    { "source": "/api/cameras/scan", "destination": "/api/cameras?path=scan" },
-    { "source": "/api/operator-assignments", "destination": "/api/users?path=assignments" },
-    { "source": "/api/operators", "destination": "/api/users?path=operators" },
-    { "source": "/api/camera-views/:viewId", "destination": "/api/camera-views?id=:viewId" },
-    { "source": "/api/media-nodes/:nodeId/heartbeat", "destination": "/api/media-nodes?nodeId=:nodeId" },
-    { "source": "/api/paypal/orders", "destination": "/api/payments?provider=paypal" },
-    { "source": "/api/paypal/orders/:orderId/capture", "destination": "/api/payments?provider=paypal&orderId=:orderId" },
-    { "source": "/api/paypal/webhook", "destination": "/api/payments?provider=paypal&path=webhook" },
-    { "source": "/api/payments/card/intent", "destination": "/api/payments?provider=card&path=intent" },
-    { "source": "/api/payments/card/confirm", "destination": "/api/payments?provider=card&path=confirm" },
-    { "source": "/api/payments/catalog", "destination": "/api/payments?path=catalog" },
-    { "source": "/api/payments/status", "destination": "/api/payments?path=status" },
-    { "source": "/api/payments/retry", "destination": "/api/payments?path=retry" },
-    { "source": "/api/payments/stripe/webhook", "destination": "/api/payments?provider=card&path=webhook" },
-    { "source": "/api/hls/:camera/index.m3u8", "destination": "/api/hls/:camera" },
-    { "source": "/((?!api/).*)", "destination": "/index.html" }
+    {
+      "source": "/api/auth/:path*",
+      "destination": "/api/auth-all"
+    },
+    {
+      "source": "/api/cron-retention",
+      "destination": "/api/meta"
+    },
+    {
+      "source": "/api/verify-stream-token",
+      "destination": "/api/meta"
+    },
+    {
+      "source": "/api/cron-pending-activations",
+      "destination": "/api/meta"
+    },
+    {
+      "source": "/api/health",
+      "destination": "/api/meta"
+    },
+    {
+      "source": "/api/ai-detections",
+      "destination": "/api/resources"
+    },
+    {
+      "source": "/api/snapshots",
+      "destination": "/api/resources"
+    },
+    {
+      "source": "/api/recordings",
+      "destination": "/api/resources"
+    },
+    {
+      "source": "/robots.txt",
+      "destination": "/robots.txt"
+    },
+    {
+      "source": "/sitemap.xml",
+      "destination": "/sitemap.xml"
+    },
+    {
+      "source": "/llms.txt",
+      "destination": "/llms.txt"
+    },
+    {
+      "source": "/api/incidents/:eventId/activity",
+      "destination": "/api/incidents/:eventId?path=activity"
+    },
+    {
+      "source": "/api/incidents/:eventId/status",
+      "destination": "/api/incidents/:eventId?path=status"
+    },
+    {
+      "source": "/api/incidents/:eventId/evidence",
+      "destination": "/api/incidents/:eventId?path=evidence"
+    },
+    {
+      "source": "/api/sites",
+      "destination": "/api/cameras?path=sites"
+    },
+    {
+      "source": "/api/onboarding/register",
+      "destination": "/api/onboarding?path=register"
+    },
+    {
+      "source": "/api/onboarding/connect-camera",
+      "destination": "/api/onboarding?path=connect-camera"
+    },
+    {
+      "source": "/api/onboarding/status",
+      "destination": "/api/onboarding?path=status"
+    },
+    {
+      "source": "/api/onboarding/complete",
+      "destination": "/api/onboarding?path=complete"
+    },
+    {
+      "source": "/api/camera-setup",
+      "destination": "/api/cameras?path=setup-create"
+    },
+    {
+      "source": "/api/camera-setup/tasks",
+      "destination": "/api/cameras?path=setup-list"
+    },
+    {
+      "source": "/api/camera-setup/node",
+      "destination": "/api/cameras?path=setup-node"
+    },
+    {
+      "source": "/api/camera-setup/cancel",
+      "destination": "/api/cameras?path=setup-cancel"
+    },
+    {
+      "source": "/api/camera-setup/:id",
+      "destination": "/api/cameras?path=setup-get&id=:id"
+    },
+    {
+      "source": "/api/cameras/discover",
+      "destination": "/api/cameras?path=discover"
+    },
+    {
+      "source": "/api/cameras/auto-register",
+      "destination": "/api/cameras?path=auto-register"
+    },
+    {
+      "source": "/api/cameras/subnet-scan",
+      "destination": "/api/cameras?path=subnet-scan"
+    },
+    {
+      "source": "/api/cameras/scan",
+      "destination": "/api/cameras?path=scan"
+    },
+    {
+      "source": "/api/operator-assignments",
+      "destination": "/api/users?path=assignments"
+    },
+    {
+      "source": "/api/operators",
+      "destination": "/api/users?path=operators"
+    },
+    {
+      "source": "/api/camera-views/:viewId",
+      "destination": "/api/camera-views?id=:viewId"
+    },
+    {
+      "source": "/api/media-nodes/:nodeId/heartbeat",
+      "destination": "/api/media-nodes?nodeId=:nodeId"
+    },
+    {
+      "source": "/api/paypal/orders",
+      "destination": "/api/payments?provider=paypal"
+    },
+    {
+      "source": "/api/paypal/orders/:orderId/capture",
+      "destination": "/api/payments?provider=paypal&orderId=:orderId"
+    },
+    {
+      "source": "/api/paypal/webhook",
+      "destination": "/api/payments?provider=paypal&path=webhook"
+    },
+    {
+      "source": "/api/payments/card/intent",
+      "destination": "/api/payments?provider=card&path=intent"
+    },
+    {
+      "source": "/api/payments/card/confirm",
+      "destination": "/api/payments?provider=card&path=confirm"
+    },
+    {
+      "source": "/api/payments/catalog",
+      "destination": "/api/payments?path=catalog"
+    },
+    {
+      "source": "/api/payments/status",
+      "destination": "/api/payments?path=status"
+    },
+    {
+      "source": "/api/payments/retry",
+      "destination": "/api/payments?path=retry"
+    },
+    {
+      "source": "/api/payments/stripe/webhook",
+      "destination": "/api/payments?provider=card&path=webhook"
+    },
+    {
+      "source": "/api/hls/:camera/index.m3u8",
+      "destination": "/api/hls/:camera"
+    },
+    {
+      "source": "/((?!api/).*)",
+      "destination": "/index.html"
+    }
   ]
 }
