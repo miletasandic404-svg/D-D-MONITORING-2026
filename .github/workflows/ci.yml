@@ -21,12 +21,18 @@ jobs:
     
     - name: Install dependencies
       run: npm ci
-    
-    - name: Run tests
+
+    - name: Run backend tests
       run: npm test
-    
+
     - name: Run ESLint
       run: npx eslint .
-    
+
+    - name: Install frontend dependencies
+      run: cd frontend && npm ci
+
+    - name: Run frontend tests
+      run: cd frontend && npm test
+
     - name: Build frontend
       run: npm run build
