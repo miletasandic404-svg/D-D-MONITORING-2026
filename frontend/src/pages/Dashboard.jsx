@@ -3,68 +3,10 @@ import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Hls from 'hls.js';
 import { getSession, signOut } from '../services/auth-client';
-import { fetchSubscriptionState } from '../services/billing';
-import { loadPayPalSdk, loadStripeSdk } from '../services/payment-helpers';
+import { useBilling } from '../hooks/useBilling';
+import BillingPanel from '../components/dashboard/BillingPanel';
 
 const hlsBaseUrl = (import.meta.env.VITE_HLS_BASE_URL || '/hls').replace(/\/$/, '');
-const paypalClientId = import.meta.env.VITE_PAYPAL_CLIENT_ID || '';
-const paypalCurrency = import.meta.env.VITE_PAYPAL_CURRENCY || 'USD';
-const stripePublishableKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY || '';
-
-
-const PLAN_OPTIONS = [
-  {
-    id: 'starter',
-    name: 'Standard Global',
-    price: '$500 / month',
-    paypalAmount: '500',
-    features: [
-      'Global monitoring for up to 5 active locations/cameras',
-      'Automated reports',
-      'Standard support',
-    ],
-  },
-  {
-    id: 'growth',
-    name: 'Business Global',
-    price: '$950 / month',
-    paypalAmount: '950',
-    features: [
-      'Advanced monitoring for up to 15 active locations/cameras',
-      'Accelerated AI reporting',
-      'Priority support',
-    ],
-  },
-  {
-    id: 'enterprise',
-    name: 'Enterprise Global',
-    price: '$1500 / month',
-    paypalAmount: '1500',
-    features: [
-      'Maximum capacity',
-      'Unlimited locations',
-      'Dedicated AI analytics',
-      '24/7 premium support',
-    ],
-  },
-];
-
-function formatPlanOption(plan) {
-  const amount = Number.parseFloat(plan?.amount || '0');
-  const limit = Number(plan?.limits?.camera_limit || 0);
-  return {
-    id: plan.id,
-    name: plan.name,
-    price: Number.isFinite(amount) ? `$${amount.toLocaleString()} / month` : plan.amount,
-    paypalAmount: Number.isFinite(amount) ? String(amount) : '',
-    features: [
-      `${limit > 0 ? `Up to ${limit}` : 'Unlimited'} cameras / locations`,
-      plan.features?.aiDetection ? 'AI detection included' : 'AI detection unavailable',
-      plan.features?.reports ? 'Reports included' : 'No reports included',
-      plan.features?.apiAccess ? 'API access included' : 'No API access',
-    ],
-  };
-}
 
 function buildHlsManifestUrl(cameraId, cameraHlsBaseUrl) {
   // Vercel serverless ne moze da hostuje trajni RTSP->HLS transkoder,
@@ -143,10 +85,6 @@ function useDebounce(value, delay = 250) {
 
 export default function Dashboard() {
   const navigate = useNavigate();
-  const paypalButtonsRef = useRef(null);
-  const cardElementRef = useRef(null);
-  const stripeRef = useRef(null);
-  const stripeElementsRef = useRef(null);
   const [authChecked, setAuthChecked] = useState(false);
   const [incidents, setIncidents] = useState([]);
   const [incidentsLoaded, setIncidentsLoaded] = useState(false);
@@ -516,30 +454,13 @@ export default function Dashboard() {
   const brandName = brandMode === 'corporate' ? 'SecureOps Enterprise' : 'D&D Global AI Surveillance';
   const brandInitial = brandMode === 'corporate' ? 'S' : 'D';
 
-  // Phase 4 - Subscription
-  const [showBilling, setShowBilling] = useState(false);
-  const [selectedPlanId, setSelectedPlanId] = useState('growth');
-  const [availablePlans, setAvailablePlans] = useState(PLAN_OPTIONS);
-  const [subscriptionState, setSubscriptionState] = useState(null);
-  const [checkoutStatus, setCheckoutStatus] = useState('');
-  const [paymentStep, setPaymentStep] = useState('details');
-  const [emergencyDistrict, setEmergencyDistrict] = useState('');
-  const [emergencyContacts, setEmergencyContacts] = useState({
-    policeStation: '',
-    fireService: '',
-    ambulance: '',
-    localCommand: '',
-  });
+  // Phase 4 - Subscription (state/effects/handlers live in hooks/useBilling.js;
+  // this component only wires it up and renders <BillingPanel />).
+  const billing = useBilling({ addAuditEntry });
+  const { selectedPlan, showBilling, setShowBilling } = billing;
+
   const [selectedAlarmId, setSelectedAlarmId] = useState(null);
   const [reportNotes, setReportNotes] = useState('');
-  const [paypalMountError, setPaypalMountError] = useState('');
-  const [paypalMounting, setPaypalMounting] = useState(false);
-  const [paymentMethod, setPaymentMethod] = useState('paypal');
-  const [cardMountError, setCardMountError] = useState('');
-  const [cardMounting, setCardMounting] = useState(false);
-  const [cardSubmitting, setCardSubmitting] = useState(false);
-
-  const selectedPlan = availablePlans.find((plan) => plan.id === selectedPlanId) || availablePlans[0] || PLAN_OPTIONS[1];
 
   const triggerTalkdown = (camId) => {
     setTalkdownActive(camId);
@@ -615,17 +536,6 @@ export default function Dashboard() {
     }
   };
 
-  const selectedPlanAmount = selectedPlan.paypalAmount;
-  const selectedPlanSupportsPaypal = Boolean(selectedPlanAmount);
-
-  const requiredEmergencyFields = [
-    emergencyDistrict,
-    emergencyContacts.policeStation,
-    emergencyContacts.fireService,
-    emergencyContacts.ambulance,
-    emergencyContacts.localCommand,
-  ].every((value) => String(value || '').trim().length > 0);
-
   const openAlarmMap = (event) => {
     setSelectedAlarmId(event.eventId);
     addAuditEntry(`Opened alarm map for Event #${event.eventId}`);
@@ -642,266 +552,10 @@ export default function Dashboard() {
     addAuditEntry(`Generated automatic report for Event #${generatedReport.incident.event_id || 'unknown'}`);
   };
 
-  const startCheckout = () => {
-    if (!requiredEmergencyFields) {
-      setCheckoutStatus('Fill emergency contacts before checkout.');
-      return;
-    }
-
-    if (paymentMethod === 'paypal' && !paypalClientId) {
-      setCheckoutStatus('PayPal client ID is missing in VITE_PAYPAL_CLIENT_ID.');
-      return;
-    }
-
-    if (paymentMethod === 'card' && !stripePublishableKey) {
-      setCheckoutStatus('Stripe publishable key is missing in VITE_STRIPE_PUBLISHABLE_KEY.');
-      return;
-    }
-
-    if (!selectedPlanSupportsPaypal) {
-      setCheckoutStatus('Select a package to continue with PayPal checkout.');
-      return;
-    }
-
-    setCheckoutStatus(`Opening ${paymentMethod === 'paypal' ? 'PayPal' : 'card'} checkout for ${selectedPlan.name}.`);
-    setPaymentStep('checkout');
-    addAuditEntry(`Prepared ${paymentMethod} checkout for ${selectedPlan.name}`);
-  };
-
-  useEffect(() => {
-    if (paymentStep !== 'checkout' || paymentMethod !== 'paypal') {
-      return undefined;
-    }
-
-    let cancelled = false;
-
-    const mountButtons = async () => {
-      if (!requiredEmergencyFields) {
-        setCheckoutStatus('Fill emergency contacts before checkout.');
-        return;
-      }
-
-      if (!selectedPlanSupportsPaypal) {
-        setCheckoutStatus('Select a package to continue with PayPal checkout.');
-        return;
-      }
-
-      if (!paypalButtonsRef.current) {
-        return;
-      }
-
-      setPaypalMounting(true);
-      setPaypalMountError('');
-
-      try {
-        const paypal = await loadPayPalSdk(paypalClientId, paypalCurrency);
-        if (cancelled || !paypalButtonsRef.current) {
-          return;
-        }
-
-        paypalButtonsRef.current.innerHTML = '';
-
-        const buttons = paypal.Buttons({
-          style: {
-            layout: 'vertical',
-            shape: 'rect',
-            label: 'paypal',
-            height: 48,
-          },
-          createOrder: async () => {
-            const response = await api.post('/paypal/orders', {
-              planId: selectedPlan.id,
-              district: emergencyDistrict,
-              contacts: emergencyContacts,
-              idempotencyKey: window.crypto?.randomUUID?.(),
-            });
-
-            return response.data.id;
-          },
-          onApprove: async (data) => {
-            setPaypalMounting(true);
-            const response = await api.post(`/paypal/orders/${data.orderID}/capture`);
-
-            if (cancelled) {
-              return;
-            }
-
-            setPaymentStep('complete');
-            setCheckoutStatus(`PayPal payment completed: ${response.data.status || 'COMPLETED'}.`);
-            await loadBillingState();
-            addAuditEntry(`Activated ${selectedPlan.name} via PayPal order ${data.orderID}`);
-          },
-          onCancel: () => {
-            if (!cancelled) {
-              setCheckoutStatus('PayPal checkout canceled.');
-            }
-          },
-          onError: (err) => {
-            if (!cancelled) {
-              setCheckoutStatus(err?.message || 'PayPal checkout failed.');
-            }
-          },
-        });
-
-        if (!buttons.isEligible()) {
-          setCheckoutStatus('PayPal buttons are not eligible in this browser.');
-          return;
-        }
-
-        await buttons.render(paypalButtonsRef.current);
-
-        if (!cancelled) {
-          setCheckoutStatus(`PayPal checkout ready for ${selectedPlan.name}.`);
-        }
-      } catch (err) {
-        if (!cancelled) {
-          setPaypalMountError(err?.message || 'Failed to load PayPal checkout.');
-          setCheckoutStatus(err?.message || 'Failed to load PayPal checkout.');
-        }
-      } finally {
-        if (!cancelled) {
-          setPaypalMounting(false);
-        }
-      }
-    };
-
-    mountButtons();
-
-    return () => {
-      cancelled = true;
-      if (paypalButtonsRef.current) {
-        paypalButtonsRef.current.innerHTML = '';
-      }
-    };
-  }, [paymentMethod, paymentStep, requiredEmergencyFields, selectedPlan.id, selectedPlan.name, selectedPlanAmount, selectedPlanSupportsPaypal, emergencyDistrict, emergencyContacts.policeStation, emergencyContacts.fireService, emergencyContacts.ambulance, emergencyContacts.localCommand]);
-
-  useEffect(() => {
-    if (paymentStep !== 'checkout' || paymentMethod !== 'card') {
-      return undefined;
-    }
-
-    let cancelled = false;
-    let paymentElement = null;
-
-    const mountCard = async () => {
-      if (!requiredEmergencyFields) {
-        setCheckoutStatus('Fill emergency contacts before checkout.');
-        return;
-      }
-
-      if (!cardElementRef.current) {
-        return;
-      }
-
-      setCardMounting(true);
-      setCardMountError('');
-
-      try {
-        const intent = await api.post('/payments/card/intent', {
-          planId: selectedPlan.id,
-          district: emergencyDistrict,
-          contacts: emergencyContacts,
-          idempotencyKey: window.crypto?.randomUUID?.(),
-        });
-        const stripe = await loadStripeSdk(stripePublishableKey);
-        if (cancelled || !cardElementRef.current) {
-          return;
-        }
-
-        stripeRef.current = stripe;
-        stripeElementsRef.current = stripe.elements({
-          clientSecret: intent.data.client_secret,
-          appearance: { theme: 'night' },
-        });
-
-        cardElementRef.current.innerHTML = '';
-        paymentElement = stripeElementsRef.current.create('payment');
-        paymentElement.mount(cardElementRef.current);
-        setCheckoutStatus(`Card checkout ready for ${selectedPlan.name}.`);
-      } catch (err) {
-        if (!cancelled) {
-          const message = err?.response?.data?.error || err?.message || 'Failed to load card checkout.';
-          setCardMountError(message);
-          setCheckoutStatus(message);
-        }
-      } finally {
-        if (!cancelled) {
-          setCardMounting(false);
-        }
-      }
-    };
-
-    mountCard();
-
-    return () => {
-      cancelled = true;
-      if (paymentElement) paymentElement.unmount();
-      stripeElementsRef.current = null;
-      stripeRef.current = null;
-      if (cardElementRef.current) {
-        cardElementRef.current.innerHTML = '';
-      }
-    };
-  }, [paymentMethod, paymentStep, requiredEmergencyFields, selectedPlan.id, selectedPlan.name, emergencyDistrict, emergencyContacts.policeStation, emergencyContacts.fireService, emergencyContacts.ambulance, emergencyContacts.localCommand, stripePublishableKey]);
-
-  const handleCardCheckout = async () => {
-    if (!stripeRef.current || !stripeElementsRef.current) {
-      setCardMountError('Card checkout is still loading.');
-      return;
-    }
-
-    setCardSubmitting(true);
-    setCardMountError('');
-
-    try {
-      const result = await stripeRef.current.confirmPayment({
-        elements: stripeElementsRef.current,
-        redirect: 'if_required',
-      });
-
-      if (result.error) {
-        throw new Error(result.error.message || 'Card payment failed.');
-      }
-
-      const response = await api.post('/payments/card/confirm', {
-        paymentIntentId: result.paymentIntent?.id,
-      });
-
-      setPaymentStep('complete');
-      setCheckoutStatus(`Card payment completed: ${response.data.status || 'SUCCEEDED'}.`);
-      await loadBillingState();
-      addAuditEntry(`Activated ${selectedPlan.name} via card payment ${result.paymentIntent?.id}`);
-    } catch (err) {
-      const message = err?.response?.data?.error || err?.message || 'Card payment failed.';
-      setCardMountError(message);
-      setCheckoutStatus(message);
-    } finally {
-      setCardSubmitting(false);
-    }
-  };
 
   // Phase 3 - Push Notification Banner
   const [notifications, setNotifications] = useState([]);
   const dismissNotification = (id) => setNotifications((prev) => prev.filter((n) => n.id !== id));
-
-  const loadBillingState = async () => {
-    try {
-      const state = await fetchSubscriptionState();
-      setSubscriptionState(state.subscription || null);
-      if (Array.isArray(state.plans) && state.plans.length > 0) {
-        const planOptions = state.plans.map(formatPlanOption);
-        setAvailablePlans(planOptions);
-        setSelectedPlanId((currentPlanId) => {
-          if (currentPlanId && planOptions.some((plan) => plan.id === currentPlanId)) {
-            return currentPlanId;
-          }
-          return state.subscription?.planId || planOptions[0].id;
-        });
-      }
-    } catch (err) {
-      console.error('Failed to load billing state:', err);
-    }
-  };
 
 
   // Auth guard - redirect to login if no active session
@@ -917,7 +571,7 @@ export default function Dashboard() {
         } else {
           // Sync user info from server session
           localStorage.setItem('currentUser', JSON.stringify(session.user));
-          await loadBillingState();
+          await billing.loadBillingState();
           setAuthChecked(true);
         }
       } catch (err) {
@@ -986,7 +640,7 @@ export default function Dashboard() {
   const selectedAlarmEvent = recentEvents.find((event) => event.eventId === selectedAlarmId) || recentEvents[0] || null;
   const selectedAlarmCamera = cameras?.find((camera) => camera.id === selectedAlarmEvent?.camera_id) || cameras?.[0] || null;
   const selectedAlarmGeo = buildCameraGeo(selectedAlarmCamera);
-  const generatedReport = buildIncidentReport(selectedAlarmEvent, selectedAlarmCamera, { district: emergencyDistrict, ...emergencyContacts }, selectedPlan);
+  const generatedReport = buildIncidentReport(selectedAlarmEvent, selectedAlarmCamera, { district: billing.emergencyDistrict, ...billing.emergencyContacts }, selectedPlan);
   const reportSummary = selectedAlarmEvent
     ? `Alarm at ${selectedAlarmGeo.label} requires dispatch confirmation. Route to ${selectedAlarmGeo.note}.`
     : 'No active alarm selected yet.';
@@ -1596,185 +1250,14 @@ export default function Dashboard() {
 
         {/* -- Subscription / Billing Panel -- */}
         {showBilling && (
-          <section className="dashboard-panel billing-panel" id="billing">
-            <div className="panel-heading">
-              <div>
-                <p className="eyebrow">License Management</p>
-                <h3>Client Plans &amp; Checkout</h3>
-              </div>
-              <button className="notif-dismiss" type="button" onClick={() => setShowBilling(false)}>&#x2715;</button>
-            </div>
-
-            <div className="billing-grid billing-grid-wide">
-              <div className="billing-tier-card billing-plan-list">
-                <p className="eyebrow">Available packages</p>
-                <div className="plan-grid">
-                  {PLAN_OPTIONS.map((plan) => (
-                    <button
-                      key={plan.id}
-                      type="button"
-                      role="button"
-                      className={`plan-card${selectedPlanId === plan.id ? ' plan-card-active' : ''}`}
-                      onClick={() => {
-                        setSelectedPlanId(plan.id);
-                        addAuditEntry(`Selected package ${plan.name}`);
-                      }}
-                    >
-                      <div className="plan-card-top">
-                        <strong>{plan.name}</strong>
-                        <span>{plan.price}</span>
-                      </div>
-                      <ul className="plan-card-features">
-                        {plan.features.map((feature) => (
-                          <li key={feature}>{feature}</li>
-                        ))}
-                      </ul>
-                    </button>
-                  ))}
-                </div>
-                <div className="purchase-note">
-                  <span className="status-pill neutral">Backend verified subscription</span>
-                  <p>
-                    Current plan: {subscriptionState?.planName || 'Loading...'} •
-                    status: {subscriptionState?.status || 'pending'}.
-                    PayPal and direct card payments are finalized server-side before plan activation.
-                  </p>
-                </div>
-              </div>
-
-              <div className="billing-upgrade-card">
-                <p className="eyebrow">Billing controls</p>
-                <h4>{selectedPlan.name}</h4>
-                <p className="ls-desc">{selectedPlan.price}</p>
-
-                <div className="checkout-stepper">
-                  <span className={paymentStep === 'details' ? 'step-active' : ''}>1. Contacts</span>
-                  <span className={paymentStep === 'checkout' ? 'step-active' : ''}>2. Payment</span>
-                  <span className={paymentStep === 'complete' ? 'step-active' : ''}>3. Activated</span>
-                </div>
-
-                <div className="contact-grid">
-                  <label className="search-field">
-                    <span>District</span>
-                    <input required value={emergencyDistrict} onChange={(e) => setEmergencyDistrict(e.target.value)} placeholder="District / county" />
-                  </label>
-                  <label className="search-field">
-                    <span>Police station number</span>
-                    <input required value={emergencyContacts.policeStation} onChange={(e) => setEmergencyContacts((prev) => ({ ...prev, policeStation: e.target.value }))} placeholder="110 / local number" />
-                  </label>
-                  <label className="search-field">
-                    <span>Fire service number</span>
-                    <input required value={emergencyContacts.fireService} onChange={(e) => setEmergencyContacts((prev) => ({ ...prev, fireService: e.target.value }))} placeholder="112 / local number" />
-                  </label>
-                  <label className="search-field">
-                    <span>Ambulance / medical</span>
-                    <input required value={emergencyContacts.ambulance} onChange={(e) => setEmergencyContacts((prev) => ({ ...prev, ambulance: e.target.value }))} placeholder="medical emergency number" />
-                  </label>
-                  <label className="search-field">
-                    <span>Local command center</span>
-                    <input required value={emergencyContacts.localCommand} onChange={(e) => setEmergencyContacts((prev) => ({ ...prev, localCommand: e.target.value }))} placeholder="district command / dispatch" />
-                  </label>
-                </div>
-
-                <div style={{ display: 'flex', gap: '.75rem', flexWrap: 'wrap', marginBottom: '1rem' }}>
-                  <button
-                    type="button"
-                    className="ghost-button"
-                    onClick={() => setPaymentMethod('paypal')}
-                    style={{
-                      borderColor: paymentMethod === 'paypal' ? 'rgba(0,212,255,.7)' : undefined,
-                      background: paymentMethod === 'paypal' ? 'rgba(0,212,255,.12)' : undefined,
-                    }}
-                  >
-                    PayPal
-                  </button>
-                  <button
-                    type="button"
-                    className="ghost-button"
-                    onClick={() => setPaymentMethod('card')}
-                    style={{
-                      borderColor: paymentMethod === 'card' ? 'rgba(0,212,255,.7)' : undefined,
-                      background: paymentMethod === 'card' ? 'rgba(0,212,255,.12)' : undefined,
-                    }}
-                  >
-                    Visa / Mastercard
-                  </button>
-                </div>
-
-                <button className="ghost-button plan-cta" type="button" onClick={startCheckout}>
-                  {paymentMethod === 'paypal' ? 'Start PayPal checkout' : 'Start card checkout'}
-                </button>
-
-                <div className="checkout-meta">
-                  <span className={`status-pill ${requiredEmergencyFields ? 'good' : 'warning'}`}>
-                    {requiredEmergencyFields ? 'Contacts complete' : 'Contacts required'}
-                  </span>
-                  {paypalClientId ? (
-                    <span className="status-pill good">PayPal client ready</span>
-                  ) : (
-                    <span className="status-pill warning">Missing VITE_PAYPAL_CLIENT_ID</span>
-                  )}
-                  {stripePublishableKey ? (
-                    <span className="status-pill good">Card key ready</span>
-                  ) : (
-                    <span className="status-pill warning">Missing VITE_STRIPE_PUBLISHABLE_KEY</span>
-                  )}
-                </div>
-
-                {paymentStep === 'checkout' && paymentMethod === 'paypal' && selectedPlanSupportsPaypal && (
-                  <div className="paypal-button-shell">
-                    <div className="paypal-button-header">
-                      <span className="status-pill good">PayPal secure checkout</span>
-                      <span className="subtle-chip">{selectedPlan.name}</span>
-                    </div>
-                    <div className="paypal-buttons-host" ref={paypalButtonsRef} aria-live="polite" />
-                    {(paypalMounting || paypalMountError) && (
-                      <p className={`checkout-status ${paypalMountError ? 'checkout-status-error' : ''}`}>
-                        {paypalMountError || 'Loading PayPal buttons...'}
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                {paymentStep === 'checkout' && paymentMethod === 'card' && (
-                  <div className="paypal-button-shell">
-                    <div className="paypal-button-header">
-                      <span className="status-pill good">Card checkout</span>
-                      <span className="subtle-chip">{selectedPlan.name}</span>
-                    </div>
-                    <div ref={cardElementRef} style={{ minHeight: 170, padding: '1rem', borderRadius: '18px', background: 'rgba(4,10,28,.72)', border: '1px solid rgba(87,125,196,.25)' }} />
-                    <button className="ghost-button plan-cta" type="button" onClick={handleCardCheckout} disabled={cardSubmitting}>
-                      {cardSubmitting ? 'Processing card...' : 'Pay with card'}
-                    </button>
-                    {(cardMounting || cardMountError) && (
-                      <p className={`checkout-status ${cardMountError ? 'checkout-status-error' : ''}`}>
-                        {cardMountError || 'Loading card checkout...'}
-                      </p>
-                    )}
-                  </div>
-                )}
-
-                {checkoutStatus && <p className="checkout-status">{checkoutStatus}</p>}
-
-                <div className="branding-group">
-                  <p className="eyebrow" style={{marginBottom:'.6rem'}}>White-Label Mode</p>
-                  <div className="branding-toggle-row">
-                    <button
-                      type="button"
-                      className={`branding-option${brandMode === 'default' ? ' branding-active' : ''}`}
-                      onClick={() => { setBrandMode('default'); addAuditEntry('Switched branding to D&D Security Default'); }}
-                    >D&D Security Default</button>
-                    <button
-                      type="button"
-                      className={`branding-option${brandMode === 'corporate' ? ' branding-active' : ''}`}
-                      onClick={() => { setBrandMode('corporate'); addAuditEntry('Switched branding to Corporate White-Label mode'); }}
-                    >Corporate White-Label</button>
-                  </div>
-                  <p className="ls-desc" style={{marginTop:'.6rem'}}>Active: <strong style={{color:'#85dfff'}}>{brandName}</strong></p>
-                </div>
-              </div>
-            </div>
-          </section>
+          <BillingPanel
+            billing={billing}
+            onClose={() => setShowBilling(false)}
+            addAuditEntry={addAuditEntry}
+            brandMode={brandMode}
+            setBrandMode={setBrandMode}
+            brandName={brandName}
+          />
         )}
 
         {/* -- Smart Search v2 + False Alarm controls -- */}
