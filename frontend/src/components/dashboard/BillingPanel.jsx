@@ -1,36 +1,53 @@
-export function BillingPanel({
-  showBilling,
-  setShowBilling,
-  selectedPlanId,
-  setSelectedPlanId,
-  availablePlans,
-  subscriptionState,
-  checkoutStatus,
-  paymentStep,
-  emergencyDistrict,
-  setEmergencyDistrict,
-  emergencyContacts,
-  setEmergencyContacts,
-  paymentMethod,
-  setPaymentMethod,
-  paypalMountError,
-  paypalMounting,
-  cardMountError,
-  cardMounting,
-  cardSubmitting,
-  selectedPlan,
-  requiredEmergencyFields,
-  paypalButtonsRef,
-  cardElementRef,
-  startCheckout,
-  handleCardCheckout,
-  PLAN_OPTIONS,
+import React from 'react';
+
+/**
+ * Pure presentational billing/checkout panel. All state and side effects
+ * (PayPal/Stripe SDK mounting, checkout submission) live in
+ * hooks/useBilling.js -- this component only renders based on props and
+ * forwards user actions upward.
+ */
+export default function BillingPanel({
+  onClose,
+  addAuditEntry,
   brandMode,
   setBrandMode,
   brandName,
-  addAuditEntry,
+  billing,
 }) {
-  if (!showBilling) return null;
+  const {
+    paypalButtonsRef,
+    cardElementRef,
+    selectedPlanId,
+    setSelectedPlanId,
+    availablePlans,
+    subscriptionState,
+    checkoutStatus,
+    paymentStep,
+    emergencyDistrict,
+    setEmergencyDistrict,
+    emergencyContacts,
+    setEmergencyContacts,
+    paypalMountError,
+    paypalMounting,
+    paymentMethod,
+    setPaymentMethod,
+    cardMountError,
+    cardMounting,
+    cardSubmitting,
+    selectedPlan,
+    selectedPlanSupportsPaypal,
+    requiredEmergencyFields,
+    paypalClientId,
+    stripePublishableKey,
+    startCheckout,
+    handleCardCheckout,
+  } = billing;
+
+  const notifyAudit = (action) => {
+    if (typeof addAuditEntry === 'function') {
+      addAuditEntry(action);
+    }
+  };
 
   return (
     <section className="dashboard-panel billing-panel" id="billing">
@@ -39,14 +56,14 @@ export function BillingPanel({
           <p className="eyebrow">License Management</p>
           <h3>Client Plans &amp; Checkout</h3>
         </div>
-        <button className="notif-dismiss" type="button" onClick={() => setShowBilling(false)}>&#x2715;</button>
+        <button className="notif-dismiss" type="button" onClick={onClose}>&#x2715;</button>
       </div>
 
       <div className="billing-grid billing-grid-wide">
         <div className="billing-tier-card billing-plan-list">
           <p className="eyebrow">Available packages</p>
           <div className="plan-grid">
-            {PLAN_OPTIONS.map((plan) => (
+            {availablePlans.map((plan) => (
               <button
                 key={plan.id}
                 type="button"
@@ -54,7 +71,7 @@ export function BillingPanel({
                 className={`plan-card${selectedPlanId === plan.id ? ' plan-card-active' : ''}`}
                 onClick={() => {
                   setSelectedPlanId(plan.id);
-                  addAuditEntry(`Selected package ${plan.name}`);
+                  notifyAudit(`Selected package ${plan.name}`);
                 }}
               >
                 <div className="plan-card-top">
@@ -146,19 +163,19 @@ export function BillingPanel({
             <span className={`status-pill ${requiredEmergencyFields ? 'good' : 'warning'}`}>
               {requiredEmergencyFields ? 'Contacts complete' : 'Contacts required'}
             </span>
-            {import.meta.env.VITE_PAYPAL_CLIENT_ID ? (
+            {paypalClientId ? (
               <span className="status-pill good">PayPal client ready</span>
             ) : (
               <span className="status-pill warning">Missing VITE_PAYPAL_CLIENT_ID</span>
             )}
-            {import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY ? (
+            {stripePublishableKey ? (
               <span className="status-pill good">Card key ready</span>
             ) : (
               <span className="status-pill warning">Missing VITE_STRIPE_PUBLISHABLE_KEY</span>
             )}
           </div>
 
-          {paymentStep === 'checkout' && paymentMethod === 'paypal' && selectedPlan.paypalAmount && (
+          {paymentStep === 'checkout' && paymentMethod === 'paypal' && selectedPlanSupportsPaypal && (
             <div className="paypal-button-shell">
               <div className="paypal-button-header">
                 <span className="status-pill good">PayPal secure checkout</span>
@@ -194,20 +211,20 @@ export function BillingPanel({
           {checkoutStatus && <p className="checkout-status">{checkoutStatus}</p>}
 
           <div className="branding-group">
-            <p className="eyebrow" style={{marginBottom:'.6rem'}}>White-Label Mode</p>
+            <p className="eyebrow" style={{ marginBottom: '.6rem' }}>White-Label Mode</p>
             <div className="branding-toggle-row">
               <button
                 type="button"
                 className={`branding-option${brandMode === 'default' ? ' branding-active' : ''}`}
-                onClick={() => { setBrandMode('default'); addAuditEntry('Switched branding to D&D Security Default'); }}
-              >D&D Security Default</button>
+                onClick={() => { setBrandMode('default'); notifyAudit('Switched branding to D&D Security Default'); }}
+              >D&amp;D Security Default</button>
               <button
                 type="button"
                 className={`branding-option${brandMode === 'corporate' ? ' branding-active' : ''}`}
-                onClick={() => { setBrandMode('corporate'); addAuditEntry('Switched branding to Corporate White-Label mode'); }}
+                onClick={() => { setBrandMode('corporate'); notifyAudit('Switched branding to Corporate White-Label mode'); }}
               >Corporate White-Label</button>
             </div>
-            <p className="ls-desc" style={{marginTop:'.6rem'}}>Active: <strong style={{color:'#85dfff'}}>{brandName}</strong></p>
+            <p className="ls-desc" style={{ marginTop: '.6rem' }}>Active: <strong style={{ color: '#85dfff' }}>{brandName}</strong></p>
           </div>
         </div>
       </div>
