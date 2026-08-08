@@ -3,7 +3,11 @@ import api from '../services/api';
 import { fetchSubscriptionState } from '../services/billing';
 import { loadPayPalSdk, loadStripeSdk } from '../services/payment-helpers';
 
-const PLAN_OPTIONS = [
+const paypalClientId = import.meta.env.VITE_PAYPAL_CLIENT_ID || '';
+const paypalCurrency = import.meta.env.VITE_PAYPAL_CURRENCY || 'USD';
+const stripePublishableKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY || '';
+
+export const PLAN_OPTIONS = [
   {
     id: 'starter',
     name: 'Standard Global',
@@ -40,7 +44,7 @@ const PLAN_OPTIONS = [
   },
 ];
 
-function formatPlanOption(plan) {
+export function formatPlanOption(plan) {
   const amount = Number.parseFloat(plan?.amount || '0');
   const limit = Number(plan?.limits?.camera_limit || 0);
   return {
@@ -57,11 +61,16 @@ function formatPlanOption(plan) {
   };
 }
 
-export function useBilling(addAuditEntry) {
-  const paypalClientId = import.meta.env.VITE_PAYPAL_CLIENT_ID || '';
-  const paypalCurrency = import.meta.env.VITE_PAYPAL_CURRENCY || 'USD';
-  const stripePublishableKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY || '';
-
+/**
+ * Encapsulates all billing/checkout state, effects, and handlers that used
+ * to live inline in Dashboard.jsx (Phase 4 - Subscription). Pure UI stays
+ * in components/dashboard/BillingPanel.jsx; this hook owns state + side
+ * effects (PayPal/Stripe SDK loading, checkout submission, plan sync).
+ *
+ * `addAuditEntry` is accepted as a dependency because the audit log is
+ * shared dashboard-wide state, not billing-specific.
+ */
+export function useBilling({ addAuditEntry } = {}) {
   const paypalButtonsRef = useRef(null);
   const cardElementRef = useRef(null);
   const stripeRef = useRef(null);
@@ -80,9 +89,9 @@ export function useBilling(addAuditEntry) {
     ambulance: '',
     localCommand: '',
   });
-  const [paymentMethod, setPaymentMethod] = useState('paypal');
   const [paypalMountError, setPaypalMountError] = useState('');
   const [paypalMounting, setPaypalMounting] = useState(false);
+  const [paymentMethod, setPaymentMethod] = useState('paypal');
   const [cardMountError, setCardMountError] = useState('');
   const [cardMounting, setCardMounting] = useState(false);
   const [cardSubmitting, setCardSubmitting] = useState(false);
@@ -98,6 +107,12 @@ export function useBilling(addAuditEntry) {
     emergencyContacts.ambulance,
     emergencyContacts.localCommand,
   ].every((value) => String(value || '').trim().length > 0);
+
+  const notifyAudit = (action) => {
+    if (typeof addAuditEntry === 'function') {
+      addAuditEntry(action);
+    }
+  };
 
   const loadBillingState = async () => {
     try {
@@ -141,10 +156,10 @@ export function useBilling(addAuditEntry) {
 
     setCheckoutStatus(`Opening ${paymentMethod === 'paypal' ? 'PayPal' : 'card'} checkout for ${selectedPlan.name}.`);
     setPaymentStep('checkout');
-    addAuditEntry(`Prepared ${paymentMethod} checkout for ${selectedPlan.name}`);
+    notifyAudit(`Prepared ${paymentMethod} checkout for ${selectedPlan.name}`);
   };
 
-  // PayPal button mount effect
+  // Mount PayPal Buttons when checkout step is active and method is 'paypal'.
   useEffect(() => {
     if (paymentStep !== 'checkout' || paymentMethod !== 'paypal') {
       return undefined;
@@ -206,7 +221,7 @@ export function useBilling(addAuditEntry) {
             setPaymentStep('complete');
             setCheckoutStatus(`PayPal payment completed: ${response.data.status || 'COMPLETED'}.`);
             await loadBillingState();
-            addAuditEntry(`Activated ${selectedPlan.name} via PayPal order ${data.orderID}`);
+            notifyAudit(`Activated ${selectedPlan.name} via PayPal order ${data.orderID}`);
           },
           onCancel: () => {
             if (!cancelled) {
@@ -252,7 +267,7 @@ export function useBilling(addAuditEntry) {
     };
   }, [paymentMethod, paymentStep, requiredEmergencyFields, selectedPlan.id, selectedPlan.name, selectedPlanAmount, selectedPlanSupportsPaypal, emergencyDistrict, emergencyContacts.policeStation, emergencyContacts.fireService, emergencyContacts.ambulance, emergencyContacts.localCommand]);
 
-  // Card element mount effect
+  // Mount Stripe Payment Element when checkout step is active and method is 'card'.
   useEffect(() => {
     if (paymentStep !== 'checkout' || paymentMethod !== 'card') {
       return undefined;
@@ -320,7 +335,7 @@ export function useBilling(addAuditEntry) {
         cardElementRef.current.innerHTML = '';
       }
     };
-  }, [paymentMethod, paymentStep, requiredEmergencyFields, selectedPlan.id, selectedPlan.name, emergencyDistrict, emergencyContacts.policeStation, emergencyContacts.fireService, emergencyContacts.ambulance, emergencyContacts.localCommand, stripePublishableKey]);
+  }, [paymentMethod, paymentStep, requiredEmergencyFields, selectedPlan.id, selectedPlan.name, emergencyDistrict, emergencyContacts.policeStation, emergencyContacts.fireService, emergencyContacts.ambulance, emergencyContacts.localCommand]);
 
   const handleCardCheckout = async () => {
     if (!stripeRef.current || !stripeElementsRef.current) {
@@ -348,7 +363,7 @@ export function useBilling(addAuditEntry) {
       setPaymentStep('complete');
       setCheckoutStatus(`Card payment completed: ${response.data.status || 'SUCCEEDED'}.`);
       await loadBillingState();
-      addAuditEntry(`Activated ${selectedPlan.name} via card payment ${result.paymentIntent?.id}`);
+      notifyAudit(`Activated ${selectedPlan.name} via card payment ${result.paymentIntent?.id}`);
     } catch (err) {
       const message = err?.response?.data?.error || err?.message || 'Card payment failed.';
       setCardMountError(message);
@@ -359,32 +374,31 @@ export function useBilling(addAuditEntry) {
   };
 
   return {
-    showBilling,
-    setShowBilling,
-    selectedPlanId,
-    setSelectedPlanId,
+    // refs (for BillingPanel to attach to DOM nodes)
+    paypalButtonsRef,
+    cardElementRef,
+    // state
+    showBilling, setShowBilling,
+    selectedPlanId, setSelectedPlanId,
     availablePlans,
     subscriptionState,
     checkoutStatus,
     paymentStep,
-    emergencyDistrict,
-    setEmergencyDistrict,
-    emergencyContacts,
-    setEmergencyContacts,
-    paymentMethod,
-    setPaymentMethod,
-    paypalMountError,
-    paypalMounting,
-    cardMountError,
-    cardMounting,
-    cardSubmitting,
+    emergencyDistrict, setEmergencyDistrict,
+    emergencyContacts, setEmergencyContacts,
+    paypalMountError, paypalMounting,
+    paymentMethod, setPaymentMethod,
+    cardMountError, cardMounting, cardSubmitting,
+    // derived
     selectedPlan,
+    selectedPlanSupportsPaypal,
     requiredEmergencyFields,
-    paypalButtonsRef,
-    cardElementRef,
+    // config flags (so the panel can show "missing env var" warnings)
+    paypalClientId,
+    stripePublishableKey,
+    // actions
     startCheckout,
     handleCardCheckout,
     loadBillingState,
-    PLAN_OPTIONS,
   };
 }
