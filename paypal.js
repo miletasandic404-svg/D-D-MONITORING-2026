@@ -98,6 +98,17 @@ async function createPayPalOrder({
     throw new Error('Unsupported PayPal plan');
   }
 
+  // PayPal orders don't support arbitrary key/value metadata like Stripe
+  // does, so the emergency-contact summary is folded into the order
+  // description (127-char limit) as a best-effort surface on PayPal's
+  // side. The authoritative copy is stored on our own payment record —
+  // see createPayPalCheckout() in lib/payment_service.js.
+  const baseDescription = `${plan.name} for ${district}`;
+  const contactSummary = buildContactSummary({ district, contacts });
+  const description = contactSummary
+    ? `${baseDescription} | ${contactSummary}`.slice(0, 127)
+    : baseDescription.slice(0, 127);
+
   return callPayPal('/v2/checkout/orders', {
     method: 'POST',
     requestId: paypalRequestId,
@@ -107,7 +118,7 @@ async function createPayPalOrder({
         {
           reference_id: plan.id,
           custom_id: plan.id,
-          description: `${plan.name} for ${district}`,
+          description,
           amount: {
             currency_code: plan.currency,
             value: plan.amount,

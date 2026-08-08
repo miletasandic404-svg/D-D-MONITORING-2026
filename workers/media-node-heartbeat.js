@@ -87,7 +87,10 @@ function sendHeartbeat() {
       }
     });
   });
-  req.on('error', (err) => logger.error('heartbeat.request_failed', { error: err.message }));
+  req.on('error', (err) => {
+    logger.error('heartbeat.request_failed', { error: err.message });
+    Sentry.captureException(err);
+  });
   req.write(body);
   req.end();
 }

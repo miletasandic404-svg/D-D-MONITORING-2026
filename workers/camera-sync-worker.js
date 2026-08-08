@@ -27,7 +27,7 @@
 
 const { Pool } = require('pg');
 const { addOrUpdateCameraPath, deleteCameraPath, listConfiguredPaths } = require('../lib/_mediamtx_client');
-const { decrypt, extractCredentialsFromUrl } = require('../lib/_crypto');
+const { decrypt } = require('../lib/_crypto');
 const L = require('../lib/_logger');
 const Sentry = require('@sentry/node');
 const { initSentry } = require('../lib/_sentry');
@@ -241,13 +241,17 @@ async function main() {
     }
     syncInProgress = true;
     runFullSync()
-      .catch((err) => logger.error('sync.cycle_unexpected', { error: err.message }))
+      .catch((err) => {
+        logger.error('sync.cycle_unexpected', { error: err.message });
+        Sentry.captureException(err);
+      })
       .finally(() => { syncInProgress = false; });
   }, SYNC_INTERVAL_SECONDS * 1000);
 }
 
 main().catch((err) => {
   logger.error('worker.fatal', { error: err.message });
+  Sentry.captureException(err);
   process.exit(1);
 });
 

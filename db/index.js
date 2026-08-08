@@ -79,9 +79,12 @@ async function withRetry(fn, maxRetries = 2) {
         || code === 'PROTOCOL_CONNECTION_LOST'
         || code === '57P01'  // admin_shutdown
         || code === '57P03'  // cannot_connect_now
+        || code === '40P01'  // deadlock_detected
+        || code === '40001'  // serialization_failure
         || msg.includes('timeout')
         || msg.includes('connection terminated')
-        || msg.includes('connection refused');
+        || msg.includes('connection refused')
+        || msg.includes('deadlock detected');
       if (!isTransient || attempt >= maxRetries) {
         throw err;
       }

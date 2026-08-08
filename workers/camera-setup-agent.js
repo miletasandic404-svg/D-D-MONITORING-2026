@@ -84,10 +84,6 @@ const pool = new Pool({ connectionString: WORKER_DB_URL, max: 2 });
 const L = require('../lib/_logger');
 const logger = L.makeLogger('camera-setup');
 
-function log(...args) {
-  logger.info('message', { text: args.map(String).join(' ') });
-}
-
 // Structured task-scoped log: always carries task_id + camera_id so failures
 // are traceable end-to-end (Phase 9).
 function logTask(event, task, extra = {}) {
@@ -297,7 +293,7 @@ async function registerMediaPath(cameraId, rtspUrl) {
     try {
       const s = await getPathStatus(cameraId);
       state = s && (s.ready !== undefined) ? (s.ready ? 'ready' : 'registered (starts on first view)') : null;
-    } catch (e) { /* runtime status not critical */ }
+    } catch { /* runtime status not critical */ }
     logger.info('mediamtx.path_registered', { camera_id: cameraId, state: state || null });
   } catch (err) {
     // Not fatal: camera-sync-worker re-registers the path within 60s.
@@ -501,7 +497,7 @@ async function runCleanup(task) {
   );
   try {
     await deleteCameraPath(task.camera_id);
-  } catch (e) { /* path may already be gone */ }
+  } catch { /* path may already be gone */ }
   const removed = del.rowCount > 0;
   await setTaskStatus(task.id, 'done', {
     result: JSON.stringify({ removed, camera_id: task.camera_id }),
@@ -601,6 +597,7 @@ async function main() {
       await healthTick();
     } catch (err) {
       logger.error('worker.loop_error', { error: err.message });
+      Sentry.captureException(err);
     } finally {
       busy = false;
     }
@@ -613,6 +610,7 @@ async function main() {
 
 main().catch((err) => {
   console.error('[camera-setup] Fatal error, exiting:', err);
+  Sentry.captureException(err);
   process.exit(1);
 });
 

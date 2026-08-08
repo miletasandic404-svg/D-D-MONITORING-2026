@@ -27,7 +27,6 @@
  * Required env: DATABASE_URL
  */
 
-const db = require('../db/index');
 const { retryAllPendingActivations } = require('../lib/payment_service');
 const { makeLogger } = require('../lib/_logger');
 const Sentry = require('@sentry/node');
