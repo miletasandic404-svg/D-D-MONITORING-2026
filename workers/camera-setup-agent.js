@@ -57,6 +57,8 @@ const { rtspCommonConnector } = require('../lib/_camera_connectors');
 const { addOrUpdateCameraPath, deleteCameraPath, getPathStatus } = require('../lib/_mediamtx_client');
 const { reportNodeHealth, checkTunnel, HEARTBEAT_LOOP_MS } = require('../lib/_node_health');
 const { encrypt, decrypt, extractCredentialsFromUrl, stripCredentialsFromUrl } = require('../lib/_crypto');
+const { buildClaimTaskSql, canClaimTasks } = require('../lib/_task_queue_sql');
+const { assertSafeTarget } = require('../lib/_network_security');
 const { spawn } = require('child_process');
 const Sentry = require('@sentry/node');
 const { initSentry } = require('../lib/_sentry');
@@ -210,22 +212,18 @@ async function verifyTaskOwnership(taskId) {
 }
 
 async function claimNextTask() {
-  const result = await pool.query(
-    `UPDATE camera_setup_tasks
-     SET status = 'working',
-         assigned_node_id = COALESCE($1, assigned_node_id),
-         updated_at = now()
-     WHERE id = (
-       SELECT id FROM camera_setup_tasks
-       WHERE status = 'pending'
-         AND created_at > now() - ($2 * interval '1 minute')
-       ORDER BY created_at
-       LIMIT 1
-       FOR UPDATE SKIP LOCKED
-     )
-     RETURNING *`,
-    [MEDIA_NODE_ID, MAX_TASK_AGE_MINUTES],
-  );
+  // Security (model B): media nodes are tenant-owned. A node may only
+  // claim tasks belonging to ITS OWN organization -- see
+  // lib/_task_queue_sql.js. A node with no MEDIA_NODE_ID (or no
+  // organization_id on its media_nodes row) claims nothing (fail closed).
+  if (!canClaimTasks({ nodeId: MEDIA_NODE_ID })) {
+    return null;
+  }
+  const { sql, params } = buildClaimTaskSql({
+    nodeId: MEDIA_NODE_ID,
+    maxAgeMinutes: MAX_TASK_AGE_MINUTES,
+  });
+  const result = await pool.query(sql, params);
   return result.rows[0] || null;
 }
 
@@ -331,6 +329,10 @@ function getTaskCredentials(task) {
 async function runOnvif(task) {
   const ip = task.ip;
   if (!ip) throw new Error('Camera IP is required for ONVIF mode');
+  // SSRF guard: reject loopback / link-local / multicast / metadata even
+  // on a tenant node; RFC1918 + public are allowed (LAN cameras are the
+  // product's core function).
+  await assertSafeTarget(ip, { allowPrivate: true });
   const port = task.onvif_port || 80;
   logTask('onvif.discover', task, { ip, port });
   const creds = getTaskCredentials(task);
@@ -359,6 +361,7 @@ async function runOnvif(task) {
 
 async function runManual(task) {
   if (!task.rtsp_url) throw new Error('rtsp_url is required for manual mode');
+  await assertSafeTarget(task.rtsp_url, { allowPrivate: true });
   const creds = getTaskCredentials(task);
   const rtspUrl = embedCredentials(task.rtsp_url, creds.username, creds.password);
   await verifyRtsp(rtspUrl, creds, 'Camera');

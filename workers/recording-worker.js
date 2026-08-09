@@ -39,6 +39,7 @@ const { spawn } = require('child_process');
 const { Client } = require('pg');
 const db = require('../db/index');
 const { uploadObject } = require('../lib/_storage');
+const { assertSafeTarget } = require('../lib/_network_security');
 const { makeLogger } = require('../lib/_logger');
 const Sentry = require('@sentry/node');
 const { initSentry } = require('../lib/_sentry');
@@ -49,7 +50,12 @@ initSentry();
 
 const RECORDING_DURATION_SECONDS = parseInt(process.env.RECORDING_DURATION_SECONDS || '15', 10);
 
-function recordSegment(rtspUrl, outputPath, durationSeconds) {
+async function recordSegment(rtspUrl, outputPath, durationSeconds) {
+  // SSRF guard (shared infrastructure -- Fly/VPS, NOT a tenant laptop):
+  // only public hosts may be reached. Private/loopback/link-local/
+  // metadata (169.254.169.254) addresses are rejected so an attacker-
+  // controlled rtsp_url cannot probe the internal network.
+  await assertSafeTarget(rtspUrl, { allowPrivate: false });
   return new Promise((resolve, reject) => {
     const ffmpeg = spawn('ffmpeg', [
       '-y',

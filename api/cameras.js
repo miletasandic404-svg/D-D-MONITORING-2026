@@ -84,7 +84,7 @@ module.exports = async (req, res) => {
 
     // Every mode runs on a media node (LAN access), so we require an online
     // node up front and fail with a clear, actionable message otherwise.
-    const node = await pickMediaNodeForCamera({});
+    const node = await pickMediaNodeForCamera({ organizationId: auth.organizationId });
     if (!node) {
       return sendError(res, 409, 'No online media node is available. Start the desktop media app (it runs camera discovery on your local network), then try again.');
     }
@@ -259,7 +259,7 @@ module.exports = async (req, res) => {
     const auth = await requireAuth(req, res);
     if (!auth) return;
     try {
-      const node = await pickMediaNodeForCamera({});
+      const node = await pickMediaNodeForCamera({ organizationId: auth.organizationId });
       if (!node) {
         return sendError(res, 409,
           'No online media node is available. Start the desktop media app on your local network (it runs camera discovery), then try again.');
@@ -444,7 +444,7 @@ module.exports = async (req, res) => {
 
       let mediaNodeId = existing.rows[0]?.media_node_id ?? null;
       if (existing.rows.length === 0) {
-        const node = await pickMediaNodeForCamera({ preferredRegion: region });
+        const node = await pickMediaNodeForCamera({ preferredRegion: region, organizationId: auth.organizationId });
         mediaNodeId = node?.id || null;
       }
 

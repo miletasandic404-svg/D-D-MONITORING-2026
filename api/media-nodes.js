@@ -21,6 +21,11 @@ const createMediaNodeSchema = z.object({
   name: z.string().min(1).max(255).optional(),
   public_hls_url: z.string().url('public_hls_url must be a valid URL').min(1, 'public_hls_url is required'),
   capacity: z.number().int().positive('capacity must be a positive integer').optional().default(50),
+  // Model B: media nodes are tenant-owned. Binding a node to an org
+  // restricts its camera-setup-task claiming (and camera sync) to that
+  // org's tasks/cameras. Optional for backward compatibility -- nodes
+  // without an org fail closed (claim nothing) until an admin assigns one.
+  organization_id: z.string().uuid('organization_id must be a valid UUID').optional().nullable(),
 });
 
 // GET /api/media-nodes - list all media nodes (platform_admin only)
@@ -32,7 +37,7 @@ async function handleGetMediaNodes(req, res) {
     const { rows } = await db.queryAsPlatformAdmin(`
       SELECT
         n.id, n.region, n.hostname, n.name, n.public_hls_url, n.capacity,
-        n.last_heartbeat_at, n.mediamtx_online, n.tunnel_online,
+        n.organization_id, n.last_heartbeat_at, n.mediamtx_online, n.tunnel_online,
         n.health_json, n.health_checked_at,
         count(c.id)::int AS current_cameras,
         COALESCE(n.last_heartbeat_at > now() - interval '${HEARTBEAT_FRESHNESS_SECONDS} seconds', false) AS online
@@ -64,15 +69,15 @@ async function handlePostMediaNodes(req, res) {
     }
     throw zodErr;
   }
-  const { region, hostname, name, public_hls_url: publicHlsUrl, capacity } = data;
+  const { region, hostname, name, public_hls_url: publicHlsUrl, capacity, organization_id: organizationId } = data;
 
   try {
     const heartbeatSecret = generateHeartbeatSecret();
     const inserted = await db.query(
-      `INSERT INTO media_nodes (region, hostname, name, public_hls_url, capacity, heartbeat_secret)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       RETURNING id, region, hostname, name, public_hls_url, capacity`,
-      [region, hostname, name || hostname, publicHlsUrl, capacity || 50, heartbeatSecret],
+      `INSERT INTO media_nodes (region, hostname, name, public_hls_url, capacity, heartbeat_secret, organization_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7)
+       RETURNING id, region, hostname, name, public_hls_url, capacity, organization_id`,
+      [region, hostname, name || hostname, publicHlsUrl, capacity || 50, heartbeatSecret, organizationId || null],
     );
     await logPlatformAudit({
       userId: auth.userId,

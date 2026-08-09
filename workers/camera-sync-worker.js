@@ -83,8 +83,21 @@ async function fetchCamerasFromDb() {
   // bi trajno ostale neregistrovane u MediaMTX-u.
   // Ako MEDIA_NODE_ID nije podesen, sinhronizuj sve kamere sa rtsp_url
   // (single-node deployment, V2 pocetno stanje).
+  // Security (model B): when a node id is set, restrict the sync to
+  // cameras of the node's OWN organization. This prevents a node on
+  // org B's LAN from pulling streams of org A's cameras (whose rtsp_url
+  // is user-controlled) into its own MediaMTX. If the node has no org
+  // assigned yet, only its own assigned cameras are synced -- never a
+  // foreign org's unassigned cameras.
   const query = MEDIA_NODE_ID
-    ? 'SELECT id, rtsp_url, media_node_id, rtsp_username, rtsp_password_encrypted FROM cameras WHERE (media_node_id = $1 OR media_node_id IS NULL) AND rtsp_url IS NOT NULL AND enabled = true'
+    ? `SELECT c.id, c.rtsp_url, c.media_node_id, c.rtsp_username, c.rtsp_password_encrypted
+       FROM cameras c
+       JOIN media_nodes n ON n.id = $1
+       WHERE (c.media_node_id = $1 OR c.media_node_id IS NULL)
+         AND c.rtsp_url IS NOT NULL
+         AND c.enabled = true
+         AND (n.organization_id IS NULL
+              OR c.organization_id = n.organization_id)`
     : 'SELECT id, rtsp_url, media_node_id, rtsp_username, rtsp_password_encrypted FROM cameras WHERE rtsp_url IS NOT NULL AND enabled = true';
   const params = MEDIA_NODE_ID ? [MEDIA_NODE_ID] : [];
   const result = await pool.query(query, params);
