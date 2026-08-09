@@ -2,6 +2,7 @@
 
 const { getSessionFromRequest } = require('../lib/auth');
 const { sendError, sendSuccess } = require('../lib/_error');
+const { rateLimit } = require('../lib/_rate_limit');
 const { listPlanDefinitions } = require('../lib/payment_catalog');
 const {
   createStripeCheckout,
@@ -64,6 +65,17 @@ async function readEventBody(req) {
 module.exports = async (req, res) => {
   const provider = String(req.query.provider || '').trim().toLowerCase();
   const path = String(req.query.path || '').trim().toLowerCase();
+
+  // Webhook deliveries come from Stripe/PayPal's own servers and are
+  // authenticated via signature verification below, not by IP -- rate
+  // limiting them would risk dropping legitimate provider retries (and
+  // an attacker can't forge a valid signature anyway, so it adds no
+  // protection). Every other route, including the anonymous
+  // checkout/intent/confirm endpoints (auth is intentionally optional
+  // there, to support paying before signing up), gets IP-based limiting.
+  if (path !== 'webhook') {
+    if (!(await rateLimit(req, res))) return;
+  }
 
   try {
     if (req.method === 'GET' && path === 'catalog') {
