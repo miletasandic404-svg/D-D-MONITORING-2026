@@ -77,7 +77,7 @@ module.exports = async (req, res) => {
     } catch (zodErr) {
       if (zodErr instanceof z.ZodError) {
         return sendError(res, 400, 'Validation failed',
-          zodErr.errors.map((e) => ({ field: e.path.join('.'), message: e.message })));
+          zodErr.issues.map((e) => ({ field: e.path.join('.'), message: e.message })));
       }
       throw zodErr;
     }
@@ -405,7 +405,7 @@ module.exports = async (req, res) => {
       } catch (zodErr) {
         if (zodErr instanceof z.ZodError) {
           return sendError(res, 400, "Validation failed",
-            zodErr.errors.map(e => ({ field: e.path.join("."), message: e.message, received: e.received }))
+            zodErr.issues.map(e => ({ field: e.path.join("."), message: e.message, received: e.received }))
           );
         }
         throw zodErr;

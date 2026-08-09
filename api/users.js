@@ -240,7 +240,7 @@ module.exports = async (req, res) => {
       Sentry.captureException(err);
       if (err.name === 'ZodError') {
         return sendError(res, 400, 'Validation failed',
-          err.errors.map(e => ({ field: e.path.join('.'), message: e.message }))
+          err.issues.map(e => ({ field: e.path.join('.'), message: e.message }))
         );
       }
       const msg = (err.message || '').toLowerCase();
@@ -289,7 +289,7 @@ module.exports = async (req, res) => {
     } catch (err) {
       if (err.name === 'ZodError') {
         return sendError(res, 400, 'Validation failed',
-          err.errors.map(e => ({ field: e.path.join('.'), message: e.message }))
+          err.issues.map(e => ({ field: e.path.join('.'), message: e.message }))
         );
       }
       logger.error('Error updating user', { error: err.message });

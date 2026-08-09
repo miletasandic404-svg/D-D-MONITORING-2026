@@ -233,7 +233,7 @@ async function handleStatus(req, res, eventId) {
   } catch (err) {
     if (err.name === 'ZodError') {
       return sendError(res, 400, 'Validation failed',
-        err.errors.map(e => ({ field: e.path.join('.'), message: e.message }))
+        err.issues.map(e => ({ field: e.path.join('.'), message: e.message }))
       );
     }
     logger.error('PATCH /api/incidents/:eventId/status error', { error: err.message });
