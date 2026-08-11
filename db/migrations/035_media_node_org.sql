@@ -35,7 +35,7 @@ CREATE INDEX IF NOT EXISTS idx_media_nodes_org
 UPDATE media_nodes n
 SET organization_id = sub.org_id
 FROM (
-  SELECT c.media_node_id, min(c.organization_id) AS org_id
+  SELECT c.media_node_id, (array_agg(c.organization_id))[1] AS org_id
   FROM cameras c
   WHERE c.media_node_id IS NOT NULL
   GROUP BY c.media_node_id

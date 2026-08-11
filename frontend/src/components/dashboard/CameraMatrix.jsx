@@ -12,6 +12,7 @@ export function CameraMatrix({
   setAddCamForm,
   addCamSaving,
   addCamError,
+  setAddCamError,
   submitAddCamera,
   addAuditEntry,
   globalSearchNeedle,
