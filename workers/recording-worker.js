@@ -82,11 +82,11 @@ async function handleEvent(payload) {
   logger.info('Handling camera event', { event_id: eventId, camera_id: cameraId, organization_id: organizationId });
 
   const cameraResult = await db.queryAsPlatformAdmin(
-    'SELECT rtsp_url, recording_mode, retention_days FROM cameras WHERE id = $1',
-    [cameraId],
+    'SELECT rtsp_url, recording_mode, retention_days FROM cameras WHERE id = $1 AND organization_id = $2',
+    [cameraId, organizationId],
   );
   if (cameraResult.rows.length === 0) {
-    logger.warn('Camera not found', { camera_id: cameraId });
+    logger.warn('Camera not found or organization mismatch', { camera_id: cameraId, organization_id: organizationId });
     return;
   }
   const camera = cameraResult.rows[0];
