@@ -438,15 +438,26 @@ module.exports = async (req, res) => {
       }
 
       const existing = await db.queryAsOrg(auth.organizationId, "SELECT organization_id, media_node_id, rtsp_url FROM cameras WHERE id = $1", [id]);
-      if (existing.rows.length > 0 && existing.rows[0].organization_id !== auth.organizationId) {
+
+      // ── Phase 2: direct camera CREATION is disabled ──────────────────────
+      // Every camera must be created through the verified setup pipeline
+      // (POST /api/cameras?path=setup-create -> task queue ->
+      // camera-setup-agent -> RTSP/ONVIF verification -> preview -> DB
+      // registration). This endpoint only accepts metadata updates for
+      // cameras that already exist (created through that pipeline), so an
+      // unverified camera can never be inserted via a direct POST.
+      if (existing.rows.length === 0) {
+        return sendError(res, 409,
+          'Direct camera creation is disabled. Use the camera setup wizard ' +
+          '(POST /api/cameras?path=setup-create with mode=scan/onvif/manual) ' +
+          'so the camera is verified (RTSP/ONVIF handshake) before it is saved.',
+        );
+      }
+      if (existing.rows[0].organization_id !== auth.organizationId) {
         return sendError(res, 403, "A camera with this id belongs to a different organization");
       }
 
-      let mediaNodeId = existing.rows[0]?.media_node_id ?? null;
-      if (existing.rows.length === 0) {
-        const node = await pickMediaNodeForCamera({ preferredRegion: region, organizationId: auth.organizationId });
-        mediaNodeId = node?.id || null;
-      }
+      const mediaNodeId = existing.rows[0].media_node_id ?? null;
 
       await db.queryAsOrg(
         auth.organizationId,
@@ -473,22 +484,23 @@ module.exports = async (req, res) => {
       await logAudit({
         organizationId: auth.organizationId,
         userId: auth.userId,
-        action: existing.rows.length === 0 ? "camera.create" : "camera.update",
+        action: "camera.update",
         resourceType: "camera", resourceId: id,
         metadata: { name, media_node_id: mediaNodeId },
         ipAddress: getIp(req),
       });
 
-      // Sinhronizuj MediaMTX path SAMO ako je kamera nova ili se
-      // rtsp_url stvarno promenio -- POST /v3/config/paths/add uvek
-      // radi pun reload putanje, sto prekida aktivnu konekciju cak i
-      // kad se salju identicni podaci (poznato MediaMTX ponasanje,
-      // https://github.com/bluenviron/mediamtx/issues/5525). Obicna
-      // izmena imena/lokacije kamere ne treba da prekine live stream.
-      const isNewCamera = existing.rows.length === 0;
-      const rtspUrlChanged = !isNewCamera && existing.rows[0].rtsp_url !== cameraUrl;
+      // Sinhronizuj MediaMTX path SAMO ako se rtsp_url stvarno promenio --
+      // POST /v3/config/paths/add uvek radi pun reload putanje, sto prekida
+      // aktivnu konekciju cak i kad se salju identicni podaci (poznato
+      // MediaMTX ponasanje, https://github.com/bluenviron/mediamtx/issues/5525).
+      // Obicna izmena imena/lokacije kamere ne treba da prekine live stream.
+      // (Phase 2: direktno kreiranje je onemoguceno, pa je kamera ovde uvek
+      // vec postojeca — nova kamera se upisuje tek posle verifikacije kroz
+      // camera-setup-agent, koji sam sinhronizuje MediaMTX putanju.)
+      const rtspUrlChanged = existing.rows[0].rtsp_url !== cameraUrl;
       let mediamtxSynced = true;
-      if (cameraUrl && (isNewCamera || rtspUrlChanged)) {
+      if (cameraUrl && rtspUrlChanged) {
         try {
           await addOrUpdateCameraPath(id, cameraUrl);
         } catch (mtxErr) {

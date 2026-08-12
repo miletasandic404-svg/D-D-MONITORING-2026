@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
+import { useNavigate } from 'react-router-dom';
 
 const PAGE_CSS = `
   .cameras-page { padding: 2rem; color: var(--text-primary, #e5eef7); }
@@ -49,128 +50,23 @@ const PAGE_CSS = `
 // ── Add Camera Form ────────────────────────────────────────────────────────
 
 function AddCameraForm({ onSuccess, onCancel }) {
-  const [tab, setTab] = useState('scan'); // 'scan' | 'onvif' | 'manual'
+  // Single entry point: user picks "Discover automatically" (opens the existing
+  // V3 camera wizard on the Dashboard — Scan LAN / ONVIF) or the manual RTSP form.
+  // Both go through the media-node task queue (POST /api/camera-setup).
+  const [addStep, setAddStep] = useState('choose'); // 'choose' | 'manual'
+  const navigate = useNavigate();
   const [error, setError] = useState('');
 
-  // ── Subnet scan state ──────────────────────────────────────────────────────
-  const [subnet, setSubnet] = useState('192.168.1');
-  const [scanning, setScanning] = useState(false);
-  const [scanResults, setScanResults] = useState(null); // null = not yet scanned
-  const [addingIp, setAddingIp] = useState(null);      // IP currently being registered
-  const [addedIps, setAddedIps] = useState(new Set()); // IPs successfully registered
-  const [scanCreds, setScanCreds] = useState({ username: '', password: '' });
-
-  // ONVIF wizard state
-  const [onvifFields, setOnvifFields] = useState({ ip: '', port: '', username: '', password: '' });
-  const [discovering, setDiscovering] = useState(false);
-  const [discovered, setDiscovered] = useState(null); // result from setup task
-  const [registering, setRegistering] = useState(false);
 
   // Manual form state
   const [newCamera, setNewCamera] = useState({ name: '', stream_url: '', username: '', password: '', location: '', lat: '', lng: '' });
   const [saving, setSaving] = useState(false);
 
-  // ── Subnet scan handler (via task queue → local media node) ────────────────
-  const handleScan = async () => {
-    setError('');
-    setScanResults(null);
-    setAddedIps(new Set());
-    setScanning(true);
-    try {
-      const createRes = await api.post('/cameras?path=setup-create', {
-        mode: 'scan',
-        ip: subnet.trim(),
-        username: scanCreds.username || undefined,
-        password: scanCreds.password || undefined,
-      });
-      const taskId = createRes.data.task_id;
-      const result = await pollTask(taskId, 120000); // scan can take up to 2 min
-      if (result.status === 'done' && result.result) {
-        const parsed = typeof result.result === 'string' ? JSON.parse(result.result) : result.result;
-        setScanResults(parsed.cameras || []);
-      } else {
-        setError(result.error || 'Scan completed but no cameras were found.');
-      }
-    } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Scan failed. Ensure your media node is online.');
-    } finally {
-      setScanning(false);
-    }
-  };
-
-  // Register a single camera discovered during a subnet scan (via task queue).
-  const handleScanAdd = async (camera) => {
-    setError('');
-    setAddingIp(camera.ip);
-    try {
-      const createRes = await api.post('/cameras?path=setup-create', {
-        mode: 'onvif',
-        ip: camera.ip,
-        onvif_port: camera.onvif_port,
-        username: scanCreds.username || undefined,
-        password: scanCreds.password || undefined,
-      });
-      const taskId = createRes.data.task_id;
-      const result = await pollTask(taskId, 60000);
-      if (result.status === 'done') {
-        setAddedIps((prev) => new Set([...prev, camera.ip]));
-        onSuccess();
-      } else {
-        setError(`Failed to add ${camera.ip}: ${friendlySetupError(result)}`);
-      }
-    } catch (err) {
-      setError(
-        `Failed to add ${camera.ip}: ${err.response?.data?.error || err.message}`,
-      );
-    } finally {
-      setAddingIp(null);
-    }
-  };
-
-  const handleDiscover = async () => {
-    setError('');
-    setDiscovered(null);
-    setDiscovering(true);
-    try {
-      const createRes = await api.post('/cameras?path=setup-create', {
-        mode: 'onvif',
-        ip: onvifFields.ip.trim(),
-        onvif_port: onvifFields.port ? parseInt(onvifFields.port, 10) : 80,
-        username: onvifFields.username || undefined,
-        password: onvifFields.password || undefined,
-      });
-      const taskId = createRes.data.task_id;
-      const result = await pollTask(taskId, 60000);
-      if (result.status === 'done' && result.result) {
-        const parsed = typeof result.result === 'string' ? JSON.parse(result.result) : result.result;
-        setDiscovered({
-          manufacturer: parsed.manufacturer || 'Unknown',
-          model: parsed.model || 'Unknown',
-          rtsp_urls: parsed.rtsp_url ? [parsed.rtsp_url] : [],
-          rtsp_reachable: parsed.rtsp_reachable !== false,
-        });
-      } else {
-        setError(friendlySetupError(result));
-      }
-    } catch (err) {
-      setError(err.response?.data?.error || err.message || 'Discovery failed. Ensure your media node is online.');
-    } finally {
-      setDiscovering(false);
-    }
-  };
-
-  const handleAutoRegister = async () => {
-    setError('');
-    setRegistering(true);
-    try {
-      // The discover task already registered the camera if it reached 'done'
-      // Just refresh the camera list
-      onSuccess({ camera_id: discovered?.camera_id });
-    } catch (err) {
-      setError(err.response?.data?.error || 'Registration failed. Please try again.');
-    } finally {
-      setRegistering(false);
-    }
+  // Unified "Discover automatically" entry: opens the existing V3 camera wizard
+  // (Dashboard), which runs Scan LAN / ONVIF through the media-node task queue.
+  // Same backend (POST /api/camera-setup) — no new discovery system.
+  const handleDiscoverAuto = () => {
+    navigate('/dashboard?addCamera=1');
   };
 
   // Poll a setup task until it reaches a terminal state or times out
@@ -258,220 +154,30 @@ function AddCameraForm({ onSuccess, onCancel }) {
     <div className="add-form-panel">
       <h2 style={{ fontSize: '1.15rem', color: 'var(--text-primary, #dff7ff)', marginBottom: '1.25rem' }}>Add New Camera</h2>
 
-      <div className="add-form-tabs">
-        <button className={`add-form-tab${tab === 'onvif' ? ' active' : ''}`} onClick={() => { setTab('onvif'); setError(''); setDiscovered(null); }}>
-          🔍 ONVIF Auto-Discover
-        </button>
-        <button className={`add-form-tab${tab === 'manual' ? ' active' : ''}`} onClick={() => { setTab('manual'); setError(''); }}>
-          ✏️ Manual (RTSP)
-        </button>
-      </div>
-
-      <div className="add-form-tabs">
-        <button className={`add-form-tab${tab === 'scan' ? ' active' : ''}`} onClick={() => { setTab('scan'); setError(''); }}>
-          📡 Scan LAN
-        </button>
-        <button className={`add-form-tab${tab === 'onvif' ? ' active' : ''}`} onClick={() => { setTab('onvif'); setError(''); setDiscovered(null); }}>
-          🔍 Single Camera
-        </button>
-        <button className={`add-form-tab${tab === 'manual' ? ' active' : ''}`} onClick={() => { setTab('manual'); setError(''); }}>
-          ✏️ Manual (RTSP)
-        </button>
-      </div>
+      {addStep === 'choose' && (
+        <>
+          <p style={{ color: '#8ab0c9', fontSize: '.9rem', marginBottom: '1rem' }}>
+            Choose how to add your camera:
+          </p>
+          <div style={{ display: 'grid', gap: '.75rem', marginBottom: '1rem' }}>
+            <button className="add-cam-btn" onClick={handleDiscoverAuto} style={{ padding: '1rem 1.5rem', textAlign: 'left' }}>
+              🔍 Find My Camera (auto-scan)
+            </button>
+            <button className="cam-btn cam-btn-secondary" onClick={() => { setAddStep('manual'); setError(''); }} style={{ padding: '1rem 1.5rem', textAlign: 'left', width: '100%' }}>
+              ✏️ Manual (RTSP)
+            </button>
+          </div>
+          <p style={{ color: '#8ab0c9', fontSize: '.8rem', lineHeight: 1.5, marginBottom: '1rem' }}>
+            Discover automatically scans your local network (Scan LAN / ONVIF) through the camera wizard,
+            then guides you through stream selection and a live HLS preview. Manual (RTSP) lets you enter
+            the stream URL directly. Both paths verify the camera with a real RTSP handshake before saving.
+          </p>
+        </>
+      )}
 
       {error && <p style={{ color: '#ff5050', marginBottom: '1rem', fontSize: '.9rem' }}>{error}</p>}
 
-      {tab === 'scan' && (
-        <>
-          <div className="scan-notice">
-            📡 Scans your local network for ONVIF cameras. Enter the subnet of your camera network (e.g. <strong>192.168.1</strong> or <strong>192.168.1.0/24</strong>). Only private RFC-1918 subnets are supported.
-          </div>
-
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
-            <div style={{ gridColumn: '1 / -1' }}>
-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>Subnet *</label>
-              <input
-                type="text"
-                placeholder="192.168.1 or 192.168.1.0/24"
-                value={subnet}
-                onChange={(e) => setSubnet(e.target.value)}
-                style={inputStyle}
-              />
-            </div>
-            <div>
-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>Username (optional)</label>
-              <input
-                type="text"
-                placeholder="admin"
-                value={scanCreds.username}
-                onChange={(e) => setScanCreds({ ...scanCreds, username: e.target.value })}
-                style={inputStyle}
-              />
-            </div>
-            <div>
-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>Password (optional)</label>
-              <input
-                type="password"
-                placeholder="••••••••"
-                value={scanCreds.password}
-                onChange={(e) => setScanCreds({ ...scanCreds, password: e.target.value })}
-                style={inputStyle}
-              />
-            </div>
-            <div style={{ display: 'flex', alignItems: 'flex-end' }}>
-              <button
-                className="add-cam-btn"
-                onClick={handleScan}
-                disabled={scanning || !subnet.trim()}
-                style={{ width: '100%', opacity: scanning || !subnet.trim() ? .6 : 1 }}
-              >
-                {scanning ? '⏳ Scanning...' : '📡 Scan Network'}
-              </button>
-            </div>
-          </div>
-
-          {scanning && (
-            <p style={{ color: '#8ab0c9', fontSize: '.85rem', textAlign: 'center', padding: '1rem' }}>
-              Probing 254 hosts on {subnet}… this may take 30–60 seconds.
-            </p>
-          )}
-
-          {scanResults !== null && !scanning && (
-            <>
-              {scanResults.length === 0 ? (
-                <p style={{ color: '#8ab0c9', fontSize: '.9rem', textAlign: 'center', padding: '1rem' }}>
-                  No ONVIF cameras found on <strong>{subnet}</strong>. Check the subnet and that cameras are powered on.
-                </p>
-              ) : (
-                <>
-                  <p style={{ color: '#00d450', fontSize: '.9rem', marginBottom: '.5rem' }}>
-                    ✓ Found {scanResults.length} camera{scanResults.length !== 1 ? 's' : ''}
-                  </p>
-                  <div className="scan-result-list">
-                    {scanResults.map((cam) => (
-                      <div key={cam.ip} className="scan-result-item">
-                        <div className="scan-result-info">
-                          <div className="scan-result-name">
-                            {cam.manufacturer !== 'Unknown' || cam.model !== 'Unknown'
-                              ? `${cam.manufacturer} ${cam.model}`.trim()
-                              : `Camera at ${cam.ip}`}
-                          </div>
-                          <div className="scan-result-meta">
-                            <span>🌐 {cam.ip}</span>
-                            <span>🔌 Port {cam.onvif_port}</span>
-                            {cam.serial_number && <span>🔢 S/N {cam.serial_number}</span>}
-                          </div>
-                        </div>
-                        <button
-                          className={`scan-result-add${addedIps.has(cam.ip) ? ' added' : ''}`}
-                          onClick={() => handleScanAdd(cam)}
-                          disabled={addingIp !== null || addedIps.has(cam.ip)}
-                        >
-                          {addedIps.has(cam.ip) ? '✓ Added' : addingIp === cam.ip ? '⏳' : '+ Add'}
-                        </button>
-                      </div>
-                    ))}
-                  </div>
-                </>
-              )}
-            </>
-          )}
-        </>
-      )}
-
-      {tab === 'onvif' && (
-        <>
-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
-            <div>
-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>Camera IP *</label>
-              <input
-                type="text"
-                placeholder="192.168.1.100"
-                value={onvifFields.ip}
-                onChange={(e) => setOnvifFields({ ...onvifFields, ip: e.target.value })}
-                style={inputStyle}
-              />
-            </div>
-            <div>
-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>ONVIF Port (default 80)</label>
-              <input
-                type="number"
-                placeholder="80"
-                value={onvifFields.port}
-                onChange={(e) => setOnvifFields({ ...onvifFields, port: e.target.value })}
-                style={inputStyle}
-              />
-            </div>
-            <div>
-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>Username</label>
-              <input
-                type="text"
-                placeholder="admin"
-                value={onvifFields.username}
-                onChange={(e) => setOnvifFields({ ...onvifFields, username: e.target.value })}
-                style={inputStyle}
-              />
-            </div>
-            <div>
-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>Password</label>
-              <input
-                type="password"
-                placeholder="••••••••"
-                value={onvifFields.password}
-                onChange={(e) => setOnvifFields({ ...onvifFields, password: e.target.value })}
-                style={inputStyle}
-              />
-            </div>
-          </div>
-
-          {!discovered ? (
-            <button
-              className="add-cam-btn"
-              onClick={handleDiscover}
-              disabled={discovering || !onvifFields.ip.trim()}
-              style={{ opacity: discovering || !onvifFields.ip.trim() ? .6 : 1 }}
-            >
-              {discovering ? '⏳ Discovering...' : '🔍 Discover Camera'}
-            </button>
-          ) : (
-            <>
-              <div className="discovery-result">
-                <div className="discovery-result-row"><span className="check">✓</span> {discovered.manufacturer} {discovered.model}</div>
-                {discovered.rtsp_urls && discovered.rtsp_urls.length > 0 && (
-                  <div className="discovery-result-row"><span className="check">✓</span> RTSP stream found</div>
-                )}
-                {discovered.rtsp_reachable && (
-                  <div className="discovery-result-row"><span className="check">✓</span> Stream reachable</div>
-                )}
-                {discovered.rtsp_urls && discovered.rtsp_urls.length > 0 && (
-                  <div style={{ marginTop: '.5rem', color: '#8ab0c9', fontSize: '.8rem', wordBreak: 'break-all' }}>
-                    {discovered.rtsp_urls[0]}
-                  </div>
-                )}
-              </div>
-              <div style={{ display: 'flex', gap: '1rem', marginTop: '.5rem' }}>
-                <button
-                  className="add-cam-btn"
-                  onClick={handleAutoRegister}
-                  disabled={registering}
-                  style={{ opacity: registering ? .6 : 1 }}
-                >
-                  {registering ? '⏳ Registering...' : '➕ Add Camera'}
-                </button>
-                <button
-                  className="cam-btn cam-btn-secondary"
-                  style={{ padding: '.8rem 1.5rem' }}
-                  onClick={() => { setDiscovered(null); setError(''); }}
-                >
-                  Rediscover
-                </button>
-              </div>
-            </>
-          )}
-        </>
-      )}
-
-      {tab === 'manual' && (
+      {addStep === 'manual' && (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
             <input
@@ -528,6 +234,9 @@ function AddCameraForm({ onSuccess, onCancel }) {
             The camera is verified with a real RTSP handshake (reachability + authentication) before it is saved. Wrong credentials are rejected with a clear error.
           </p>
           <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
+            <button className="cam-btn cam-btn-secondary" style={{ padding: '.8rem 1.5rem' }} onClick={() => { setAddStep('choose'); setError(''); }}>
+              ← Back
+            </button>
             <button className="add-cam-btn" onClick={handleManualAdd} disabled={saving}>
               {saving ? 'Verifying...' : '🔌 Verify & Add Camera'}
             </button>

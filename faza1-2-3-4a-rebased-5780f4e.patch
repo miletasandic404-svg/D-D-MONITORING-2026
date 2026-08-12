@@ -1,0 +1,2867 @@
+diff --git a/api/cameras.js b/api/cameras.js
+index b17a6750474e57c170c14d0d82c75596fc8d9c88..756245b6e142ec55ed5072db8e59faea4cb45540 100644
+--- a/api/cameras.js
++++ b/api/cameras.js
+@@ -438,15 +438,26 @@
+       }
+ 
+       const existing = await db.queryAsOrg(auth.organizationId, "SELECT organization_id, media_node_id, rtsp_url FROM cameras WHERE id = $1", [id]);
+-      if (existing.rows.length > 0 && existing.rows[0].organization_id !== auth.organizationId) {
++
++      // ── Phase 2: direct camera CREATION is disabled ──────────────────────
++      // Every camera must be created through the verified setup pipeline
++      // (POST /api/cameras?path=setup-create -> task queue ->
++      // camera-setup-agent -> RTSP/ONVIF verification -> preview -> DB
++      // registration). This endpoint only accepts metadata updates for
++      // cameras that already exist (created through that pipeline), so an
++      // unverified camera can never be inserted via a direct POST.
++      if (existing.rows.length === 0) {
++        return sendError(res, 409,
++          'Direct camera creation is disabled. Use the camera setup wizard ' +
++          '(POST /api/cameras?path=setup-create with mode=scan/onvif/manual) ' +
++          'so the camera is verified (RTSP/ONVIF handshake) before it is saved.',
++        );
++      }
++      if (existing.rows[0].organization_id !== auth.organizationId) {
+         return sendError(res, 403, "A camera with this id belongs to a different organization");
+       }
+ 
+-      let mediaNodeId = existing.rows[0]?.media_node_id ?? null;
+-      if (existing.rows.length === 0) {
+-        const node = await pickMediaNodeForCamera({ preferredRegion: region, organizationId: auth.organizationId });
+-        mediaNodeId = node?.id || null;
+-      }
++      const mediaNodeId = existing.rows[0].media_node_id ?? null;
+ 
+       await db.queryAsOrg(
+         auth.organizationId,
+@@ -473,22 +484,23 @@
+       await logAudit({
+         organizationId: auth.organizationId,
+         userId: auth.userId,
+-        action: existing.rows.length === 0 ? "camera.create" : "camera.update",
++        action: "camera.update",
+         resourceType: "camera", resourceId: id,
+         metadata: { name, media_node_id: mediaNodeId },
+         ipAddress: getIp(req),
+       });
+ 
+-      // Sinhronizuj MediaMTX path SAMO ako je kamera nova ili se
+-      // rtsp_url stvarno promenio -- POST /v3/config/paths/add uvek
+-      // radi pun reload putanje, sto prekida aktivnu konekciju cak i
+-      // kad se salju identicni podaci (poznato MediaMTX ponasanje,
+-      // https://github.com/bluenviron/mediamtx/issues/5525). Obicna
+-      // izmena imena/lokacije kamere ne treba da prekine live stream.
+-      const isNewCamera = existing.rows.length === 0;
+-      const rtspUrlChanged = !isNewCamera && existing.rows[0].rtsp_url !== cameraUrl;
++      // Sinhronizuj MediaMTX path SAMO ako se rtsp_url stvarno promenio --
++      // POST /v3/config/paths/add uvek radi pun reload putanje, sto prekida
++      // aktivnu konekciju cak i kad se salju identicni podaci (poznato
++      // MediaMTX ponasanje, https://github.com/bluenviron/mediamtx/issues/5525).
++      // Obicna izmena imena/lokacije kamere ne treba da prekine live stream.
++      // (Phase 2: direktno kreiranje je onemoguceno, pa je kamera ovde uvek
++      // vec postojeca — nova kamera se upisuje tek posle verifikacije kroz
++      // camera-setup-agent, koji sam sinhronizuje MediaMTX putanju.)
++      const rtspUrlChanged = existing.rows[0].rtsp_url !== cameraUrl;
+       let mediamtxSynced = true;
+-      if (cameraUrl && (isNewCamera || rtspUrlChanged)) {
++      if (cameraUrl && rtspUrlChanged) {
+         try {
+           await addOrUpdateCameraPath(id, cameraUrl);
+         } catch (mtxErr) {
+diff --git a/frontend/src/pages/Cameras.jsx b/frontend/src/pages/Cameras.jsx
+index cd09182923e232a8103346cddcd9fa9aa24a33fa..f45f8dd08461ab0f5bbdef03105393677f2b8bfe 100644
+--- a/frontend/src/pages/Cameras.jsx
++++ b/frontend/src/pages/Cameras.jsx
+@@ -1,5 +1,6 @@
+ import React, { useState, useEffect } from 'react';
+ import api from '../services/api';
++import { useNavigate } from 'react-router-dom';
+ 
+ const PAGE_CSS = `
+   .cameras-page { padding: 2rem; color: var(--text-primary, #e5eef7); }
+@@ -49,128 +50,23 @@
+ // ── Add Camera Form ────────────────────────────────────────────────────────
+ 
+ function AddCameraForm({ onSuccess, onCancel }) {
+-  const [tab, setTab] = useState('scan'); // 'scan' | 'onvif' | 'manual'
++  // Single entry point: user picks "Discover automatically" (opens the existing
++  // V3 camera wizard on the Dashboard — Scan LAN / ONVIF) or the manual RTSP form.
++  // Both go through the media-node task queue (POST /api/camera-setup).
++  const [addStep, setAddStep] = useState('choose'); // 'choose' | 'manual'
++  const navigate = useNavigate();
+   const [error, setError] = useState('');
+ 
+-  // ── Subnet scan state ──────────────────────────────────────────────────────
+-  const [subnet, setSubnet] = useState('192.168.1');
+-  const [scanning, setScanning] = useState(false);
+-  const [scanResults, setScanResults] = useState(null); // null = not yet scanned
+-  const [addingIp, setAddingIp] = useState(null);      // IP currently being registered
+-  const [addedIps, setAddedIps] = useState(new Set()); // IPs successfully registered
+-  const [scanCreds, setScanCreds] = useState({ username: '', password: '' });
+-
+-  // ONVIF wizard state
+-  const [onvifFields, setOnvifFields] = useState({ ip: '', port: '', username: '', password: '' });
+-  const [discovering, setDiscovering] = useState(false);
+-  const [discovered, setDiscovered] = useState(null); // result from setup task
+-  const [registering, setRegistering] = useState(false);
+ 
+   // Manual form state
+   const [newCamera, setNewCamera] = useState({ name: '', stream_url: '', username: '', password: '', location: '', lat: '', lng: '' });
+   const [saving, setSaving] = useState(false);
+ 
+-  // ── Subnet scan handler (via task queue → local media node) ────────────────
+-  const handleScan = async () => {
+-    setError('');
+-    setScanResults(null);
+-    setAddedIps(new Set());
+-    setScanning(true);
+-    try {
+-      const createRes = await api.post('/cameras?path=setup-create', {
+-        mode: 'scan',
+-        ip: subnet.trim(),
+-        username: scanCreds.username || undefined,
+-        password: scanCreds.password || undefined,
+-      });
+-      const taskId = createRes.data.task_id;
+-      const result = await pollTask(taskId, 120000); // scan can take up to 2 min
+-      if (result.status === 'done' && result.result) {
+-        const parsed = typeof result.result === 'string' ? JSON.parse(result.result) : result.result;
+-        setScanResults(parsed.cameras || []);
+-      } else {
+-        setError(result.error || 'Scan completed but no cameras were found.');
+-      }
+-    } catch (err) {
+-      setError(err.response?.data?.error || err.message || 'Scan failed. Ensure your media node is online.');
+-    } finally {
+-      setScanning(false);
+-    }
+-  };
+-
+-  // Register a single camera discovered during a subnet scan (via task queue).
+-  const handleScanAdd = async (camera) => {
+-    setError('');
+-    setAddingIp(camera.ip);
+-    try {
+-      const createRes = await api.post('/cameras?path=setup-create', {
+-        mode: 'onvif',
+-        ip: camera.ip,
+-        onvif_port: camera.onvif_port,
+-        username: scanCreds.username || undefined,
+-        password: scanCreds.password || undefined,
+-      });
+-      const taskId = createRes.data.task_id;
+-      const result = await pollTask(taskId, 60000);
+-      if (result.status === 'done') {
+-        setAddedIps((prev) => new Set([...prev, camera.ip]));
+-        onSuccess();
+-      } else {
+-        setError(`Failed to add ${camera.ip}: ${friendlySetupError(result)}`);
+-      }
+-    } catch (err) {
+-      setError(
+-        `Failed to add ${camera.ip}: ${err.response?.data?.error || err.message}`,
+-      );
+-    } finally {
+-      setAddingIp(null);
+-    }
+-  };
+-
+-  const handleDiscover = async () => {
+-    setError('');
+-    setDiscovered(null);
+-    setDiscovering(true);
+-    try {
+-      const createRes = await api.post('/cameras?path=setup-create', {
+-        mode: 'onvif',
+-        ip: onvifFields.ip.trim(),
+-        onvif_port: onvifFields.port ? parseInt(onvifFields.port, 10) : 80,
+-        username: onvifFields.username || undefined,
+-        password: onvifFields.password || undefined,
+-      });
+-      const taskId = createRes.data.task_id;
+-      const result = await pollTask(taskId, 60000);
+-      if (result.status === 'done' && result.result) {
+-        const parsed = typeof result.result === 'string' ? JSON.parse(result.result) : result.result;
+-        setDiscovered({
+-          manufacturer: parsed.manufacturer || 'Unknown',
+-          model: parsed.model || 'Unknown',
+-          rtsp_urls: parsed.rtsp_url ? [parsed.rtsp_url] : [],
+-          rtsp_reachable: parsed.rtsp_reachable !== false,
+-        });
+-      } else {
+-        setError(friendlySetupError(result));
+-      }
+-    } catch (err) {
+-      setError(err.response?.data?.error || err.message || 'Discovery failed. Ensure your media node is online.');
+-    } finally {
+-      setDiscovering(false);
+-    }
+-  };
+-
+-  const handleAutoRegister = async () => {
+-    setError('');
+-    setRegistering(true);
+-    try {
+-      // The discover task already registered the camera if it reached 'done'
+-      // Just refresh the camera list
+-      onSuccess({ camera_id: discovered?.camera_id });
+-    } catch (err) {
+-      setError(err.response?.data?.error || 'Registration failed. Please try again.');
+-    } finally {
+-      setRegistering(false);
+-    }
++  // Unified "Discover automatically" entry: opens the existing V3 camera wizard
++  // (Dashboard), which runs Scan LAN / ONVIF through the media-node task queue.
++  // Same backend (POST /api/camera-setup) — no new discovery system.
++  const handleDiscoverAuto = () => {
++    navigate('/dashboard?addCamera=1');
+   };
+ 
+   // Poll a setup task until it reaches a terminal state or times out
+@@ -258,220 +154,30 @@
+     <div className="add-form-panel">
+       <h2 style={{ fontSize: '1.15rem', color: 'var(--text-primary, #dff7ff)', marginBottom: '1.25rem' }}>Add New Camera</h2>
+ 
+-      <div className="add-form-tabs">
+-        <button className={`add-form-tab${tab === 'onvif' ? ' active' : ''}`} onClick={() => { setTab('onvif'); setError(''); setDiscovered(null); }}>
+-          🔍 ONVIF Auto-Discover
+-        </button>
+-        <button className={`add-form-tab${tab === 'manual' ? ' active' : ''}`} onClick={() => { setTab('manual'); setError(''); }}>
+-          ✏️ Manual (RTSP)
+-        </button>
+-      </div>
+-
+-      <div className="add-form-tabs">
+-        <button className={`add-form-tab${tab === 'scan' ? ' active' : ''}`} onClick={() => { setTab('scan'); setError(''); }}>
+-          📡 Scan LAN
+-        </button>
+-        <button className={`add-form-tab${tab === 'onvif' ? ' active' : ''}`} onClick={() => { setTab('onvif'); setError(''); setDiscovered(null); }}>
+-          🔍 Single Camera
+-        </button>
+-        <button className={`add-form-tab${tab === 'manual' ? ' active' : ''}`} onClick={() => { setTab('manual'); setError(''); }}>
+-          ✏️ Manual (RTSP)
+-        </button>
+-      </div>
+-
+-      {error && <p style={{ color: '#ff5050', marginBottom: '1rem', fontSize: '.9rem' }}>{error}</p>}
+-
+-      {tab === 'scan' && (
++      {addStep === 'choose' && (
+         <>
+-          <div className="scan-notice">
+-            📡 Scans your local network for ONVIF cameras. Enter the subnet of your camera network (e.g. <strong>192.168.1</strong> or <strong>192.168.1.0/24</strong>). Only private RFC-1918 subnets are supported.
+-          </div>
+-
+-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+-            <div style={{ gridColumn: '1 / -1' }}>
+-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>Subnet *</label>
+-              <input
+-                type="text"
+-                placeholder="192.168.1 or 192.168.1.0/24"
+-                value={subnet}
+-                onChange={(e) => setSubnet(e.target.value)}
+-                style={inputStyle}
+-              />
+-            </div>
+-            <div>
+-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>Username (optional)</label>
+-              <input
+-                type="text"
+-                placeholder="admin"
+-                value={scanCreds.username}
+-                onChange={(e) => setScanCreds({ ...scanCreds, username: e.target.value })}
+-                style={inputStyle}
+-              />
+-            </div>
+-            <div>
+-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>Password (optional)</label>
+-              <input
+-                type="password"
+-                placeholder="••••••••"
+-                value={scanCreds.password}
+-                onChange={(e) => setScanCreds({ ...scanCreds, password: e.target.value })}
+-                style={inputStyle}
+-              />
+-            </div>
+-            <div style={{ display: 'flex', alignItems: 'flex-end' }}>
+-              <button
+-                className="add-cam-btn"
+-                onClick={handleScan}
+-                disabled={scanning || !subnet.trim()}
+-                style={{ width: '100%', opacity: scanning || !subnet.trim() ? .6 : 1 }}
+-              >
+-                {scanning ? '⏳ Scanning...' : '📡 Scan Network'}
+-              </button>
+-            </div>
+-          </div>
+-
+-          {scanning && (
+-            <p style={{ color: '#8ab0c9', fontSize: '.85rem', textAlign: 'center', padding: '1rem' }}>
+-              Probing 254 hosts on {subnet}… this may take 30–60 seconds.
+-            </p>
+-          )}
+-
+-          {scanResults !== null && !scanning && (
+-            <>
+-              {scanResults.length === 0 ? (
+-                <p style={{ color: '#8ab0c9', fontSize: '.9rem', textAlign: 'center', padding: '1rem' }}>
+-                  No ONVIF cameras found on <strong>{subnet}</strong>. Check the subnet and that cameras are powered on.
+-                </p>
+-              ) : (
+-                <>
+-                  <p style={{ color: '#00d450', fontSize: '.9rem', marginBottom: '.5rem' }}>
+-                    ✓ Found {scanResults.length} camera{scanResults.length !== 1 ? 's' : ''}
+-                  </p>
+-                  <div className="scan-result-list">
+-                    {scanResults.map((cam) => (
+-                      <div key={cam.ip} className="scan-result-item">
+-                        <div className="scan-result-info">
+-                          <div className="scan-result-name">
+-                            {cam.manufacturer !== 'Unknown' || cam.model !== 'Unknown'
+-                              ? `${cam.manufacturer} ${cam.model}`.trim()
+-                              : `Camera at ${cam.ip}`}
+-                          </div>
+-                          <div className="scan-result-meta">
+-                            <span>🌐 {cam.ip}</span>
+-                            <span>🔌 Port {cam.onvif_port}</span>
+-                            {cam.serial_number && <span>🔢 S/N {cam.serial_number}</span>}
+-                          </div>
+-                        </div>
+-                        <button
+-                          className={`scan-result-add${addedIps.has(cam.ip) ? ' added' : ''}`}
+-                          onClick={() => handleScanAdd(cam)}
+-                          disabled={addingIp !== null || addedIps.has(cam.ip)}
+-                        >
+-                          {addedIps.has(cam.ip) ? '✓ Added' : addingIp === cam.ip ? '⏳' : '+ Add'}
+-                        </button>
+-                      </div>
+-                    ))}
+-                  </div>
+-                </>
+-              )}
+-            </>
+-          )}
++          <p style={{ color: '#8ab0c9', fontSize: '.9rem', marginBottom: '1rem' }}>
++            Choose how to add your camera:
++          </p>
++          <div style={{ display: 'grid', gap: '.75rem', marginBottom: '1rem' }}>
++            <button className="add-cam-btn" onClick={handleDiscoverAuto} style={{ padding: '1rem 1.5rem', textAlign: 'left' }}>
++              🔍 Find My Camera (auto-scan)
++            </button>
++            <button className="cam-btn cam-btn-secondary" onClick={() => { setAddStep('manual'); setError(''); }} style={{ padding: '1rem 1.5rem', textAlign: 'left', width: '100%' }}>
++              ✏️ Manual (RTSP)
++            </button>
++          </div>
++          <p style={{ color: '#8ab0c9', fontSize: '.8rem', lineHeight: 1.5, marginBottom: '1rem' }}>
++            Discover automatically scans your local network (Scan LAN / ONVIF) through the camera wizard,
++            then guides you through stream selection and a live HLS preview. Manual (RTSP) lets you enter
++            the stream URL directly. Both paths verify the camera with a real RTSP handshake before saving.
++          </p>
+         </>
+       )}
+ 
+-      {tab === 'onvif' && (
+-        <>
+-          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem', marginBottom: '1rem' }}>
+-            <div>
+-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>Camera IP *</label>
+-              <input
+-                type="text"
+-                placeholder="192.168.1.100"
+-                value={onvifFields.ip}
+-                onChange={(e) => setOnvifFields({ ...onvifFields, ip: e.target.value })}
+-                style={inputStyle}
+-              />
+-            </div>
+-            <div>
+-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>ONVIF Port (default 80)</label>
+-              <input
+-                type="number"
+-                placeholder="80"
+-                value={onvifFields.port}
+-                onChange={(e) => setOnvifFields({ ...onvifFields, port: e.target.value })}
+-                style={inputStyle}
+-              />
+-            </div>
+-            <div>
+-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>Username</label>
+-              <input
+-                type="text"
+-                placeholder="admin"
+-                value={onvifFields.username}
+-                onChange={(e) => setOnvifFields({ ...onvifFields, username: e.target.value })}
+-                style={inputStyle}
+-              />
+-            </div>
+-            <div>
+-              <label style={{ display: 'block', color: '#8ab0c9', fontSize: '.85rem', marginBottom: '.3rem' }}>Password</label>
+-              <input
+-                type="password"
+-                placeholder="••••••••"
+-                value={onvifFields.password}
+-                onChange={(e) => setOnvifFields({ ...onvifFields, password: e.target.value })}
+-                style={inputStyle}
+-              />
+-            </div>
+-          </div>
+-
+-          {!discovered ? (
+-            <button
+-              className="add-cam-btn"
+-              onClick={handleDiscover}
+-              disabled={discovering || !onvifFields.ip.trim()}
+-              style={{ opacity: discovering || !onvifFields.ip.trim() ? .6 : 1 }}
+-            >
+-              {discovering ? '⏳ Discovering...' : '🔍 Discover Camera'}
+-            </button>
+-          ) : (
+-            <>
+-              <div className="discovery-result">
+-                <div className="discovery-result-row"><span className="check">✓</span> {discovered.manufacturer} {discovered.model}</div>
+-                {discovered.rtsp_urls && discovered.rtsp_urls.length > 0 && (
+-                  <div className="discovery-result-row"><span className="check">✓</span> RTSP stream found</div>
+-                )}
+-                {discovered.rtsp_reachable && (
+-                  <div className="discovery-result-row"><span className="check">✓</span> Stream reachable</div>
+-                )}
+-                {discovered.rtsp_urls && discovered.rtsp_urls.length > 0 && (
+-                  <div style={{ marginTop: '.5rem', color: '#8ab0c9', fontSize: '.8rem', wordBreak: 'break-all' }}>
+-                    {discovered.rtsp_urls[0]}
+-                  </div>
+-                )}
+-              </div>
+-              <div style={{ display: 'flex', gap: '1rem', marginTop: '.5rem' }}>
+-                <button
+-                  className="add-cam-btn"
+-                  onClick={handleAutoRegister}
+-                  disabled={registering}
+-                  style={{ opacity: registering ? .6 : 1 }}
+-                >
+-                  {registering ? '⏳ Registering...' : '➕ Add Camera'}
+-                </button>
+-                <button
+-                  className="cam-btn cam-btn-secondary"
+-                  style={{ padding: '.8rem 1.5rem' }}
+-                  onClick={() => { setDiscovered(null); setError(''); }}
+-                >
+-                  Rediscover
+-                </button>
+-              </div>
+-            </>
+-          )}
+-        </>
+-      )}
+-
+-      {tab === 'manual' && (
++      {error && <p style={{ color: '#ff5050', marginBottom: '1rem', fontSize: '.9rem' }}>{error}</p>}
++
++      {addStep === 'manual' && (
+         <>
+           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '1rem' }}>
+             <input
+@@ -528,6 +234,9 @@
+             The camera is verified with a real RTSP handshake (reachability + authentication) before it is saved. Wrong credentials are rejected with a clear error.
+           </p>
+           <div style={{ display: 'flex', gap: '1rem', marginTop: '1rem' }}>
++            <button className="cam-btn cam-btn-secondary" style={{ padding: '.8rem 1.5rem' }} onClick={() => { setAddStep('choose'); setError(''); }}>
++              ← Back
++            </button>
+             <button className="add-cam-btn" onClick={handleManualAdd} disabled={saving}>
+               {saving ? 'Verifying...' : '🔌 Verify & Add Camera'}
+             </button>
+diff --git a/frontend/src/pages/Dashboard.jsx b/frontend/src/pages/Dashboard.jsx
+index 0876664cf8c45e45fd1c18fb8b590a25a60c41bb..ac3768062887bc783e9f4d9120095090d29cc34a 100644
+--- a/frontend/src/pages/Dashboard.jsx
++++ b/frontend/src/pages/Dashboard.jsx
+@@ -127,6 +127,7 @@
+   const [wizardNodeError, setWizardNodeError] = useState('');
+   const [wizardSelectedCam, setWizardSelectedCam] = useState(null); // { ip, manufacturer, model, firmware_version, onvif_port }
+   const [wizardManualIp, setWizardManualIp] = useState('');
++  const [wizardShowManualIp, setWizardShowManualIp] = useState(false);
+   const [wizardStreams, setWizardStreams] = useState(null); // [{ url, label, reachable }]
+   const [wizardSelectedStream, setWizardSelectedStream] = useState('');
+   const [wizardProbing, setWizardProbing] = useState(false);
+@@ -142,12 +143,6 @@
+   const [wizardPreview, setWizardPreview] = useState(null); // { cameraId, name, hlsUrl }
+   const wizardPreviewRef = useRef(null);
+ 
+-  // Inline camera add form
+-  const [showAddCam, setShowAddCam] = useState(false);
+-  const [addCamForm, setAddCamForm] = useState({ name: '', rtsp_url: '', location: '', lat: '', lng: '' });
+-  const [addCamSaving, setAddCamSaving] = useState(false);
+-  const [addCamError, setAddCamError] = useState('');
+-
+   // Audio alarm incident count tracker
+   const prevNewIncidentsRef = useRef(null);
+ 
+@@ -160,6 +155,7 @@
+     setWizardNodeError('');
+     setWizardSelectedCam(null);
+     setWizardManualIp('');
++    setWizardShowManualIp(false);
+     setWizardStreams(null);
+     setWizardSelectedStream('');
+     setWizardProbing(false);
+@@ -193,6 +189,19 @@
+     setWizardOpen(false);
+     resetWizardState();
+   };
++
++  // Deep link: /dashboard?addCamera=1 opens the V3 camera wizard. Used by the
++  // unified "+ Add Camera" entry point on the Cameras page — same wizard, same
++  // backend (POST /api/camera-setup), no new system.
++  useEffect(() => {
++    if (window.location.search.includes('addCamera=1')) {
++      const url = new URL(window.location.href);
++      url.searchParams.delete('addCamera');
++      window.history.replaceState({}, '', url);
++      openWizard();
++    }
++    // eslint-disable-next-line react-hooks/exhaustive-deps
++  }, []);
+ 
+   // ── Camera Setup Wizard (V3 — One-Click Setup) ──────────────────────────
+   // LAN work (ONVIF discovery, RTSP probing, MediaMTX path, tunnel) runs on
+@@ -264,14 +273,13 @@
+   };
+ 
+   // Step 1b — probe the selected camera and list its RTSP streams (main/sub).
+-  const testWizardConnection = async () => {
+-    const cam = wizardSelectedCam;
++  // Credentials are optional: the agent probes without them and reports
++  // need_credentials when the camera requires auth, so the client only ever
++  // enters a username/password when the system asks for it.
++  const testWizardConnection = async (camOverride) => {
++    const cam = camOverride || wizardSelectedCam;
+     const ip = (cam?.ip || wizardManualIp || '').trim();
+     if (!ip) { alert('Enter the camera IP address or select one from the scan results.'); return; }
+-    if (!wizardUsername.trim() || !wizardPassword.trim()) {
+-      alert('Enter the camera username and password to discover its streams.');
+-      return;
+-    }
+     setWizardProbing(true);
+     setWizardError('');
+     setWizardStreams(null);
+@@ -281,8 +289,8 @@
+         mode: 'probe',
+         ip,
+         onvif_port: cam?.onvif_port || 80,
+-        username: wizardUsername.trim(),
+-        password: wizardPassword.trim(),
++        username: wizardUsername.trim() || null,
++        password: wizardPassword.trim() || null,
+       });
+       const taskId = res.data?.taskId;
+       if (!taskId) throw new Error('No task id returned');
+@@ -292,10 +300,13 @@
+       if (t.status === 'failed') { setWizardError(t.error || 'Connection test failed'); return; }
+       const streams = t.result?.streams || [];
+       if (streams.length === 0) {
+-        setWizardError(t.result?.need_credentials
+-          ? 'No streams found without valid credentials. Check the username/password, or paste an RTSP URL manually on the next step.'
+-          : 'No RTSP streams found on this camera. You can still paste an RTSP URL manually on the next step.');
+-        setWizardStep(2);
++        if (t.result?.need_credentials) {
++          setWizardError('No streams found without valid credentials — enter the camera username/password above and try again.');
++          setWizardStep(1);
++        } else {
++          setWizardError('No RTSP streams found on this camera. You can still paste an RTSP URL manually on the next step.');
++          setWizardStep(2);
++        }
+         return;
+       }
+       setWizardStreams(streams);
+@@ -308,6 +319,21 @@
+     } finally {
+       setWizardProbing(false);
+     }
++  };
++
++  // Select a discovered camera: the IP comes from the scan (the client never
++  // types it), a sensible name is pre-filled (editable), and the probe for
++  // main/sub streams starts immediately — no extra clicks required.
++  const selectWizardCamera = (cam) => {
++    if (wizardProbing) return;
++    setWizardSelectedCam(cam);
++    setWizardManualIp(cam.ip);
++    setWizardShowManualIp(false);
++    setNewCamera((p) => ({
++      ...p,
++      name: p.name.trim() || [cam.manufacturer, cam.model].filter(Boolean).join(' ') || cam.ip,
++    }));
++    testWizardConnection(cam);
+   };
+ 
+   // Verify the HLS URL answers with a token (401/403 = token problem).
+@@ -502,40 +528,6 @@
+     }
+   };
+ 
+-  const submitAddCamera = async (e) => {
+-    e.preventDefault();
+-    if (!addCamForm.name.trim() || !addCamForm.rtsp_url.trim()) {
+-      setAddCamError('Camera name and RTSP URL are required.');
+-      return;
+-    }
+-    setAddCamSaving(true);
+-    setAddCamError('');
+-    const id = `CAM-${String((cameras?.length || 0) + 1).padStart(2, '0')}`;
+-    const newCam = {
+-      id,
+-      name: addCamForm.name.trim(),
+-      rtsp_url: addCamForm.rtsp_url.trim(),
+-      location: addCamForm.location.trim() || id,
+-      lat: addCamForm.lat ? Number(addCamForm.lat) : null,
+-      lng: addCamForm.lng ? Number(addCamForm.lng) : null,
+-      enabled: true,
+-      resolution: '1920x1080',
+-      fps: 30,
+-      codec: 'H264',
+-    };
+-    try {
+-      await api.post('/cameras', newCam);
+-      setCameras((prev) => [...(prev || []), newCam]);
+-      setAddCamForm({ name: '', rtsp_url: '', location: '', lat: '', lng: '' });
+-      setShowAddCam(false);
+-      addAuditEntry(`Added camera: ${newCam.name} (${id})`);
+-    } catch (err) {
+-      setAddCamError(err?.response?.data?.error || err.message || 'Failed to save camera.');
+-    } finally {
+-      setAddCamSaving(false);
+-    }
+-  };
+-
+   const openAlarmMap = (event) => {
+     setSelectedAlarmId(event.eventId);
+     addAuditEntry(`Opened alarm map for Event #${event.eventId}`);
+@@ -991,9 +983,9 @@
+ 
+             {wizardStep === 1 && (
+               <>
+-                <p className="ls-desc">Skeniranje lokalne mreže se pokreće automatski. Izaberi pronađenu kameru ili unesi IP adresu ručno — bez RTSP putanja i bez konfiguracije.</p>
++                <p className="ls-desc">We scan your local network automatically and list the cameras we find — no IP address needed. Select your camera and we'll find its streams for you. If your camera was not found, you can enter its IP manually below.</p>
+                 {wizardScanning ? (
+-                  <p className="ls-desc" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>⏳ Scanning the local network for ONVIF cameras…</p>
++                  <p className="ls-desc" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>⏳ Scanning the local network for cameras…</p>
+                 ) : (
+                   <div className="wizard-fields">
+                     {wizardScanResults?.cameras?.length > 0 ? (
+@@ -1002,7 +994,7 @@
+                         <div className="wizard-found">
+                           {wizardScanResults.cameras.map((cam, i) => (
+                             <button key={i} type="button" className="wizard-found-item"
+-                              onClick={() => { setWizardSelectedCam(cam); setWizardManualIp(cam.ip); }}
++                              onClick={() => selectWizardCamera(cam)}
+                               style={{ textAlign: 'left', padding: 10, marginBottom: 6, borderRadius: 6, cursor: 'pointer', width: '100%' }}>
+                               <div>📷 <strong>{cam.manufacturer || 'Unknown'} {cam.model || ''}</strong></div>
+                               <div style={{ fontSize: 12, opacity: 0.8 }}>
+@@ -1015,19 +1007,25 @@
+                     ) : (
+                       <p className="ls-desc" style={{ color: 'var(--color-warn, #f59e0b)' }}>No cameras found automatically. Enter the camera IP manually below (e.g. 192.168.1.17).</p>
+                     )}
+-                    <label className="search-field">
+-                      <span>Camera IP</span>
+-                      <input value={wizardManualIp} onChange={(e) => { setWizardManualIp(e.target.value); setWizardSelectedCam(null); }} placeholder="192.168.1.17" />
+-                    </label>
+-                    <label className="search-field"><span>Username (ONVIF)</span><input value={wizardUsername} onChange={(e) => setWizardUsername(e.target.value)} placeholder="admin" autoComplete="off" /></label>
+-                    <label className="search-field"><span>Password</span><input type="password" value={wizardPassword} onChange={(e) => setWizardPassword(e.target.value)} placeholder="••••••••" /></label>
+-                    <label className="search-field"><span>Camera name</span><input value={newCamera.name} onChange={(e) => setNewCamera((p) => ({ ...p, name: e.target.value }))} placeholder="South Entrance" /></label>
++                    {wizardShowManualIp || !(wizardScanResults?.cameras?.length > 0) ? (
++                      <label className="search-field">
++                        <span>Camera IP (only if not found automatically)</span>
++                        <input value={wizardManualIp} onChange={(e) => { setWizardManualIp(e.target.value); setWizardSelectedCam(null); }} placeholder="192.168.1.17" />
++                      </label>
++                    ) : (
++                      <button type="button" className="ghost-button" style={{ marginBottom: 8 }} onClick={() => setWizardShowManualIp(true)}>
++                        Can't find your camera? Enter its IP manually
++                      </button>
++                    )}
++                    <label className="search-field"><span>Username (only if your camera requires it)</span><input value={wizardUsername} onChange={(e) => setWizardUsername(e.target.value)} placeholder="admin" autoComplete="off" /></label>
++                    <label className="search-field"><span>Password (only if your camera requires it)</span><input type="password" value={wizardPassword} onChange={(e) => setWizardPassword(e.target.value)} placeholder="••••••••" /></label>
++                    <label className="search-field"><span>Camera name (optional)</span><input value={newCamera.name} onChange={(e) => setNewCamera((p) => ({ ...p, name: e.target.value }))} placeholder="South Entrance" /></label>
+                   </div>
+                 )}
+                 {wizardError && <p className="ls-desc" style={{ color: 'var(--color-danger, #ef4444)' }}>⚠️ {wizardError}</p>}
+                 <div className="wizard-actions">
+-                  <button className="primary-button" type="button" onClick={testWizardConnection} disabled={wizardScanning || wizardProbing || !wizardNode}>
+-                    {wizardProbing ? 'Finding streams…' : 'Test Connection & Find Streams'}
++                  <button className="primary-button" type="button" onClick={() => testWizardConnection()} disabled={wizardScanning || wizardProbing || !wizardNode}>
++                    {wizardProbing ? 'Finding streams…' : 'Find Streams'}
+                   </button>
+                   <button className="ghost-button" type="button" onClick={startWizardScan} disabled={wizardScanning}>Rescan network</button>
+                 </div>
+@@ -1239,11 +1237,8 @@
+                 {currentUser?.email?.charAt(0).toUpperCase() || 'U'}
+               </div>
+             </div>
+-            <button className="primary-button" onClick={() => { setShowAddCam((v) => !v); setAddCamError(''); }}>
++            <button className="primary-button" onClick={() => setWizardOpen(true)}>
+               + Add Camera
+-            </button>
+-            <button className="ghost-button" onClick={() => setWizardOpen(true)}>
+-              + Create Incident
+             </button>
+           </div>
+         </header>
+@@ -1565,9 +1560,9 @@
+               <button
+                 className="ghost-button"
+                 type="button"
+-                onClick={() => { setShowAddCam((v) => !v); setAddCamError(''); }}
++                onClick={() => setWizardOpen(true)}
+               >
+-                {showAddCam ? 'Cancel' : '+ Add Camera'}
++                + Add Camera
+               </button>
+             </div>
+ 
+@@ -1575,68 +1570,6 @@
+               <p className="checkout-status checkout-status-error" role="alert">
+                 Camera list failed to load: {camerasError}
+               </p>
+-            )}
+-
+-            {showAddCam && (
+-              <form className="add-cam-form" onSubmit={submitAddCamera}>
+-                <label className="search-field">
+-                  <span>Camera Name</span>
+-                  <input
+-                    value={addCamForm.name}
+-                    onChange={(e) => setAddCamForm((p) => ({ ...p, name: e.target.value }))}
+-                    placeholder="e.g. Back Yard"
+-                    required
+-                    autoFocus
+-                  />
+-                </label>
+-                <label className="search-field">
+-                  <span>RTSP Stream URL</span>
+-                  <input
+-                    value={addCamForm.rtsp_url}
+-                    onChange={(e) => setAddCamForm((p) => ({ ...p, rtsp_url: e.target.value }))}
+-                    placeholder="rtsp://your-camera-ip:554/stream"
+-                    required
+-                  />
+-                </label>
+-                <label className="search-field">
+-                  <span>Location (optional)</span>
+-                  <input
+-                    value={addCamForm.location}
+-                    onChange={(e) => setAddCamForm((p) => ({ ...p, location: e.target.value }))}
+-                    placeholder="e.g. back_yard"
+-                  />
+-                </label>
+-                <label className="search-field">
+-                  <span>Latitude (optional)</span>
+-                  <input
+-                    type="number"
+-                    step="any"
+-                    value={addCamForm.lat}
+-                    onChange={(e) => setAddCamForm((p) => ({ ...p, lat: e.target.value }))}
+-                    placeholder="e.g. 45.8154"
+-                  />
+-                </label>
+-                <label className="search-field">
+-                  <span>Longitude (optional)</span>
+-                  <input
+-                    type="number"
+-                    step="any"
+-                    value={addCamForm.lng}
+-                    onChange={(e) => setAddCamForm((p) => ({ ...p, lng: e.target.value }))}
+-                    placeholder="e.g. 15.9819"
+-                  />
+-                </label>
+-                <div className="add-cam-actions">
+-                  {addCamError && <p className="checkout-status checkout-status-error">{addCamError}</p>}
+-                  <button
+-                    className="primary-button"
+-                    type="submit"
+-                    disabled={addCamSaving || !addCamForm.name.trim() || !addCamForm.rtsp_url.trim()}
+-                  >
+-                    {addCamSaving ? 'Saving...' : 'Add Camera'}
+-                  </button>
+-                </div>
+-              </form>
+             )}
+ 
+             <div className="camera-list">
+@@ -1702,7 +1635,7 @@
+                     <button 
+                       className="ghost-button" 
+                       type="button"
+-                      onClick={() => { setShowAddCam((v) => !v); setAddCamError(''); }}
++                      onClick={() => setWizardOpen(true)}
+                       style={{ marginTop: '1rem' }}
+                     >
+                       Add Camera
+diff --git a/frontend/src/pages/Incidents.jsx b/frontend/src/pages/Incidents.jsx
+index 9e917bd99e8782cef17c629bff27527933a9f1f9..72f23c0913c4c6aa3ac0b08dc98675fe02fcdf5e 100644
+--- a/frontend/src/pages/Incidents.jsx
++++ b/frontend/src/pages/Incidents.jsx
+@@ -23,8 +23,12 @@
+   .incident-actions { display: flex; gap: .5rem; }
+   .action-btn { padding: .4rem .8rem; border-radius: 6px; font-size: .75rem; cursor: pointer; border: none; transition: all .2s; }
+   .action-btn-view { background: rgba(0,212,255,.2); color: var(--accent-primary, #00d4ff); }
+-  .action-btn-edit { background: rgba(87,125,196,.2); color: var(--text-secondary, #8ab0c9); }
+   .action-btn:hover { filter: brightness(1.2); }
++  .incident-detail-row td { background: rgba(0,212,255,.03); }
++  .incident-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .6rem 1rem; margin-bottom: .4rem; }
++  .incident-detail-grid span { font-size: .8rem; color: var(--text-secondary, #8ab0c9); }
++  .incident-detail-grid strong { display: block; font-size: .68rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted, #6a8aaa); margin-bottom: 2px; }
++  .incident-detail-desc { font-size: .85rem; color: var(--text-secondary, #8ab0c9); margin: .25rem 0 0; }
+   .empty-incidents { text-align: center; padding: 4rem; background: rgba(10,18,38,.85); border: 1px solid rgba(87,140,255,.18); border-radius: 16px; }
+   .empty-incidents h2 { color: var(--text-primary, #dff7ff); margin-bottom: 1rem; }
+   .empty-incidents p { color: var(--text-secondary, #8ab0c9); }
+@@ -39,6 +43,7 @@
+   const [incidents, setIncidents] = useState([]);
+   const [loading, setLoading] = useState(true);
+   const [statusFilter, setStatusFilter] = useState('all');
++  const [expandedId, setExpandedId] = useState(null);
+ 
+   useEffect(() => {
+     fetchIncidents();
+@@ -123,7 +128,8 @@
+             </thead>
+             <tbody>
+               {filteredIncidents.map(incident => (
+-                <tr key={incident.id}>
++                <React.Fragment key={incident.id}>
++                <tr>
+                   <td>
+                     <div className={`severity-indicator ${getSeverityClass(incident.severity)}`} />
+                   </td>
+@@ -142,11 +148,34 @@
+                   </td>
+                   <td>
+                     <div className="incident-actions">
+-                      <button className="action-btn action-btn-view">View</button>
+-                      <button className="action-btn action-btn-edit">Edit</button>
++                      <button
++                        className="action-btn action-btn-view"
++                        onClick={() => setExpandedId(expandedId === incident.id ? null : incident.id)}
++                      >
++                        {expandedId === incident.id ? 'Hide' : 'View'}
++                      </button>
+                     </div>
+                   </td>
+                 </tr>
++                {expandedId === incident.id && (
++                  <tr className="incident-detail-row">
++                    <td colSpan={6}>
++                      <div className="incident-detail-grid">
++                        <span><strong>Event ID</strong>{incident.event_id || '—'}</span>
++                        <span><strong>Camera</strong>{incident.camera_id || '—'}</span>
++                        <span><strong>Type</strong>{incident.object_type || '—'}</span>
++                        <span><strong>Confidence</strong>{incident.confidence != null ? `${Math.round(Number(incident.confidence) * 100)}%` : '—'}</span>
++                        <span><strong>Severity</strong>{incident.severity || '—'}</span>
++                        <span><strong>Status</strong>{incident.status || '—'}</span>
++                        <span><strong>Assigned operator</strong>{incident.assigned_operator_id || '—'}</span>
++                        <span><strong>Acknowledged</strong>{incident.acknowledged_at ? new Date(incident.acknowledged_at).toLocaleString() : '—'}</span>
++                        <span><strong>Resolved</strong>{incident.resolved_at ? new Date(incident.resolved_at).toLocaleString() : '—'}</span>
++                      </div>
++                      {incident.source && <p className="incident-detail-desc">{incident.source}</p>}
++                    </td>
++                  </tr>
++                )}
++                </React.Fragment>
+               ))}
+             </tbody>
+           </table>
+diff --git a/frontend/src/components/dashboard/CameraWizard.jsx b/frontend/src/components/dashboard/CameraWizard.jsx
+deleted file mode 100644
+index e4ac9c6b0576cce69311a13fe8684d089b4d1d32..0000000
+--- a/frontend/src/components/dashboard/CameraWizard.jsx
++++ /dev/null
+@@ -1,196 +0,0 @@
+-export function CameraWizard({
+-  wizardOpen,
+-  setWizardOpen,
+-  wizardStep,
+-  setWizardStep,
+-  wizardScanning,
+-  wizardSaving,
+-  wizardScanResults,
+-  wizardNode,
+-  wizardNodeError,
+-  wizardSelectedCam,
+-  setWizardSelectedCam,
+-  wizardManualIp,
+-  setWizardManualIp,
+-  wizardStreams,
+-  wizardSelectedStream,
+-  setWizardSelectedStream,
+-  wizardProbing,
+-  wizardPreviewReady,
+-  setWizardPreviewReady,
+-  wizardTokenOk,
+-  wizardTunnelBusy,
+-  newCamera,
+-  setNewCamera,
+-  wizardUsername,
+-  setWizardUsername,
+-  wizardPassword,
+-  setWizardPassword,
+-  wizardError,
+-  setWizardError,
+-  wizardPreview,
+-  wizardPreviewRef,
+-  closeWizard,
+-  startWizardScan,
+-  testWizardConnection,
+-  connectWizardPreview,
+-  saveWizardCamera,
+-  startWizardTunnel,
+-}) {
+-  if (!wizardOpen) return null;
+-
+-  return (
+-    <div className="modal-overlay" role="dialog" aria-modal="true" aria-label="Add new camera">
+-      <section className="modal-card">
+-        <div className="modal-header">
+-          <h2 className="modal-title">
+-            {wizardStep === 3 ? 'Live Preview' : wizardStep === 2 ? 'Connect Camera' : 'Add New Camera'}
+-          </h2>
+-          <button className="notif-dismiss" onClick={closeWizard} aria-label="Close">&#x2715;</button>
+-        </div>
+-
+-        {/* Health panel — always visible */}
+-        <div className="wizard-fields" style={{ background: 'rgba(0,0,0,0.35)', borderRadius: 8, padding: '8px 12px', marginBottom: 10 }}>
+-          {[
+-            { key: 'node', label: 'Media Node online', ok: !!wizardNode, hint: 'Desktop media app nije online — pokreni start-laptop.bat na računaru pored kamera.' },
+-            { key: 'mtx', label: 'MediaMTX online', ok: !!wizardNode?.mediamtx_online, hint: 'MediaMTX ne odgovara na nodu — proveri da je pokrenut (start-laptop.bat).' },
+-            { key: 'tunnel', label: 'Tunnel online', ok: !!wizardNode?.tunnel_online, hint: 'Cloudflare Tunnel nije aktivan.' },
+-            { key: 'rtsp', label: 'RTSP connected', ok: wizardStreams?.find((s) => s.url === wizardSelectedStream)?.reachable ?? (wizardSelectedStream ? undefined : null), hint: 'Izaberi stream sa kamere.' },
+-            { key: 'hls', label: 'HLS active', ok: wizardPreviewReady, hint: 'HLS radi kada video počne da se reprodukuje.' },
+-            { key: 'token', label: 'Token auth OK', ok: wizardTokenOk, hint: '' },
+-          ].map((it) => (
+-            <div key={it.key} style={{ display: 'flex', alignItems: 'center', gap: 8, fontSize: 12.5, padding: '2px 0' }}>
+-              <span>{it.ok === true ? '🟢' : it.ok === false ? '🔴' : '⚪'}</span>
+-              <span style={{ minWidth: 130 }}>{it.label}</span>
+-              {it.ok === false && it.hint && <span style={{ color: 'var(--color-warn, #f59e0b)' }}>{it.hint}</span>}
+-            </div>
+-          ))}
+-          {wizardNode?.health?.system && (
+-            <div style={{ marginTop: 6, paddingTop: 6, borderTop: '1px solid rgba(255,255,255,0.08)', fontSize: 12 }}>
+-              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', opacity: 0.95 }}>
+-                <span>🖥️ CPU {wizardNode.health.system.cpu_usage_percent != null ? `${wizardNode.health.system.cpu_usage_percent}%` : '—'}</span>
+-                <span>🧠 RAM {wizardNode.health.system.memory ? `${wizardNode.health.system.memory.used_mb} MB / ${wizardNode.health.system.memory.total_mb} MB` : '—'}</span>
+-                <span>💾 Disk {wizardNode.health.system.disk ? `${wizardNode.health.system.disk.free_mb} MB free` : '—'}</span>
+-              </div>
+-              <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap', opacity: 0.95, marginTop: 2 }}>
+-                <span>📷 Cameras {wizardNode.health.cameras ? `${wizardNode.health.cameras.active}/${wizardNode.health.cameras.total} active` : `${wizardNode.current_cameras || 0}`}</span>
+-                <span>⏱️ Uptime {wizardNode.health.system.uptime_seconds ? `${Math.floor(wizardNode.health.system.uptime_seconds / 60)} min` : '—'}</span>
+-                <span>💓 Last heartbeat {wizardNode.health_checked_at ? new Date(wizardNode.health_checked_at).toLocaleTimeString() : '—'}</span>
+-              </div>
+-            </div>
+-          )}
+-          {wizardNodeError && <p style={{ color: 'var(--color-danger, #ef4444)', fontSize: 12, margin: '4px 0' }}>⚠️ {wizardNodeError}</p>}
+-          {wizardNode && !wizardNode.tunnel_online && (
+-            <div style={{ display: 'flex', alignItems: 'center', gap: 8, marginTop: 4 }}>
+-              <button className="ghost-button" type="button" onClick={startWizardTunnel} disabled={wizardTunnelBusy} style={{ padding: '3px 10px', fontSize: 12 }}>
+-                {wizardTunnelBusy ? 'Starting…' : '🚀 Start Tunnel'}
+-              </button>
+-              <span style={{ fontSize: 11, opacity: 0.8 }}>HLS neće biti javno dostupan dok tunnel ne radi.</span>
+-            </div>
+-          )}
+-        </div>
+-
+-        {wizardStep === 1 && (
+-          <>
+-            <p className="ls-desc">Skeniranje lokalne mreže se pokreće automatski. Izaberi pronađenu kameru ili unesi IP adresu ručno — bez RTSP putanja i bez konfiguracije.</p>
+-            {wizardScanning ? (
+-              <p className="ls-desc" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>⏳ Scanning the local network for ONVIF cameras…</p>
+-            ) : (
+-              <div className="wizard-fields">
+-                {wizardScanResults?.cameras?.length > 0 ? (
+-                  <>
+-                    <span style={{ fontSize: 13 }}>Found {wizardScanResults.cameras.length} camera(s) on {wizardScanResults.subnet || 'LAN'}:</span>
+-                    <div className="wizard-found">
+-                      {wizardScanResults.cameras.map((cam, i) => (
+-                        <button key={i} type="button" className="wizard-found-item"
+-                          onClick={() => { setWizardSelectedCam(cam); setWizardManualIp(cam.ip); }}
+-                          style={{ textAlign: 'left', padding: 10, marginBottom: 6, borderRadius: 6, cursor: 'pointer', width: '100%' }}>
+-                          <div>📷 <strong>{cam.manufacturer || 'Unknown'} {cam.model || ''}</strong></div>
+-                          <div style={{ fontSize: 12, opacity: 0.8 }}>
+-                            {cam.ip}{cam.onvif_port ? ` :${cam.onvif_port}` : ''} · FW {cam.firmware_version || 'n/a'} · ONVIF ✓
+-                          </div>
+-                        </button>
+-                      ))}
+-                    </div>
+-                  </>
+-                ) : (
+-                  <p className="ls-desc" style={{ color: 'var(--color-warn, #f59e0b)' }}>No cameras found automatically. Enter the camera IP manually below (e.g. 192.168.1.17).</p>
+-                )}
+-                <label className="search-field">
+-                  <span>Camera IP</span>
+-                  <input value={wizardManualIp} onChange={(e) => { setWizardManualIp(e.target.value); setWizardSelectedCam(null); }} placeholder="192.168.1.17" />
+-                </label>
+-                <label className="search-field"><span>Username (ONVIF)</span><input value={wizardUsername} onChange={(e) => setWizardUsername(e.target.value)} placeholder="admin" autoComplete="off" /></label>
+-                <label className="search-field"><span>Password</span><input type="password" value={wizardPassword} onChange={(e) => setWizardPassword(e.target.value)} placeholder="••••••••" /></label>
+-                <label className="search-field"><span>Camera name</span><input value={newCamera.name} onChange={(e) => setNewCamera((p) => ({ ...p, name: e.target.value }))} placeholder="South Entrance" /></label>
+-              </div>
+-            )}
+-            {wizardError && <p className="ls-desc" style={{ color: 'var(--color-danger, #ef4444)' }}>⚠️ {wizardError}</p>}
+-            <div className="wizard-actions">
+-              <button className="primary-button" type="button" onClick={testWizardConnection} disabled={wizardScanning || wizardProbing || !wizardNode}>
+-                {wizardProbing ? 'Finding streams…' : 'Test Connection & Find Streams'}
+-              </button>
+-              <button className="ghost-button" type="button" onClick={startWizardScan} disabled={wizardScanning}>Rescan network</button>
+-            </div>
+-          </>
+-        )}
+-
+-        {wizardStep === 2 && (
+-          <>
+-            <p className="ls-desc">Izaberi stream koji želiš da povežeš (Main je obično visoka rezolucija, Sub niža). Ako nema pronađenih streamova, unesi RTSP URL ručno.</p>
+-            {wizardStreams?.length > 0 ? (
+-              <div className="wizard-found">
+-                {wizardStreams.map((s, i) => (
+-                  <button key={i} type="button"
+-                    onClick={() => setWizardSelectedStream(s.url)}
+-                    style={{ textAlign: 'left', padding: 10, marginBottom: 6, borderRadius: 6, cursor: 'pointer', width: '100%',
+-                             outline: wizardSelectedStream === s.url ? '2px solid var(--color-primary, #3b82f6)' : 'none' }}>
+-                    <div>🎥 <strong>{s.label}</strong> {s.reachable ? '🟢' : '🔴'}</div>
+-                    <div style={{ fontSize: 11, opacity: 0.75, wordBreak: 'break-all' }}>{s.url}</div>
+-                  </button>
+-                ))}
+-              </div>
+-            ) : (
+-              <label className="search-field">
+-                <span>RTSP URL (manual)</span>
+-                <input value={newCamera.rtsp_url} onChange={(e) => setNewCamera((p) => ({ ...p, rtsp_url: e.target.value }))} placeholder="rtsp://user:pass@192.168.1.17:554/Streaming/Channels/101" />
+-              </label>
+-            )}
+-            {wizardError && <p className="ls-desc" style={{ color: 'var(--color-danger, #ef4444)' }}>⚠️ {wizardError}</p>}
+-            <div className="wizard-actions">
+-              <button className="primary-button" type="button" onClick={connectWizardPreview} disabled={wizardSaving}>
+-                {wizardSaving ? 'Connecting…' : 'Connect & Preview'}
+-              </button>
+-              <button className="ghost-button" type="button" onClick={() => setWizardStep(1)}>Back</button>
+-            </div>
+-          </>
+-        )}
+-
+-        {wizardStep === 3 && (
+-          <>
+-            <p className="wizard-success">Camera <strong>{wizardPreview?.name || newCamera.name}</strong> is live. Klikni Save da je trajno dodaš.</p>
+-            {wizardPreview?.hlsUrl && (
+-              <video
+-                ref={wizardPreviewRef}
+-                controls
+-                autoPlay
+-                muted
+-                playsInline
+-                onPlaying={() => setWizardPreviewReady(true)}
+-                onError={() => setWizardError('Preview failed to play. Proveri health panel i probaj ponovo.')}
+-                style={{ width: '100%', borderRadius: 8, background: '#000', aspectRatio: '16 / 9', marginBottom: 12 }}
+-              />
+-            )}
+-            {wizardError && <p className="ls-desc" style={{ color: 'var(--color-danger, #ef4444)' }}>⚠️ {wizardError}</p>}
+-            <div className="wizard-actions">
+-              <button className="primary-button" type="button" onClick={saveWizardCamera} disabled={!wizardPreviewReady}>
+-                {wizardPreviewReady ? '💾 Save Camera' : 'Waiting for live preview…'}
+-              </button>
+-              <button className="ghost-button" type="button" onClick={closeWizard}>Cancel</button>
+-            </div>
+-          </>
+-        )}
+-      </section>
+-    </div>
+-  );
+-}
+diff --git a/frontend/src/hooks/useCameraWizard.js b/frontend/src/hooks/useCameraWizard.js
+deleted file mode 100644
+index 168504155937f05e1b03404e8c25542c38a94add..0000000
+--- a/frontend/src/hooks/useCameraWizard.js
++++ /dev/null
+@@ -1,343 +0,0 @@
+-import { useEffect, useRef, useState } from 'react';
+-import Hls from 'hls.js';
+-import api from '../services/api';
+-
+-export function useCameraWizard(addAuditEntry) {
+-  const hlsBaseUrl = (import.meta.env.VITE_HLS_BASE_URL || '/hls').replace(/\/$/, '');
+-
+-  const wizardPreviewRef = useRef(null);
+-
+-  const [wizardOpen, setWizardOpen] = useState(false);
+-  const [wizardStep, setWizardStep] = useState(1);
+-  const [wizardScanning, setWizardScanning] = useState(false);
+-  const [wizardSaving, setWizardSaving] = useState(false);
+-  const [wizardScanResults, setWizardScanResults] = useState(null);
+-  const [wizardNode, setWizardNode] = useState(null);
+-  const [wizardNodeError, setWizardNodeError] = useState('');
+-  const [wizardSelectedCam, setWizardSelectedCam] = useState(null);
+-  const [wizardManualIp, setWizardManualIp] = useState('');
+-  const [wizardStreams, setWizardStreams] = useState(null);
+-  const [wizardSelectedStream, setWizardSelectedStream] = useState('');
+-  const [wizardProbing, setWizardProbing] = useState(false);
+-  const [wizardPreviewReady, setWizardPreviewReady] = useState(false);
+-  const [wizardTokenOk, setWizardTokenOk] = useState(false);
+-  const [wizardTunnelBusy, setWizardTunnelBusy] = useState(false);
+-  const [newCamera, setNewCamera] = useState({ id: '', name: '', rtsp_url: '', location: '', lat: '', lng: '', enabled: true, resolution: '1920x1080', fps: 30, codec: 'H264' });
+-  const [wizardUsername, setWizardUsername] = useState('');
+-  const [wizardPassword, setWizardPassword] = useState('');
+-  const [wizardTask, setWizardTask] = useState(null);
+-  const [wizardTaskId, setWizardTaskId] = useState(null);
+-  const [wizardError, setWizardError] = useState('');
+-  const [wizardPreview, setWizardPreview] = useState(null);
+-
+-  const resetWizardState = () => {
+-    setWizardStep(1);
+-    setWizardScanning(false);
+-    setWizardSaving(false);
+-    setWizardScanResults(null);
+-    setWizardNode(null);
+-    setWizardNodeError('');
+-    setWizardSelectedCam(null);
+-    setWizardManualIp('');
+-    setWizardStreams(null);
+-    setWizardSelectedStream('');
+-    setWizardProbing(false);
+-    setWizardPreviewReady(false);
+-    setWizardTokenOk(false);
+-    setWizardTunnelBusy(false);
+-    setWizardUsername('');
+-    setWizardPassword('');
+-    setWizardTask(null);
+-    setWizardTaskId(null);
+-    setWizardError('');
+-    setWizardPreview(null);
+-    setNewCamera({ id: '', name: '', rtsp_url: '', location: '', lat: '', lng: '', enabled: true, resolution: '1920x1080', fps: 30, codec: 'H264' });
+-  };
+-
+-  const openWizard = () => {
+-    setWizardOpen(true);
+-    resetWizardState();
+-    fetchWizardNode();
+-    startWizardScan();
+-  };
+-
+-  const closeWizard = (skipCleanup = false) => {
+-    if (wizardTaskId && !skipCleanup) {
+-      try { api.post('/camera-setup/cancel', { task_id: wizardTaskId }); } catch { /* best effort */ }
+-    }
+-    const cameraId = wizardPreview?.cameraId;
+-    if (cameraId && !skipCleanup) {
+-      try { api.post('/camera-setup', { mode: 'cleanup', camera_id: cameraId }); } catch { /* best effort */ }
+-    }
+-    setWizardOpen(false);
+-    resetWizardState();
+-  };
+-
+-  const pollWizardTask = async (taskId) => {
+-    for (let attempt = 0; attempt < 90; attempt += 1) {
+-      try {
+-        const res = await api.get(`/camera-setup/${taskId}`);
+-        const t = res.data?.task || res.data;
+-        setWizardTask(t);
+-        if (t?.status === 'done' || t?.status === 'failed') return t;
+-      } catch (err) {
+-        /* transient — keep polling */
+-      }
+-      await new Promise((r) => setTimeout(r, 2000));
+-    }
+-    return null;
+-  };
+-
+-  const refreshWizardCameras = async () => {
+-    try {
+-      const res = await api.get('/cameras');
+-      return res.data?.cameras || [];
+-    } catch (err) {
+-      return [];
+-    }
+-  };
+-
+-  const fetchWizardNode = async () => {
+-    try {
+-      const res = await api.get('/camera-setup/node');
+-      setWizardNode(res.data?.node || null);
+-      setWizardNodeError('');
+-      return res.data?.node || null;
+-    } catch (err) {
+-      const msg = err?.response?.data?.error || err.message || 'Unknown error';
+-      setWizardNodeError(msg);
+-      setWizardNode(null);
+-      return null;
+-    }
+-  };
+-
+-  const startWizardScan = async () => {
+-    setWizardScanning(true);
+-    setWizardError('');
+-    setWizardScanResults(null);
+-    setWizardTask(null);
+-    try {
+-      const res = await api.post('/camera-setup', { mode: 'scan' });
+-      const taskId = res.data?.taskId;
+-      if (!taskId) throw new Error('No task id returned');
+-      setWizardTaskId(taskId);
+-      const t = await pollWizardTask(taskId);
+-      if (!t) { setWizardError('Scan timed out. Is the desktop media app running?'); return; }
+-      if (t.status === 'failed') { setWizardError(t.error || 'Scan failed'); return; }
+-      setWizardScanResults({ cameras: t.result?.cameras || [], subnet: t.result?.subnet || null });
+-    } catch (err) {
+-      const msg = err?.response?.data?.error || err.message || 'Unknown error';
+-      setWizardError(msg);
+-      if (err?.response?.status === 409) alert(msg);
+-    } finally {
+-      setWizardScanning(false);
+-    }
+-  };
+-
+-  const testWizardConnection = async () => {
+-    const cam = wizardSelectedCam;
+-    const ip = (cam?.ip || wizardManualIp || '').trim();
+-    if (!ip) { alert('Enter the camera IP address or select one from the scan results.'); return; }
+-    if (!wizardUsername.trim() || !wizardPassword.trim()) {
+-      alert('Enter the camera username and password to discover its streams.');
+-      return;
+-    }
+-    setWizardProbing(true);
+-    setWizardError('');
+-    setWizardStreams(null);
+-    setWizardSelectedStream('');
+-    try {
+-      const res = await api.post('/camera-setup', {
+-        mode: 'probe',
+-        ip,
+-        onvif_port: cam?.onvif_port || 80,
+-        username: wizardUsername.trim(),
+-        password: wizardPassword.trim(),
+-      });
+-      const taskId = res.data?.taskId;
+-      if (!taskId) throw new Error('No task id returned');
+-      setWizardTaskId(taskId);
+-      const t = await pollWizardTask(taskId);
+-      if (!t) { setWizardError('Connection test timed out. Is the desktop media app running?'); return; }
+-      if (t.status === 'failed') { setWizardError(t.error || 'Connection test failed'); return; }
+-      const streams = t.result?.streams || [];
+-      if (streams.length === 0) {
+-        setWizardError(t.result?.need_credentials
+-          ? 'No streams found without valid credentials. Check the username/password, or paste an RTSP URL manually on the next step.'
+-          : 'No RTSP streams found on this camera. You can still paste an RTSP URL manually on the next step.');
+-        setWizardStep(2);
+-        return;
+-      }
+-      setWizardStreams(streams);
+-      setWizardSelectedStream(streams[0]?.url || '');
+-      setWizardStep(2);
+-    } catch (err) {
+-      const msg = err?.response?.data?.error || err.message || 'Unknown error';
+-      setWizardError(msg);
+-      if (err?.response?.status === 409) alert(msg);
+-    } finally {
+-      setWizardProbing(false);
+-    }
+-  };
+-
+-  const checkWizardHlsToken = async (hlsUrl) => {
+-    try {
+-      const res = await fetch(hlsUrl, { method: 'GET' });
+-      setWizardTokenOk(res.status !== 401 && res.status !== 403);
+-    } catch {
+-      setWizardTokenOk(false);
+-    }
+-  };
+-
+-  const connectWizardPreview = async () => {
+-    const cam = wizardSelectedCam;
+-    const ip = (cam?.ip || wizardManualIp || '').trim();
+-    const rtspUrl = wizardSelectedStream.trim() || newCamera.rtsp_url.trim();
+-    if (!rtspUrl) { alert('Select a stream from the list or enter an RTSP URL.'); return; }
+-    setWizardSaving(true);
+-    setWizardError('');
+-    setWizardTask(null);
+-    setWizardPreview(null);
+-    setWizardPreviewReady(false);
+-    setWizardTokenOk(false);
+-    setWizardStep(2);
+-    try {
+-      const res = await api.post('/camera-setup', {
+-        mode: 'preview',
+-        ip: ip || null,
+-        onvif_port: cam?.onvif_port || 80,
+-        username: wizardUsername.trim() || null,
+-        password: wizardPassword.trim() || null,
+-        rtsp_url: rtspUrl,
+-        camera_name: newCamera.name.trim() || null,
+-      });
+-      const taskId = res.data?.taskId;
+-      if (!taskId) throw new Error('No task id returned');
+-      setWizardTaskId(taskId);
+-      const t = await pollWizardTask(taskId);
+-      if (!t) { setWizardError('Setup timed out. Is the desktop media app running?'); return; }
+-      if (t.status === 'failed') {
+-        setWizardError(t.error || 'Camera setup failed');
+-        setWizardStep(1);
+-        return;
+-      }
+-      const cameraId = t.camera_id || t.result?.camera_id;
+-      const base = t.node_hls_base_url || wizardNode?.public_hls_url || hlsBaseUrl;
+-      try {
+-        const vr = await api.post('/camera-views', { camera_id: cameraId });
+-        const token = vr.data?.streamToken;
+-        if (token) {
+-          const hlsUrl = `${base.replace(/\/$/, '')}/${cameraId}/index.m3u8?token=${encodeURIComponent(token)}`;
+-          setWizardPreview({ cameraId, name: newCamera.name.trim() || cameraId, hlsUrl });
+-          checkWizardHlsToken(hlsUrl);
+-        }
+-      } catch (err) {
+-        setWizardError(`Camera registered, but preview failed: ${err?.response?.data?.error || err.message}`);
+-      }
+-      setWizardStep(3);
+-    } catch (err) {
+-      const msg = err?.response?.data?.error || err.message || 'Unknown error';
+-      setWizardError(msg);
+-      if (err?.response?.status === 409) alert(msg);
+-      setWizardStep(1);
+-    } finally {
+-      setWizardSaving(false);
+-    }
+-  };
+-
+-  const saveWizardCamera = async () => {
+-    await refreshWizardCameras();
+-    closeWizard(true);
+-  };
+-
+-  const startWizardTunnel = async () => {
+-    setWizardTunnelBusy(true);
+-    setWizardError('');
+-    try {
+-      const res = await api.post('/camera-setup', { mode: 'start_tunnel' });
+-      const taskId = res.data?.taskId;
+-      if (!taskId) throw new Error('No task id returned');
+-      setWizardTaskId(taskId);
+-      const t = await pollWizardTask(taskId);
+-      if (t?.status === 'failed') {
+-        setWizardError(t.error || 'Failed to start tunnel');
+-      } else {
+-        setWizardError(t?.result?.tunnel_online
+-          ? 'Tunnel is now online.'
+-          : 'Tunnel start requested — it may take a few seconds. Watch the health panel.');
+-      }
+-      await fetchWizardNode();
+-    } catch (err) {
+-      const msg = err?.response?.data?.error || err.message || 'Unknown error';
+-      setWizardError(msg);
+-      if (err?.response?.status === 409) alert(msg);
+-    } finally {
+-      setWizardTunnelBusy(false);
+-    }
+-  };
+-
+-  // Live preview: attach hls.js to the preview video element
+-  useEffect(() => {
+-    if (!wizardPreview?.hlsUrl || !wizardPreviewRef.current) return undefined;
+-    const video = wizardPreviewRef.current;
+-    if (Hls.isSupported()) {
+-      const hls = new Hls();
+-      hls.loadSource(wizardPreview.hlsUrl);
+-      hls.attachMedia(video);
+-      return () => hls.destroy();
+-    }
+-    if (video.canPlayType('application/vnd.apple.mpegurl')) {
+-      video.src = wizardPreview.hlsUrl;
+-    }
+-    return undefined;
+-  }, [wizardPreview]);
+-
+-  // Health panel refreshes in real time while the wizard is open
+-  useEffect(() => {
+-    if (!wizardOpen) return undefined;
+-    const timer = setInterval(() => { fetchWizardNode(); }, 10000);
+-    return () => clearInterval(timer);
+-  }, [wizardOpen]);
+-
+-  return {
+-    wizardOpen,
+-    setWizardOpen,
+-    wizardStep,
+-    setWizardStep,
+-    wizardScanning,
+-    wizardSaving,
+-    wizardScanResults,
+-    wizardNode,
+-    wizardNodeError,
+-    wizardSelectedCam,
+-    setWizardSelectedCam,
+-    wizardManualIp,
+-    setWizardManualIp,
+-    wizardStreams,
+-    wizardSelectedStream,
+-    setWizardSelectedStream,
+-    wizardProbing,
+-    wizardPreviewReady,
+-    setWizardPreviewReady,
+-    wizardTokenOk,
+-    wizardTunnelBusy,
+-    newCamera,
+-    setNewCamera,
+-    wizardUsername,
+-    setWizardUsername,
+-    wizardPassword,
+-    setWizardPassword,
+-    wizardTask,
+-    wizardError,
+-    setWizardError,
+-    wizardPreview,
+-    wizardPreviewRef,
+-    openWizard,
+-    closeWizard,
+-    startWizardScan,
+-    testWizardConnection,
+-    connectWizardPreview,
+-    saveWizardCamera,
+-    startWizardTunnel,
+-  };
+-}
+diff --git a/frontend/src/hooks/useCameras.js b/frontend/src/hooks/useCameras.js
+deleted file mode 100644
+index 71ba582619e6dd60cd53c2e75547d013c5e7864b..0000000
+--- a/frontend/src/hooks/useCameras.js
++++ /dev/null
+@@ -1,221 +0,0 @@
+-import { useEffect, useMemo, useState } from 'react';
+-import Hls from 'hls.js';
+-import api from '../services/api';
+-
+-function buildHlsManifestUrl(cameraId, cameraHlsBaseUrl) {
+-  const hlsBaseUrl = (import.meta.env.VITE_HLS_BASE_URL || '/hls').replace(/\/$/, '');
+-  const base = (cameraHlsBaseUrl || hlsBaseUrl).replace(/\/$/, '');
+-  return `${base}/${cameraId}/index.m3u8`;
+-}
+-
+-export function useCameras(authChecked) {
+-  const [cameras, setCameras] = useState(null);
+-  const [camerasError, setCamerasError] = useState(null);
+-  const [streamErrors, setStreamErrors] = useState({});
+-  const [snapshotStatus, setSnapshotStatus] = useState({});
+-  const [talkdownActive, setTalkdownActive] = useState(null);
+-
+-  // Fetch cameras once auth is confirmed
+-  useEffect(() => {
+-    if (!authChecked) return;
+-
+-    api
+-      .get('/cameras')
+-      .then((res) => {
+-        setCameras(res.data.cameras || []);
+-        setCamerasError(null);
+-      })
+-      .catch((err) => {
+-        const backendMessage = err.response?.data?.error;
+-        setCamerasError(
+-          backendMessage ||
+-          (err.response
+-            ? `Camera service returned an error (HTTP ${err.response.status}).`
+-            : 'Could not reach the camera API. Check your network connection or API deployment.')
+-        );
+-        setCameras([]);
+-      });
+-  }, [authChecked]);
+-
+-  // Initialize HLS for each camera video element
+-  useEffect(() => {
+-    if (!authChecked || !cameras) return undefined;
+-
+-    let cancelled = false;
+-    const hlsInstances = [];
+-    const openViewLogIds = [];
+-    setStreamErrors({});
+-
+-    const closeViewLog = (viewLogId) => {
+-      if (!viewLogId) return;
+-      api.patch(`/camera-views/${viewLogId}`).catch(() => {
+-        // Best-effort cleanup
+-      });
+-    };
+-
+-    async function initCamera(cam) {
+-      const video = document.getElementById(`video-${cam.id}`);
+-      if (!video) return;
+-
+-      let streamToken;
+-      let viewLogId;
+-      try {
+-        const res = await api.post('/camera-views', { camera_id: cam.id });
+-        
+-        if (!res.data?.success) {
+-          console.error('Camera views API failed:', res.data?.error);
+-          setStreamErrors((prev) => ({
+-            ...prev,
+-            [cam.id]: res.data?.error || 'Failed to start viewing session.',
+-          }));
+-          return;
+-        }
+-        
+-        streamToken = res.data?.streamToken;
+-        viewLogId = res.data?.viewLogId;
+-        
+-        if (!streamToken) {
+-          console.error('No stream token returned for camera:', cam.id, 'Response:', res.data);
+-          setStreamErrors((prev) => ({
+-            ...prev,
+-            [cam.id]: 'Stream token not received from server.',
+-          }));
+-          return;
+-        }
+-      } catch (err) {
+-        console.error('Camera views API error:', err.message, err.response?.data);
+-        if (cancelled) return;
+-        setStreamErrors((prev) => ({
+-          ...prev,
+-          [cam.id]: err.response?.status === 404
+-            ? 'You do not have access to this camera.'
+-            : 'Could not start a viewing session for this camera.',
+-        }));
+-        return;
+-      }
+-      if (cancelled) {
+-        closeViewLog(viewLogId);
+-        return;
+-      }
+-      openViewLogIds.push(viewLogId);
+-
+-      const manifestUrl = `${buildHlsManifestUrl(cam.id, cam.hls_base_url)}?token=${encodeURIComponent(streamToken)}`;
+-      console.log('HLS URL for camera', cam.id, ':', manifestUrl);
+-
+-      if (Hls.isSupported()) {
+-        const hls = new Hls();
+-        hls.on(Hls.Events.ERROR, (_event, data) => {
+-          if (!data.fatal) return;
+-          setStreamErrors((prev) => ({
+-            ...prev,
+-            [cam.id]: 'Stream unavailable. Check that the media server is running and reachable.',
+-          }));
+-        });
+-        hls.loadSource(manifestUrl);
+-        hls.attachMedia(video);
+-        hlsInstances.push(hls);
+-      } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+-        video.src = manifestUrl;
+-        video.addEventListener('error', () => {
+-          setStreamErrors((prev) => ({
+-            ...prev,
+-            [cam.id]: 'Stream unavailable. Check that the media server is running and reachable.',
+-          }));
+-        });
+-      } else {
+-        setStreamErrors((prev) => ({
+-          ...prev,
+-          [cam.id]: 'This browser does not support HLS playback.',
+-        }));
+-      }
+-    }
+-
+-    cameras.forEach((cam) => {
+-      if (cam.enabled === false) return;
+-      initCamera(cam);
+-    });
+-
+-    return () => {
+-      cancelled = true;
+-      hlsInstances.forEach((hls) => hls.destroy());
+-      openViewLogIds.forEach(closeViewLog);
+-    };
+-  }, [cameras, authChecked]);
+-
+-  const activeCameras = useMemo(
+-    () => (cameras ? cameras.filter((camera) => camera.enabled !== false).length : 0),
+-    [cameras],
+-  );
+-
+-  const takeSnapshot = async (camId) => {
+-    const video = document.getElementById(`video-${camId}`);
+-    if (!video || video.readyState < 2) {
+-      setSnapshotStatus((prev) => ({ ...prev, [camId]: 'error' }));
+-      setTimeout(() => setSnapshotStatus((prev) => ({ ...prev, [camId]: null })), 3000);
+-      return;
+-    }
+-
+-    setSnapshotStatus((prev) => ({ ...prev, [camId]: 'capturing' }));
+-    try {
+-      const canvas = document.createElement('canvas');
+-      canvas.width = video.videoWidth;
+-      canvas.height = video.videoHeight;
+-      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
+-      const imageBase64 = canvas.toDataURL('image/jpeg', 0.9);
+-
+-      await api.post('/snapshots', { camera_id: camId, image_base64: imageBase64 });
+-      setSnapshotStatus((prev) => ({ ...prev, [camId]: 'success' }));
+-    } catch (err) {
+-      console.error('Snapshot capture error:', err);
+-      setSnapshotStatus((prev) => ({ ...prev, [camId]: 'error' }));
+-    } finally {
+-      setTimeout(() => setSnapshotStatus((prev) => ({ ...prev, [camId]: null })), 3000);
+-    }
+-  };
+-
+-  const triggerTalkdown = (camId) => {
+-    setTalkdownActive(camId);
+-    setTimeout(() => setTalkdownActive(null), 5000);
+-  };
+-
+-  const submitAddCamera = async (addCamForm, setAddCamForm, setShowAddCam, setAddCamError, addAuditEntry) => {
+-    if (!addCamForm.name.trim() || !addCamForm.rtsp_url.trim()) {
+-      setAddCamError('Camera name and RTSP URL are required.');
+-      return;
+-    }
+-    const id = `CAM-${String((cameras?.length || 0) + 1).padStart(2, '0')}`;
+-    const newCam = {
+-      id,
+-      name: addCamForm.name.trim(),
+-      rtsp_url: addCamForm.rtsp_url.trim(),
+-      location: addCamForm.location.trim() || id,
+-      lat: addCamForm.lat ? Number(addCamForm.lat) : null,
+-      lng: addCamForm.lng ? Number(addCamForm.lng) : null,
+-      enabled: true,
+-      resolution: '1920x1080',
+-      fps: 30,
+-      codec: 'H264',
+-    };
+-    try {
+-      await api.post('/cameras', newCam);
+-      setCameras((prev) => [...(prev || []), newCam]);
+-      setAddCamForm({ name: '', rtsp_url: '', location: '', lat: '', lng: '' });
+-      setShowAddCam(false);
+-      addAuditEntry(`Added camera: ${newCam.name} (${id})`);
+-    } catch (err) {
+-      setAddCamError(err?.response?.data?.error || err.message || 'Failed to save camera.');
+-    }
+-  };
+-
+-  return {
+-    cameras,
+-    camerasError,
+-    streamErrors,
+-    snapshotStatus,
+-    talkdownActive,
+-    activeCameras,
+-    takeSnapshot,
+-    triggerTalkdown,
+-    submitAddCamera,
+-  };
+-}
+diff --git a/frontend/src/components/dashboard/CameraMatrix.jsx b/frontend/src/components/dashboard/CameraMatrix.jsx
+deleted file mode 100644
+index ef0551855bd1c2fc45103b88277698b2b9833139..0000000
+--- a/frontend/src/components/dashboard/CameraMatrix.jsx
++++ /dev/null
+@@ -1,179 +0,0 @@
+-export function CameraMatrix({
+-  visibleCameras,
+-  cameras,
+-  streamErrors,
+-  snapshotStatus,
+-  talkdownActive,
+-  takeSnapshot,
+-  triggerTalkdown,
+-  showAddCam,
+-  setShowAddCam,
+-  addCamForm,
+-  setAddCamForm,
+-  addCamSaving,
+-  addCamError,
+-  setAddCamError,
+-  submitAddCamera,
+-  addAuditEntry,
+-  globalSearchNeedle,
+-}) {
+-  return (
+-    <section className="dashboard-panel cameras-panel" id="cameras">
+-      <div className="panel-heading">
+-        <div>
+-          <p className="eyebrow">Camera matrix</p>
+-          <h3>Streams</h3>
+-        </div>
+-        <button
+-          className="ghost-button"
+-          type="button"
+-          onClick={() => { setShowAddCam((v) => !v); setAddCamError(''); }}
+-        >
+-          {showAddCam ? 'Cancel' : '+ Add Camera'}
+-        </button>
+-      </div>
+-
+-      {addCamError && (
+-        <p className="checkout-status checkout-status-error" role="alert">
+-          Camera list failed to load: {addCamError}
+-        </p>
+-      )}
+-
+-      {showAddCam && (
+-        <form className="add-cam-form" onSubmit={(e) => { e.preventDefault(); submitAddCamera(addCamForm, setAddCamForm, setShowAddCam, setAddCamError, addAuditEntry); }}>
+-          <label className="search-field">
+-            <span>Camera Name</span>
+-            <input
+-              value={addCamForm.name}
+-              onChange={(e) => setAddCamForm((p) => ({ ...p, name: e.target.value }))}
+-              placeholder="e.g. Back Yard"
+-              required
+-              autoFocus
+-            />
+-          </label>
+-          <label className="search-field">
+-            <span>RTSP Stream URL</span>
+-            <input
+-              value={addCamForm.rtsp_url}
+-              onChange={(e) => setAddCamForm((p) => ({ ...p, rtsp_url: e.target.value }))}
+-              placeholder="rtsp://your-camera-ip:554/stream"
+-              required
+-            />
+-          </label>
+-          <label className="search-field">
+-            <span>Location (optional)</span>
+-            <input
+-              value={addCamForm.location}
+-              onChange={(e) => setAddCamForm((p) => ({ ...p, location: e.target.value }))}
+-              placeholder="e.g. back_yard"
+-            />
+-          </label>
+-          <label className="search-field">
+-            <span>Latitude (optional)</span>
+-            <input
+-              type="number"
+-              step="any"
+-              value={addCamForm.lat}
+-              onChange={(e) => setAddCamForm((p) => ({ ...p, lat: e.target.value }))}
+-              placeholder="e.g. 45.8154"
+-            />
+-          </label>
+-          <label className="search-field">
+-            <span>Longitude (optional)</span>
+-            <input
+-              type="number"
+-              step="any"
+-              value={addCamForm.lng}
+-              onChange={(e) => setAddCamForm((p) => ({ ...p, lng: e.target.value }))}
+-              placeholder="e.g. 15.9819"
+-            />
+-          </label>
+-          <div className="add-cam-actions">
+-            {addCamError && <p className="checkout-status checkout-status-error">{addCamError}</p>}
+-            <button
+-              className="primary-button"
+-              type="submit"
+-              disabled={addCamSaving || !addCamForm.name.trim() || !addCamForm.rtsp_url.trim()}
+-            >
+-              {addCamSaving ? 'Saving...' : 'Add Camera'}
+-            </button>
+-          </div>
+-        </form>
+-      )}
+-
+-      <div className="camera-list">
+-        {visibleCameras && visibleCameras.length > 0 ? (
+-          visibleCameras.map((cam) => (
+-            <article className="camera-card" key={cam.id}>
+-              <div className="camera-card-header">
+-                <div>
+-                  <h4>{cam.name}</h4>
+-                  <p>{cam.location || cam.rtsp_url}</p>
+-                </div>
+-                <span className={`status-pill ${cam.enabled !== false ? 'good' : 'neutral'}`}>
+-                  {cam.enabled !== false ? 'Live' : 'Disabled'}
+-                </span>
+-              </div>
+-              <div className="camera-video-wrapper">
+-                {streamErrors[cam.id] && (
+-                  <p className="checkout-status checkout-status-error" role="alert">
+-                    {streamErrors[cam.id]}
+-                  </p>
+-                )}
+-                <video id={`video-${cam.id}`} controls muted playsInline className="camera-video" />
+-              </div>
+-              {/* Snapshot + talkdown controls */}
+-              <div className="talkdown-row">
+-                <button
+-                  type="button"
+-                  className="talkdown-btn"
+-                  onClick={() => takeSnapshot(cam.id)}
+-                  disabled={snapshotStatus[cam.id] === 'capturing'}
+-                >
+-                  {snapshotStatus[cam.id] === 'capturing' ? 'Capturing...' :
+-                    snapshotStatus[cam.id] === 'success' ? 'Snapshot saved' :
+-                    snapshotStatus[cam.id] === 'error' ? 'Snapshot failed' : 'Take Snapshot'}
+-                </button>
+-                <button
+-                  type="button"
+-                  className={`talkdown-btn${talkdownActive === cam.id ? ' talkdown-active' : ''}`}
+-                  onClick={() => triggerTalkdown(cam.id)}
+-                  disabled={talkdownActive === cam.id}
+-                >
+-                  {talkdownActive === cam.id ? 'Warning Active...' : 'Trigger Talkdown'}
+-                </button>
+-                {talkdownActive === cam.id && (
+-                  <span className="talkdown-indicator" aria-live="polite">
+-                    <span className="talkdown-pulse" aria-hidden="true" /> Broadcasting warning to {cam.name}
+-                  </span>
+-                )}
+-              </div>
+-            </article>
+-          ))
+-        ) : (
+-          <div className="empty-state">
+-            <div className="empty-state-content">
+-              <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ color: '#8ea3b8', marginBottom: '1rem' }}>
+-                <path d="M23 7l-7 5 7 5V7z" />
+-                <rect x="1" y="5" width="15" height="14" rx="2" ry="2" />
+-              </svg>
+-              <p style={{ color: '#8ea3b8', fontSize: '0.95rem', margin: 0 }}>
+-                {globalSearchNeedle ? `No cameras match "${globalSearchNeedle}"` : 'No active streams connected'}
+-              </p>
+-              {!globalSearchNeedle && (
+-                <button 
+-                  className="ghost-button" 
+-                  type="button"
+-                  onClick={() => { setShowAddCam((v) => !v); setAddCamError(''); }}
+-                  style={{ marginTop: '1rem' }}
+-                >
+-                  Add Camera
+-                </button>
+-              )}
+-            </div>
+-          </div>
+-        )}
+-      </div>
+-    </section>
+-  );
+-}
+diff --git a/frontend/src/components/dashboard/Sidebar.jsx b/frontend/src/components/dashboard/Sidebar.jsx
+deleted file mode 100644
+index c7fd1f19371068bb9e5bdf1ad914abd705071d5e..0000000
+--- a/frontend/src/components/dashboard/Sidebar.jsx
++++ /dev/null
+@@ -1,79 +0,0 @@
+-export function Sidebar({ brandInitial, brandName, sidebarSections, setSidebarSections, navigate }) {
+-  return (
+-    <aside className="sidebar">
+-      <div className="sidebar-scroll">
+-        <div>
+-          <div className="brand-mark">{brandInitial}</div>
+-          <h1 className="sidebar-title">{brandName}</h1>
+-          <p className="sidebar-copy">Security monitoring, detections, and camera intelligence.</p>
+-        </div>
+-
+-        <nav className="sidebar-nav" aria-label="Dashboard navigation">
+-          {/* Monitoring group */}
+-          <div className="sidebar-group">
+-            <button className="sidebar-group-header" onClick={() => setSidebarSections(s => ({ ...s, monitoring: !s.monitoring }))}>
+-              <span className="sidebar-group-arrow" data-open={sidebarSections.monitoring}>▶</span>
+-              <span>Monitoring</span>
+-            </button>
+-            {sidebarSections.monitoring && (
+-              <div className="sidebar-group-items">
+-                <button className="sidebar-nav-item" onClick={() => navigate('/dashboard')}>Dashboard</button>
+-                <button className="sidebar-nav-item" onClick={() => navigate('/cameras')}>Cameras</button>
+-                <button className="sidebar-nav-item" onClick={() => navigate('/live-streams')}>Live Streams</button>
+-                <button className="sidebar-nav-item" onClick={() => navigate('/video-playback')}>Video Playback</button>
+-              </div>
+-            )}
+-          </div>
+-          {/* Intelligence group */}
+-          <div className="sidebar-group">
+-            <button className="sidebar-group-header" onClick={() => setSidebarSections(s => ({ ...s, intelligence: !s.intelligence }))}>
+-              <span className="sidebar-group-arrow" data-open={sidebarSections.intelligence}>▶</span>
+-              <span>Intelligence</span>
+-            </button>
+-            {sidebarSections.intelligence && (
+-              <div className="sidebar-group-items">
+-                <button className="sidebar-nav-item" onClick={() => navigate('/ai-detection')}>AI Detection</button>
+-                <button className="sidebar-nav-item" onClick={() => navigate('/alerts')}>Alerts</button>
+-                <button className="sidebar-nav-item" onClick={() => navigate('/incidents')}>Incidents</button>
+-                <button className="sidebar-nav-item" onClick={() => navigate('/map')}>Map</button>
+-              </div>
+-            )}
+-          </div>
+-          {/* Recognition group */}
+-          <div className="sidebar-group">
+-            <button className="sidebar-group-header" onClick={() => setSidebarSections(s => ({ ...s, recognition: !s.recognition }))}>
+-              <span className="sidebar-group-arrow" data-open={sidebarSections.recognition}>▶</span>
+-              <span>Recognition</span>
+-            </button>
+-            {sidebarSections.recognition && (
+-              <div className="sidebar-group-items">
+-                <button className="sidebar-nav-item" onClick={() => navigate('/face-recognition')}>Face Recognition</button>
+-                <button className="sidebar-nav-item" onClick={() => navigate('/license-plates')}>LPR</button>
+-              </div>
+-            )}
+-          </div>
+-          {/* Operations group */}
+-          <div className="sidebar-group">
+-            <button className="sidebar-group-header" onClick={() => setSidebarSections(s => ({ ...s, operations: !s.operations }))}>
+-              <span className="sidebar-group-arrow" data-open={sidebarSections.operations}>▶</span>
+-              <span>Operations</span>
+-            </button>
+-            {sidebarSections.operations && (
+-              <div className="sidebar-group-items">
+-                <button className="sidebar-nav-item" onClick={() => navigate('/emergency')}>Emergency</button>
+-                <button className="sidebar-nav-item" onClick={() => navigate('/reports')}>Reports</button>
+-                <button className="sidebar-nav-item" onClick={() => navigate('/users')}>Users</button>
+-                <button className="sidebar-nav-item" onClick={() => navigate('/settings')}>Settings</button>
+-              </div>
+-            )}
+-          </div>
+-        </nav>
+-      </div>
+-
+-      <div className="sidebar-footer">
+-        <span className="status-pill good">Operational</span>
+-        <p>Live monitoring enabled</p>
+-      </div>
+-    </aside>
+-  );
+-}
+diff --git a/frontend/src/components/dashboard/EventsTable.jsx b/frontend/src/components/dashboard/EventsTable.jsx
+deleted file mode 100644
+index 3ff6c399f228fc0eb06c9f203bba89b1f9f2399c..0000000
+--- a/frontend/src/components/dashboard/EventsTable.jsx
++++ /dev/null
+@@ -1,101 +0,0 @@
+-export function EventsTable({
+-  recentEvents,
+-  currentUser,
+-  updatingIncidentId,
+-  updateIncidentStatus,
+-  statusClassName,
+-  nextActionsForStatus,
+-  exportEvidence,
+-  openAlarmMap,
+-  addAuditEntry,
+-  incidentsLoaded,
+-  setSelectedAlarmId,
+-}) {
+-  return (
+-    <section className="dashboard-panel table-panel" id="events">
+-      <div className="panel-heading">
+-        <div>
+-          <p className="eyebrow">Activity feed</p>
+-          <h3>Recent Events</h3>
+-        </div>
+-        <span className="subtle-chip">Last 24h</span>
+-      </div>
+-
+-      <div className="table-wrap">
+-        <table className="events-table">
+-          <thead>
+-            <tr>
+-              <th>Event</th>
+-              <th>Source</th>
+-              <th>Time</th>
+-              <th>Status</th>
+-              <th>Actions</th>
+-              <th>Evidence</th>
+-            </tr>
+-          </thead>
+-          <tbody>
+-            {recentEvents.length ? (
+-              recentEvents.map((event) => (
+-                <tr key={event.id}>
+-                  <td>
+-                    <div className="table-title">{event.title}</div>
+-                    <div className="table-subtitle">{event.subtitle}</div>
+-                  </td>
+-                  <td>{event.source || event.subtitle}</td>
+-                  <td>{event.time}</td>
+-                  <td>
+-                    <span className={`status-pill ${statusClassName(event.status)}`}>
+-                      {event.status}
+-                    </span>
+-                  </td>
+-                  <td>
+-                    <div className="incident-actions">
+-                      {currentUser ? (
+-                        nextActionsForStatus(event.status).map((nextStatus) => (
+-                          <button
+-                            key={`${event.id}-${nextStatus}`}
+-                            type="button"
+-                            className="ghost-button incident-action-button"
+-                            onClick={() => updateIncidentStatus(event.eventId, nextStatus)}
+-                            disabled={updatingIncidentId === event.eventId}
+-                          >
+-                            {updatingIncidentId === event.eventId ? 'Updating...' : nextStatus}
+-                          </button>
+-                        ))
+-                      ) : (
+-                        <span className="table-subtitle">Login required</span>
+-                      )}
+-                    </div>
+-                  </td>
+-                  <td>
+-                    <button
+-                      type="button"
+-                      className="ghost-button incident-action-button export-btn"
+-                      onClick={() => { exportEvidence(event); setSelectedAlarmId(event.eventId); addAuditEntry(`Exported evidence package for Event #${event.eventId}`); }}
+-                      title="Download evidence package (JSON + video metadata)"
+-                    >
+-                      Export
+-                    </button>
+-                    <button
+-                      type="button"
+-                      className="ghost-button incident-action-button"
+-                      onClick={() => openAlarmMap(event)}
+-                    >
+-                      Show map
+-                    </button>
+-                  </td>
+-                </tr>
+-              ))
+-            ) : (
+-              <tr>
+-                <td colSpan={6} className="empty-state">
+-                  {incidentsLoaded ? 'No incidents match the current filters.' : 'Loading incident queue...'}
+-                </td>
+-              </tr>
+-            )}
+-          </tbody>
+-        </table>
+-      </div>
+-    </section>
+-  );
+-}
+diff --git a/frontend/src/components/dashboard/MetricsGrid.jsx b/frontend/src/components/dashboard/MetricsGrid.jsx
+deleted file mode 100644
+index 6a54e9326ff17b6cb0a0edf090aeda60c6fd0390..0000000
+--- a/frontend/src/components/dashboard/MetricsGrid.jsx
++++ /dev/null
+@@ -1,68 +0,0 @@
+-export function MetricsGrid({ cameras, incidentsLoaded, incidents, activeCameras }) {
+-  const systemStatus = { label: 'Operational', tone: 'good' };
+-
+-  return (
+-    <section className="metrics-grid" aria-label="Key metrics">
+-      <article className="metric-card">
+-        <p className="metric-label">Active Cameras</p>
+-        {cameras === null ? (
+-          <div className="skeleton skeleton-number" />
+-        ) : (
+-          <strong>{cameras.length ? activeCameras : '-'}</strong>
+-        )}
+-        <span>{cameras === null ? <div className="skeleton skeleton-text short" /> : cameras.length ? `${cameras.length} total cameras` : 'No cameras configured'}</span>
+-      </article>
+-      <article className="metric-card">
+-        <p className="metric-label">Offline Cameras</p>
+-        {cameras === null ? (
+-          <div className="skeleton skeleton-number" />
+-        ) : (
+-          <strong>{cameras.length ? cameras.length - activeCameras : '-'}</strong>
+-        )}
+-        <span>{cameras === null ? <div className="skeleton skeleton-text short" /> : cameras.length ? 'Disabled streams' : 'No cameras configured'}</span>
+-      </article>
+-      <article className="metric-card">
+-        <p className="metric-label">Active Streams</p>
+-        {cameras === null ? (
+-          <div className="skeleton skeleton-number" />
+-        ) : (
+-          <strong>{cameras.length ? activeCameras : '-'}</strong>
+-        )}
+-        <span>{cameras === null ? <div className="skeleton skeleton-text short" /> : cameras.length ? 'Live HLS connections' : 'No cameras configured'}</span>
+-      </article>
+-      <article className="metric-card">
+-        <p className="metric-label">Open Alerts</p>
+-        {!incidentsLoaded ? (
+-          <div className="skeleton skeleton-number" />
+-        ) : (
+-          <strong>{incidents.filter((i) => ['New', 'Acknowledged', 'In Progress'].includes(i.status)).length}</strong>
+-        )}
+-        <span>{!incidentsLoaded ? <div className="skeleton skeleton-text short" /> : 'New & acknowledged'}</span>
+-      </article>
+-      <article className="metric-card">
+-        <p className="metric-label">Incidents Today</p>
+-        {!incidentsLoaded ? (
+-          <div className="skeleton skeleton-number" />
+-        ) : (
+-          <strong>{incidents.length}</strong>
+-        )}
+-        <span>{!incidentsLoaded ? <div className="skeleton skeleton-text short" /> : 'Total detections'}</span>
+-      </article>
+-      <article className="metric-card">
+-        <p className="metric-label">System Health</p>
+-        <strong className="metric-accent">{systemStatus.label}</strong>
+-        <span>Core services operational</span>
+-      </article>
+-      <article className="metric-card">
+-        <p className="metric-label">Storage Usage</p>
+-        <strong>-</strong>
+-        <span>Storage monitoring not configured</span>
+-      </article>
+-      <article className="metric-card">
+-        <p className="metric-label">API Status</p>
+-        <strong className="metric-accent">Online</strong>
+-        <span>Backend connected</span>
+-      </article>
+-    </section>
+-  );
+-}
+diff --git a/frontend/src/components/dashboard/SmartSearchPanel.jsx b/frontend/src/components/dashboard/SmartSearchPanel.jsx
+deleted file mode 100644
+index 950e7b2148dc595423c2cb074d0ad345eeec7683..0000000
+--- a/frontend/src/components/dashboard/SmartSearchPanel.jsx
++++ /dev/null
+@@ -1,102 +0,0 @@
+-export function SmartSearchPanel({
+-  filterCamera,
+-  setFilterCamera,
+-  filterZone,
+-  setFilterZone,
+-  filterDirection,
+-  setFilterDirection,
+-  filterDwellMin,
+-  setFilterDwellMin,
+-  filterObjectType,
+-  setFilterObjectType,
+-  filterColor,
+-  setFilterColor,
+-  suppressEnabled,
+-  setSuppressEnabled,
+-  suppressThreshold,
+-  setSuppressThreshold,
+-  cameras,
+-  clearFilters,
+-  hasActiveFilters,
+-}) {
+-  return (
+-    <section className="search-panel dashboard-panel" id="search" aria-label="Smart search filters">
+-      <div className="panel-heading">
+-        <div>
+-          <p className="eyebrow">Smart Search v2</p>
+-          <h3>Filter Incidents</h3>
+-        </div>
+-        <label className="suppress-toggle">
+-          <input
+-            type="checkbox"
+-            checked={suppressEnabled}
+-            onChange={(e) => setSuppressEnabled(e.target.checked)}
+-          />
+-          <span>Suppress below {suppressThreshold}% confidence</span>
+-        </label>
+-      </div>
+-
+-      {suppressEnabled && (
+-        <div className="suppress-slider-row">
+-          <span>50%</span>
+-          <input
+-            type="range" min="50" max="99" step="1"
+-            value={suppressThreshold}
+-            onChange={(e) => setSuppressThreshold(Number(e.target.value))}
+-            className="suppress-slider"
+-          />
+-          <span>{suppressThreshold}%</span>
+-        </div>
+-      )}
+-
+-      <div className="search-grid">
+-        <label className="search-field">
+-          <span>Object Type</span>
+-          <input type="text" placeholder="Person, Vehicle..." value={filterObjectType} onChange={(e) => setFilterObjectType(e.target.value)} />
+-        </label>
+-        <label className="search-field">
+-          <span>Camera</span>
+-          <select value={filterCamera} onChange={(e) => setFilterCamera(e.target.value)}>
+-            <option value="">All cameras</option>
+-            {cameras && cameras.map((cam) => (
+-              <option key={cam.id} value={cam.id}>{cam.name}</option>
+-            ))}
+-          </select>
+-        </label>
+-        <label className="search-field">
+-          <span>Zone / Location</span>
+-          <input type="text" placeholder="entrance, parking..." value={filterZone} onChange={(e) => setFilterZone(e.target.value)} />
+-        </label>
+-        <label className="search-field">
+-          <span>Direction</span>
+-          <select value={filterDirection} onChange={(e) => setFilterDirection(e.target.value)}>
+-            <option value="">Any direction</option>
+-            <option value="entering">Entering</option>
+-            <option value="exiting">Exiting</option>
+-            <option value="left">Left</option>
+-            <option value="right">Right</option>
+-          </select>
+-        </label>
+-        <label className="search-field">
+-          <span>Min. Dwell (seconds)</span>
+-          <input type="number" min="0" placeholder="0" value={filterDwellMin} onChange={(e) => setFilterDwellMin(e.target.value)} />
+-        </label>
+-        <label className="search-field">
+-          <span>Color Attribute</span>
+-          <input type="text" placeholder="Red, Black..." value={filterColor} onChange={(e) => setFilterColor(e.target.value)} />
+-        </label>
+-      </div>
+-
+-      {hasActiveFilters && (
+-        <button
+-          type="button"
+-          className="ghost-button"
+-          style={{ marginTop: '0.75rem', fontSize: '0.8rem' }}
+-          onClick={clearFilters}
+-        >
+-          Clear all filters
+-        </button>
+-      )}
+-    </section>
+-  );
+-}
+diff --git a/frontend/src/components/PTZControl.jsx b/frontend/src/components/PTZControl.jsx
+deleted file mode 100644
+index b22f843db887ad7961473a0180c107e5687a55f3..0000000
+--- a/frontend/src/components/PTZControl.jsx
++++ /dev/null
+@@ -1,293 +0,0 @@
+-import React, { useState } from 'react';
+-import api from '../services/api';
+-
+-/**
+- * PTZ Control - OPTIMIZOVAN
+- * 
+- * Koristi SAMO HTTP komande - NEMA video processing!
+- * - Pan/Tilt/Zoom se šalje kao jednostavni HTTP request
+- * - Kamera sama izvršava pokrete
+- * - Browser samo čeka odgovor
+- * 
+- * CPU/GPU opterećenje: ~0%
+- */
+-const PTZControl = ({ cameraId, cameraName, enabled = true }) => {
+-  const [position, setPosition] = useState({ pan: 0, tilt: 0, zoom: 50 });
+-  const [moving, setMoving] = useState(null);
+-  const [presets, setPresets] = useState([
+-    { id: 1, name: 'Home', position: { pan: 0, tilt: 0, zoom: 50 } },
+-    { id: 2, name: 'Entrance', position: { pan: -45, tilt: 10, zoom: 75 } },
+-    { id: 3, name: 'Parking', position: { pan: 90, tilt: -5, zoom: 80 } }
+-  ]);
+-
+-  // Send PTZ command to camera
+-  const sendPTZCommand = async (action, value = 1) => {
+-    if (!enabled || moving) return;
+-    
+-    setMoving(action);
+-    
+-    try {
+-      // HTTP komanda - VRLO LAK server processing
+-      await api.post(`/cameras/${cameraId}/ptz`, {
+-        action,
+-        value,
+-        speed: 5
+-      });
+-      
+-      // Update local position for immediate feedback
+-      setPosition(prev => {
+-        switch (action) {
+-          case 'pan_left': return { ...prev, pan: Math.max(-180, prev.pan - 5) };
+-          case 'pan_right': return { ...prev, pan: Math.min(180, prev.pan + 5) };
+-          case 'tilt_up': return { ...prev, tilt: Math.min(90, prev.tilt + 5) };
+-          case 'tilt_down': return { ...prev, tilt: Math.min(-45, prev.tilt - 5) };
+-          case 'zoom_in': return { ...prev, zoom: Math.min(100, prev.zoom + 10) };
+-          case 'zoom_out': return { ...prev, zoom: Math.max(10, prev.zoom - 10) };
+-          default: return prev;
+-        }
+-      });
+-    } catch (err) {
+-      console.error('PTZ command failed:', err);
+-    }
+-    
+-    setTimeout(() => setMoving(null), 200);
+-  };
+-
+-  // Go to preset
+-  const goToPreset = async (preset) => {
+-    setPosition(preset.position);
+-    // Send HTTP command to move to preset
+-    try {
+-      await api.post(`/cameras/${cameraId}/ptz/preset`, { presetId: preset.id });
+-    } catch (err) {
+-      console.error('Preset failed:', err);
+-    }
+-  };
+-
+-  if (!enabled) {
+-    return (
+-      <div style={{
+-        padding: '1rem',
+-        background: 'rgba(255,80,80,.1)',
+-        border: '1px solid rgba(255,80,80,.3)',
+-        borderRadius: '12px',
+-        textAlign: 'center',
+-        color: '#ff5050'
+-      }}>
+-        📷 PTZ Control not available for this camera
+-      </div>
+-    );
+-  }
+-
+-  return (
+-    <div style={{
+-      background: 'rgba(10,18,38,.95)',
+-      border: '1px solid rgba(87,140,255,.18)',
+-      borderRadius: '16px',
+-      padding: '1.5rem'
+-    }}>
+-      <h3 style={{ color: '#dff7ff', marginBottom: '1rem' }}>
+-        📷 PTZ Control
+-      </h3>
+-
+-      <div style={{
+-        display: 'grid',
+-        gridTemplateColumns: '1fr 1fr',
+-        gap: '1rem'
+-      }}>
+-        {/* Left: PTZ Controls */}
+-        <div>
+-          {/* Zoom controls */}
+-          <div style={{
+-            display: 'flex',
+-            gap: '.5rem',
+-            marginBottom: '1rem',
+-            justifyContent: 'center'
+-          }}>
+-            <button
+-              onClick={() => sendPTZCommand('zoom_out')}
+-              disabled={moving !== null}
+-              style={{
+-                flex: 1,
+-                padding: '.75rem',
+-                background: 'rgba(87,125,196,.2)',
+-                border: 'none',
+-                borderRadius: '8px',
+-                color: '#8ab0c9',
+-                cursor: 'pointer',
+-                fontSize: '1.2rem'
+-              }}
+-            >
+-              ➖
+-            </button>
+-            <span style={{
+-              padding: '.75rem 1rem',
+-              background: 'rgba(0,212,255,.1)',
+-              borderRadius: '8px',
+-              color: '#00d4ff',
+-              fontWeight: 'bold',
+-              minWidth: '60px',
+-              textAlign: 'center'
+-            }}>
+-              {position.zoom}%
+-            </span>
+-            <button
+-              onClick={() => sendPTZCommand('zoom_in')}
+-              disabled={moving !== null}
+-              style={{
+-                flex: 1,
+-                padding: '.75rem',
+-                background: 'rgba(87,125,196,.2)',
+-                border: 'none',
+-                borderRadius: '8px',
+-                color: '#8ab0c9',
+-                cursor: 'pointer',
+-                fontSize: '1.2rem'
+-              }}
+-            >
+-              ➕
+-            </button>
+-          </div>
+-
+-          {/* Direction pad */}
+-          <div style={{
+-            display: 'grid',
+-            gridTemplateColumns: 'repeat(3, 1fr)',
+-            gap: '.5rem'
+-          }}>
+-            <div />
+-            <button
+-              onMouseDown={() => sendPTZCommand('tilt_up')}
+-              onMouseUp={() => setMoving(null)}
+-              onMouseLeave={() => setMoving(null)}
+-              style={{
+-                padding: '.75rem',
+-                background: moving === 'tilt_up' ? 'rgba(0,212,255,.3)' : 'rgba(87,125,196,.2)',
+-                border: 'none',
+-                borderRadius: '8px',
+-                color: '#8ab0c9',
+-                cursor: 'pointer',
+-                fontSize: '1.2rem'
+-              }}
+-            >
+-              ▲
+-            </button>
+-            <div />
+-            
+-            <button
+-              onMouseDown={() => sendPTZCommand('pan_left')}
+-              onMouseUp={() => setMoving(null)}
+-              onMouseLeave={() => setMoving(null)}
+-              style={{
+-                padding: '.75rem',
+-                background: moving === 'pan_left' ? 'rgba(0,212,255,.3)' : 'rgba(87,125,196,.2)',
+-                border: 'none',
+-                borderRadius: '8px',
+-                color: '#8ab0c9',
+-                cursor: 'pointer',
+-                fontSize: '1.2rem'
+-              }}
+-            >
+-              ◀
+-            </button>
+-            <div style={{
+-              padding: '.75rem',
+-              background: 'rgba(0,212,255,.1)',
+-              borderRadius: '8px',
+-              textAlign: 'center'
+-            }}>
+-              <div style={{ fontSize: '.7rem', color: '#00d450' }}>●</div>
+-            </div>
+-            <button
+-              onMouseDown={() => sendPTZCommand('pan_right')}
+-              onMouseUp={() => setMoving(null)}
+-              onMouseLeave={() => setMoving(null)}
+-              style={{
+-                padding: '.75rem',
+-                background: moving === 'pan_right' ? 'rgba(0,212,255,.3)' : 'rgba(87,125,196,.2)',
+-                border: 'none',
+-                borderRadius: '8px',
+-                color: '#8ab0c9',
+-                cursor: 'pointer',
+-                fontSize: '1.2rem'
+-              }}
+-            >
+-              ▶
+-            </button>
+-            
+-            <div />
+-            <button
+-              onMouseDown={() => sendPTZCommand('tilt_down')}
+-              onMouseUp={() => setMoving(null)}
+-              onMouseLeave={() => setMoving(null)}
+-              style={{
+-                padding: '.75rem',
+-                background: moving === 'tilt_down' ? 'rgba(0,212,255,.3)' : 'rgba(87,125,196,.2)',
+-                border: 'none',
+-                borderRadius: '8px',
+-                color: '#8ab0c9',
+-                cursor: 'pointer',
+-                fontSize: '1.2rem'
+-              }}
+-            >
+-              ▼
+-            </button>
+-            <div />
+-          </div>
+-        </div>
+-
+-        {/* Right: Position & Presets */}
+-        <div>
+-          {/* Position display */}
+-          <div style={{
+-            padding: '1rem',
+-            background: 'rgba(87,125,196,.1)',
+-            borderRadius: '12px',
+-            marginBottom: '1rem'
+-          }}>
+-            <h4 style={{ color: '#8ee8ff', marginBottom: '.75rem', fontSize: '.85rem' }}>
+-              Position
+-            </h4>
+-            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '.5rem' }}>
+-              <div>
+-                <span style={{ color: '#6a8aaa', fontSize: '.75rem' }}>Pan</span>
+-                <div style={{ color: '#dff7ff', fontWeight: 'bold' }}>{position.pan}°</div>
+-              </div>
+-              <div>
+-                <span style={{ color: '#6a8aaa', fontSize: '.75rem' }}>Tilt</span>
+-                <div style={{ color: '#dff7ff', fontWeight: 'bold' }}>{position.tilt}°</div>
+-              </div>
+-            </div>
+-          </div>
+-
+-          {/* Presets */}
+-          <h4 style={{ color: '#8ee8ff', marginBottom: '.75rem', fontSize: '.85rem' }}>
+-            Presets
+-          </h4>
+-          <div style={{ display: 'flex', flexDirection: 'column', gap: '.5rem' }}>
+-            {presets.map(preset => (
+-              <button
+-                key={preset.id}
+-                onClick={() => goToPreset(preset)}
+-                style={{
+-                  padding: '.5rem .75rem',
+-                  background: 'rgba(87,125,196,.15)',
+-                  border: '1px solid rgba(87,125,196,.2)',
+-                  borderRadius: '8px',
+-                  color: '#8ab0c9',
+-                  cursor: 'pointer',
+-                  textAlign: 'left',
+-                  fontSize: '.85rem'
+-                }}
+-              >
+-                📍 {preset.name}
+-              </button>
+-            ))}
+-          </div>
+-        </div>
+-      </div>
+-    </div>
+-  );
+-};
+-
+-export default PTZControl;
+diff --git a/frontend/src/components/dashboard/AlarmMapPanel.jsx b/frontend/src/components/dashboard/AlarmMapPanel.jsx
+deleted file mode 100644
+index 6afd2190fb99f4f1a692d742d1a2e5d1da0995f8..0000000
+--- a/frontend/src/components/dashboard/AlarmMapPanel.jsx
++++ /dev/null
+@@ -1,61 +0,0 @@
+-export function AlarmMapPanel({ selectedAlarmEvent, selectedAlarmCamera, selectedAlarmGeo, reportSummary, setShowBilling }) {
+-  return (
+-    <section className="dashboard-panel alarm-panel" id="alarm-map">
+-      <div className="panel-heading">
+-        <div>
+-          <p className="eyebrow">Alarm response</p>
+-          <h3>Map & Location</h3>
+-        </div>
+-        <button className="ghost-button" type="button" onClick={() => setShowBilling(true)}>Open Packages</button>
+-      </div>
+-
+-      <div className="alarm-grid">
+-        <div className="alarm-map-card">
+-          <div className="alarm-map-header">
+-            <span className="status-pill warning">Active alarm</span>
+-            <span className="subtle-chip">{selectedAlarmEvent ? `Event #${selectedAlarmEvent.eventId}` : 'No active event'}</span>
+-          </div>
+-          {selectedAlarmCamera && (selectedAlarmGeo.lat !== 0 || selectedAlarmGeo.lng !== 0) ? (
+-            <div className="alarm-map">
+-              <div className="map-grid-line map-grid-x" />
+-              <div className="map-grid-line map-grid-y" />
+-              <div
+-                className="map-pin"
+-                style={{ left: `${Math.min(Math.max(((selectedAlarmGeo.lng - 15.94) / 0.06) * 100, 8), 92)}%`, top: `${Math.min(Math.max((1 - ((selectedAlarmGeo.lat - 45.80) / 0.03)) * 100, 10), 90)}%` }}
+-              />
+-              <div className="map-callout">
+-                <strong>{selectedAlarmGeo.label}</strong>
+-                <p>{selectedAlarmGeo.note}</p>
+-              </div>
+-            </div>
+-          ) : (
+-            <div className="alarm-map alarm-map-empty">
+-              <div className="empty-state-content">
+-                <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ color: '#8ea3b8', marginBottom: '1rem' }}>
+-                  <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
+-                  <circle cx="12" cy="10" r="3" />
+-                </svg>
+-                <p style={{ color: '#8ea3b8', fontSize: '0.95rem', margin: 0 }}>No camera locations configured</p>
+-                <p style={{ color: '#6a7a8a', fontSize: '0.85rem', margin: '0.5rem 0 0' }}>Add cameras with latitude/longitude coordinates to enable map view</p>
+-              </div>
+-            </div>
+-          )}
+-          <div className="alarm-location-list">
+-            <div>
+-              <span className="alarm-label">Exact location</span>
+-              <strong>{selectedAlarmGeo.label}</strong>
+-            </div>
+-            <div>
+-              <span className="alarm-label">Coordinates</span>
+-              <strong>{selectedAlarmGeo.lat.toFixed(4)}, {selectedAlarmGeo.lng.toFixed(4)}</strong>
+-            </div>
+-            <div>
+-              <span className="alarm-label">Explanation</span>
+-              <strong>{reportSummary}</strong>
+-            </div>
+-          </div>
+-        </div>
+-      </div>
+-    </section>
+-  );
+-}
+diff --git a/frontend/src/components/dashboard/AuditTrailPanel.jsx b/frontend/src/components/dashboard/AuditTrailPanel.jsx
+deleted file mode 100644
+index 955929897ddb8393e9669292f3f1a1f19648c55e..0000000
+--- a/frontend/src/components/dashboard/AuditTrailPanel.jsx
++++ /dev/null
+@@ -1,30 +0,0 @@
+-export function AuditTrailPanel({ auditLog }) {
+-  return (
+-    <section className="dashboard-panel audit-panel" id="audit">
+-      <div className="panel-heading">
+-        <div><p className="eyebrow">Compliance &amp; traceability</p><h3>Operator Audit Trail</h3></div>
+-        <span className="subtle-chip">{auditLog.length} entries</span>
+-      </div>
+-      <div className="table-wrap">
+-        <table className="events-table audit-table">
+-          <thead>
+-            <tr>
+-              <th>Time</th>
+-              <th>Operator</th>
+-              <th>Action</th>
+-            </tr>
+-          </thead>
+-          <tbody>
+-            {(auditLog || []).map((entry) => (
+-              <tr key={entry.id}>
+-                <td><span className="audit-ts">{entry.ts}</span></td>
+-                <td><span className="audit-user">{entry.user}</span></td>
+-                <td>{entry.action}</td>
+-              </tr>
+-            ))}
+-          </tbody>
+-        </table>
+-      </div>
+-    </section>
+-  );
+-}
+diff --git a/test/cameras_api.test.js b/test/cameras_api.test.js
+new file mode 100644
+index 0000000..4e4aa098a7b834cd2fb0a90784811409b04d6158
+--- /dev/null
++++ b/test/cameras_api.test.js
+@@ -0,0 +1,253 @@
++'use strict';
++
++/**
++ * Tests for api/cameras.js — the camera API dispatcher.
++ *
++ * Phase 2 regression suite: direct camera CREATION through POST /api/cameras
++ * is disabled — every camera must be created through the verified setup
++ * pipeline (POST /api/cameras?path=setup-create -> task queue ->
++ * camera-setup-agent -> RTSP/ONVIF verification -> preview -> DB
++ * registration). This endpoint only keeps accepting metadata updates for
++ * cameras that already exist (created through that pipeline), so an
++ * unverified camera can never be inserted via a direct POST.
++ *
++ * All external dependencies are faked before the module under test is
++ * required, so these tests never hit a real database, a real session store,
++ * MediaMTX, or Redis (same technique as test/camera_cloud.test.js).
++ */
++
++const { test, describe, beforeEach } = require('node:test');
++const assert = require('node:assert/strict');
++
++// ── fake db ──────────────────────────────────────────────────────────────
++const db = require('../db/index');
++let queryCalls = [];
++let dbScript = null; // (text, params) => { rows, rowCount }
++
++function resetFakes() {
++  queryCalls = [];
++  dbScript = null;
++}
++
++db.queryAsOrg = async (orgId, text, params) => {
++  queryCalls.push({ orgId, text, params });
++  if (dbScript) return dbScript(text, params);
++  return { rows: [], rowCount: 0 };
++};
++
++// ── fake auth ────────────────────────────────────────────────────────────
++const authModule = require('../lib/_auth');
++authModule.requireAuth = async () => ({
++  userId: 'user-1',
++  organizationId: 'org-1',
++  role: 'org_admin',
++});
++authModule.getAccessibleCameraIds = async () => null;
++
++// ── fake rate limit ──────────────────────────────────────────────────────
++const rateLimitModule = require('../lib/_rate_limit');
++rateLimitModule.rateLimit = async () => true;
++
++// ── fake media node picker (used by setup-create) ────────────────────────
++const mediaNodesModule = require('../lib/_media_nodes');
++mediaNodesModule.pickMediaNodeForCamera = async () => ({
++  id: 'node-1',
++  public_hls_url: 'https://hls.example.test/hls',
++});
++
++// ── fake MediaMTX client (no network) ────────────────────────────────────
++const mediamtxModule = require('../lib/_mediamtx_client');
++mediamtxModule.addOrUpdateCameraPath = async () => true;
++mediamtxModule.deleteCameraPath = async () => true;
++
++// ── load module under test AFTER patching its dependencies ───────────────
++const handler = require('../api/cameras');
++
++// ── req/res test helpers ──────────────────────────────────────────────────
++function makeReq({ method = 'GET', query = {}, body = {} } = {}) {
++  return { method, query, body, headers: {}, socket: { remoteAddress: '127.0.0.1' } };
++}
++
++function makeRes() {
++  const res = {
++    statusCode: 200,
++    headers: {},
++    body: null,
++    setHeader(k, v) { this.headers[k] = v; },
++    status(code) { this.statusCode = code; return this; },
++    json(payload) { this.body = payload; return this; },
++  };
++  return res;
++}
++
++const existingRow = {
++  organization_id: 'org-1',
++  media_node_id: 'node-1',
++  rtsp_url: 'rtsp://camera-ip/stream',
++};
++
++const otherOrgRow = {
++  organization_id: 'org-2',
++  media_node_id: 'node-9',
++  rtsp_url: 'rtsp://other-org/stream',
++};
++
++describe('api/cameras — Phase 2: no direct camera creation', () => {
++  beforeEach(() => {
++    resetFakes();
++  });
++
++  test('POST /api/cameras with an unknown id is rejected (409) and no camera INSERT runs', async () => {
++    dbScript = () => ({ rows: [], rowCount: 0 }); // camera does not exist
++    const req = makeReq({
++      method: 'POST',
++      body: { id: 'CAM-NEW', name: 'New cam', rtsp_url: 'rtsp://new-cam/stream' },
++    });
++    const res = makeRes();
++    await handler(req, res);
++
++    assert.equal(res.statusCode, 409);
++    assert.match(res.body.error, /Direct camera creation is disabled/i);
++    const inserts = queryCalls.filter((c) => c.text.startsWith('INSERT INTO cameras'));
++    assert.equal(inserts.length, 0, 'an unverified camera may never be inserted via direct POST');
++  });
++
++  test('POST /api/cameras with an existing id updates metadata of a verified camera', async () => {
++    dbScript = (text) => {
++      if (text.includes('SELECT 1 FROM cameras WHERE organization_id')) return { rows: [], rowCount: 0 };
++      if (text.includes('SELECT organization_id, media_node_id, rtsp_url FROM cameras')) {
++        return { rows: [{ ...existingRow }] };
++      }
++      if (text.startsWith('INSERT INTO cameras')) return { rows: [], rowCount: 1 };
++      return { rows: [], rowCount: 0 };
++    };
++    const req = makeReq({
++      method: 'POST',
++      body: { id: 'CAM-01', name: 'Renamed', rtsp_url: 'rtsp://camera-ip/stream', location: 'yard' },
++    });
++    const res = makeRes();
++    await handler(req, res);
++
++    assert.equal(res.statusCode, 201);
++    assert.equal(res.body.success, true);
++    const insert = queryCalls.find((c) => c.text.startsWith('INSERT INTO cameras'));
++    assert.ok(insert, 'an upsert ran for the existing camera');
++    assert.equal(insert.orgId, 'org-1');
++    assert.ok(insert.text.includes('ON CONFLICT (id) DO UPDATE'));
++  });
++
++  test('POST /api/cameras with an id belonging to another org is rejected (403)', async () => {
++    dbScript = (text) => {
++      if (text.includes('SELECT organization_id, media_node_id, rtsp_url FROM cameras')) {
++        return { rows: [{ ...otherOrgRow }] };
++      }
++      return { rows: [], rowCount: 0 }; // dup-check passes; camera belongs to org-2
++    };
++    const req = makeReq({
++      method: 'POST',
++      body: { id: 'CAM-OTHER', name: 'Sneaky', rtsp_url: 'rtsp://other-org/stream' },
++    });
++    const res = makeRes();
++    await handler(req, res);
++
++    assert.equal(res.statusCode, 403);
++    assert.match(res.body.error, /different organization/i);
++  });
++
++  test('POST /api/cameras?path=setup-create still creates a verified setup task', async () => {
++    dbScript = (text) => {
++      if (text.startsWith('INSERT INTO camera_setup_tasks')) {
++        return { rows: [{ id: 'task-1', status: 'pending' }] };
++      }
++      return { rows: [], rowCount: 0 };
++    };
++    const req = makeReq({
++      method: 'POST',
++      query: { path: 'setup-create' },
++      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Back Yard' },
++    });
++    const res = makeRes();
++    await handler(req, res);
++
++    assert.equal(res.statusCode, 200);
++    assert.equal(res.body.success, true);
++    assert.equal(res.body.taskId, 'task-1');
++    assert.equal(res.body.node.id, 'node-1');
++    const taskInsert = queryCalls.find((c) => c.text.startsWith('INSERT INTO camera_setup_tasks'));
++    assert.ok(taskInsert, 'a setup task was created through the blessed pipeline');
++    assert.equal(taskInsert.orgId, 'org-1');
++  });
++
++  test('GET /api/cameras still lists the org cameras', async () => {
++    dbScript = (text) => {
++      if (text.includes('FROM cameras c')) {
++        return {
++          rows: [{ id: 'CAM-01', name: 'Back Yard', rtsp_url: 'rtsp://camera-ip/stream', enabled: true }],
++        };
++      }
++      return { rows: [], rowCount: 0 };
++    };
++    const req = makeReq({ method: 'GET' });
++    const res = makeRes();
++    await handler(req, res);
++
++    assert.equal(res.statusCode, 200);
++    assert.equal(res.body.success, true);
++    assert.equal(res.body.cameras.length, 1);
++    const listQuery = queryCalls.find((c) => c.text.includes('FROM cameras c'));
++    assert.equal(listQuery.orgId, 'org-1');
++  });
++
++  test('POST /api/cameras?path=setup-create (mode=scan) still creates a scan task', async () => {
++    dbScript = (text) => {
++      if (text.startsWith('INSERT INTO camera_setup_tasks')) {
++        return { rows: [{ id: 'task-scan-1', status: 'pending' }] };
++      }
++      return { rows: [], rowCount: 0 };
++    };
++    const req = makeReq({
++      method: 'POST',
++      query: { path: 'setup-create' },
++      body: { mode: 'scan' },
++    });
++    const res = makeRes();
++    await handler(req, res);
++
++    assert.equal(res.statusCode, 200);
++    assert.equal(res.body.success, true);
++    assert.equal(res.body.taskId, 'task-scan-1');
++    const taskInsert = queryCalls.find((c) => c.text.startsWith('INSERT INTO camera_setup_tasks'));
++    assert.ok(taskInsert, 'a scan setup task was created');
++    assert.equal(taskInsert.orgId, 'org-1');
++    assert.equal(taskInsert.params[3], 'scan');
++  });
++
++  test('POST /api/cameras?path=setup-create (mode=onvif) stores encrypted credentials', async () => {
++    dbScript = (text) => {
++      if (text.startsWith('INSERT INTO camera_setup_tasks')) {
++        return { rows: [{ id: 'task-onvif-1', status: 'pending' }] };
++      }
++      return { rows: [], rowCount: 0 };
++    };
++    const req = makeReq({
++      method: 'POST',
++      query: { path: 'setup-create' },
++      body: { mode: 'onvif', ip: '192.168.1.50', onvif_port: 80, username: 'admin', password: 'secret' },
++    });
++    const res = makeRes();
++    await handler(req, res);
++
++    assert.equal(res.statusCode, 200);
++    assert.equal(res.body.success, true);
++    assert.equal(res.body.taskId, 'task-onvif-1');
++    const taskInsert = queryCalls.find((c) => c.text.startsWith('INSERT INTO camera_setup_tasks'));
++    assert.ok(taskInsert, 'an onvif setup task was created');
++    assert.equal(taskInsert.orgId, 'org-1');
++    assert.equal(taskInsert.params[3], 'onvif');
++    // Credentials must never be stored in plaintext on the task row.
++    assert.ok(taskInsert.params[8] && typeof taskInsert.params[8] === 'string',
++      'encrypted_credentials must be a non-empty encrypted blob');
++    assert.ok(!taskInsert.params[8].includes('secret'),
++      'plaintext password must not appear in the stored credentials blob');
++  });
++});

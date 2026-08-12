@@ -127,6 +127,7 @@ export default function Dashboard() {
   const [wizardNodeError, setWizardNodeError] = useState('');
   const [wizardSelectedCam, setWizardSelectedCam] = useState(null); // { ip, manufacturer, model, firmware_version, onvif_port }
   const [wizardManualIp, setWizardManualIp] = useState('');
+  const [wizardShowManualIp, setWizardShowManualIp] = useState(false);
   const [wizardStreams, setWizardStreams] = useState(null); // [{ url, label, reachable }]
   const [wizardSelectedStream, setWizardSelectedStream] = useState('');
   const [wizardProbing, setWizardProbing] = useState(false);
@@ -142,12 +143,6 @@ export default function Dashboard() {
   const [wizardPreview, setWizardPreview] = useState(null); // { cameraId, name, hlsUrl }
   const wizardPreviewRef = useRef(null);
 
-  // Inline camera add form
-  const [showAddCam, setShowAddCam] = useState(false);
-  const [addCamForm, setAddCamForm] = useState({ name: '', rtsp_url: '', location: '', lat: '', lng: '' });
-  const [addCamSaving, setAddCamSaving] = useState(false);
-  const [addCamError, setAddCamError] = useState('');
-
   // Audio alarm incident count tracker
   const prevNewIncidentsRef = useRef(null);
 
@@ -160,6 +155,7 @@ export default function Dashboard() {
     setWizardNodeError('');
     setWizardSelectedCam(null);
     setWizardManualIp('');
+    setWizardShowManualIp(false);
     setWizardStreams(null);
     setWizardSelectedStream('');
     setWizardProbing(false);
@@ -193,6 +189,19 @@ export default function Dashboard() {
     setWizardOpen(false);
     resetWizardState();
   };
+
+  // Deep link: /dashboard?addCamera=1 opens the V3 camera wizard. Used by the
+  // unified "+ Add Camera" entry point on the Cameras page — same wizard, same
+  // backend (POST /api/camera-setup), no new system.
+  useEffect(() => {
+    if (window.location.search.includes('addCamera=1')) {
+      const url = new URL(window.location.href);
+      url.searchParams.delete('addCamera');
+      window.history.replaceState({}, '', url);
+      openWizard();
+    }
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
 
   // ── Camera Setup Wizard (V3 — One-Click Setup) ──────────────────────────
   // LAN work (ONVIF discovery, RTSP probing, MediaMTX path, tunnel) runs on
@@ -264,14 +273,13 @@ export default function Dashboard() {
   };
 
   // Step 1b — probe the selected camera and list its RTSP streams (main/sub).
-  const testWizardConnection = async () => {
-    const cam = wizardSelectedCam;
+  // Credentials are optional: the agent probes without them and reports
+  // need_credentials when the camera requires auth, so the client only ever
+  // enters a username/password when the system asks for it.
+  const testWizardConnection = async (camOverride) => {
+    const cam = camOverride || wizardSelectedCam;
     const ip = (cam?.ip || wizardManualIp || '').trim();
     if (!ip) { alert('Enter the camera IP address or select one from the scan results.'); return; }
-    if (!wizardUsername.trim() || !wizardPassword.trim()) {
-      alert('Enter the camera username and password to discover its streams.');
-      return;
-    }
     setWizardProbing(true);
     setWizardError('');
     setWizardStreams(null);
@@ -281,8 +289,8 @@ export default function Dashboard() {
         mode: 'probe',
         ip,
         onvif_port: cam?.onvif_port || 80,
-        username: wizardUsername.trim(),
-        password: wizardPassword.trim(),
+        username: wizardUsername.trim() || null,
+        password: wizardPassword.trim() || null,
       });
       const taskId = res.data?.taskId;
       if (!taskId) throw new Error('No task id returned');
@@ -292,10 +300,13 @@ export default function Dashboard() {
       if (t.status === 'failed') { setWizardError(t.error || 'Connection test failed'); return; }
       const streams = t.result?.streams || [];
       if (streams.length === 0) {
-        setWizardError(t.result?.need_credentials
-          ? 'No streams found without valid credentials. Check the username/password, or paste an RTSP URL manually on the next step.'
-          : 'No RTSP streams found on this camera. You can still paste an RTSP URL manually on the next step.');
-        setWizardStep(2);
+        if (t.result?.need_credentials) {
+          setWizardError('No streams found without valid credentials — enter the camera username/password above and try again.');
+          setWizardStep(1);
+        } else {
+          setWizardError('No RTSP streams found on this camera. You can still paste an RTSP URL manually on the next step.');
+          setWizardStep(2);
+        }
         return;
       }
       setWizardStreams(streams);
@@ -308,6 +319,21 @@ export default function Dashboard() {
     } finally {
       setWizardProbing(false);
     }
+  };
+
+  // Select a discovered camera: the IP comes from the scan (the client never
+  // types it), a sensible name is pre-filled (editable), and the probe for
+  // main/sub streams starts immediately — no extra clicks required.
+  const selectWizardCamera = (cam) => {
+    if (wizardProbing) return;
+    setWizardSelectedCam(cam);
+    setWizardManualIp(cam.ip);
+    setWizardShowManualIp(false);
+    setNewCamera((p) => ({
+      ...p,
+      name: p.name.trim() || [cam.manufacturer, cam.model].filter(Boolean).join(' ') || cam.ip,
+    }));
+    testWizardConnection(cam);
   };
 
   // Verify the HLS URL answers with a token (401/403 = token problem).
@@ -499,40 +525,6 @@ export default function Dashboard() {
       setSnapshotStatus((prev) => ({ ...prev, [camId]: 'error' }));
     } finally {
       setTimeout(() => setSnapshotStatus((prev) => ({ ...prev, [camId]: null })), 3000);
-    }
-  };
-
-  const submitAddCamera = async (e) => {
-    e.preventDefault();
-    if (!addCamForm.name.trim() || !addCamForm.rtsp_url.trim()) {
-      setAddCamError('Camera name and RTSP URL are required.');
-      return;
-    }
-    setAddCamSaving(true);
-    setAddCamError('');
-    const id = `CAM-${String((cameras?.length || 0) + 1).padStart(2, '0')}`;
-    const newCam = {
-      id,
-      name: addCamForm.name.trim(),
-      rtsp_url: addCamForm.rtsp_url.trim(),
-      location: addCamForm.location.trim() || id,
-      lat: addCamForm.lat ? Number(addCamForm.lat) : null,
-      lng: addCamForm.lng ? Number(addCamForm.lng) : null,
-      enabled: true,
-      resolution: '1920x1080',
-      fps: 30,
-      codec: 'H264',
-    };
-    try {
-      await api.post('/cameras', newCam);
-      setCameras((prev) => [...(prev || []), newCam]);
-      setAddCamForm({ name: '', rtsp_url: '', location: '', lat: '', lng: '' });
-      setShowAddCam(false);
-      addAuditEntry(`Added camera: ${newCam.name} (${id})`);
-    } catch (err) {
-      setAddCamError(err?.response?.data?.error || err.message || 'Failed to save camera.');
-    } finally {
-      setAddCamSaving(false);
     }
   };
 
@@ -991,9 +983,9 @@ export default function Dashboard() {
 
             {wizardStep === 1 && (
               <>
-                <p className="ls-desc">Skeniranje lokalne mreže se pokreće automatski. Izaberi pronađenu kameru ili unesi IP adresu ručno — bez RTSP putanja i bez konfiguracije.</p>
+                <p className="ls-desc">We scan your local network automatically and list the cameras we find — no IP address needed. Select your camera and we'll find its streams for you. If your camera was not found, you can enter its IP manually below.</p>
                 {wizardScanning ? (
-                  <p className="ls-desc" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>⏳ Scanning the local network for ONVIF cameras…</p>
+                  <p className="ls-desc" style={{ display: 'flex', alignItems: 'center', gap: 8 }}>⏳ Scanning the local network for cameras…</p>
                 ) : (
                   <div className="wizard-fields">
                     {wizardScanResults?.cameras?.length > 0 ? (
@@ -1002,7 +994,7 @@ export default function Dashboard() {
                         <div className="wizard-found">
                           {wizardScanResults.cameras.map((cam, i) => (
                             <button key={i} type="button" className="wizard-found-item"
-                              onClick={() => { setWizardSelectedCam(cam); setWizardManualIp(cam.ip); }}
+                              onClick={() => selectWizardCamera(cam)}
                               style={{ textAlign: 'left', padding: 10, marginBottom: 6, borderRadius: 6, cursor: 'pointer', width: '100%' }}>
                               <div>📷 <strong>{cam.manufacturer || 'Unknown'} {cam.model || ''}</strong></div>
                               <div style={{ fontSize: 12, opacity: 0.8 }}>
@@ -1015,19 +1007,25 @@ export default function Dashboard() {
                     ) : (
                       <p className="ls-desc" style={{ color: 'var(--color-warn, #f59e0b)' }}>No cameras found automatically. Enter the camera IP manually below (e.g. 192.168.1.17).</p>
                     )}
-                    <label className="search-field">
-                      <span>Camera IP</span>
-                      <input value={wizardManualIp} onChange={(e) => { setWizardManualIp(e.target.value); setWizardSelectedCam(null); }} placeholder="192.168.1.17" />
-                    </label>
-                    <label className="search-field"><span>Username (ONVIF)</span><input value={wizardUsername} onChange={(e) => setWizardUsername(e.target.value)} placeholder="admin" autoComplete="off" /></label>
-                    <label className="search-field"><span>Password</span><input type="password" value={wizardPassword} onChange={(e) => setWizardPassword(e.target.value)} placeholder="••••••••" /></label>
-                    <label className="search-field"><span>Camera name</span><input value={newCamera.name} onChange={(e) => setNewCamera((p) => ({ ...p, name: e.target.value }))} placeholder="South Entrance" /></label>
+                    {wizardShowManualIp || !(wizardScanResults?.cameras?.length > 0) ? (
+                      <label className="search-field">
+                        <span>Camera IP (only if not found automatically)</span>
+                        <input value={wizardManualIp} onChange={(e) => { setWizardManualIp(e.target.value); setWizardSelectedCam(null); }} placeholder="192.168.1.17" />
+                      </label>
+                    ) : (
+                      <button type="button" className="ghost-button" style={{ marginBottom: 8 }} onClick={() => setWizardShowManualIp(true)}>
+                        Can't find your camera? Enter its IP manually
+                      </button>
+                    )}
+                    <label className="search-field"><span>Username (only if your camera requires it)</span><input value={wizardUsername} onChange={(e) => setWizardUsername(e.target.value)} placeholder="admin" autoComplete="off" /></label>
+                    <label className="search-field"><span>Password (only if your camera requires it)</span><input type="password" value={wizardPassword} onChange={(e) => setWizardPassword(e.target.value)} placeholder="••••••••" /></label>
+                    <label className="search-field"><span>Camera name (optional)</span><input value={newCamera.name} onChange={(e) => setNewCamera((p) => ({ ...p, name: e.target.value }))} placeholder="South Entrance" /></label>
                   </div>
                 )}
                 {wizardError && <p className="ls-desc" style={{ color: 'var(--color-danger, #ef4444)' }}>⚠️ {wizardError}</p>}
                 <div className="wizard-actions">
-                  <button className="primary-button" type="button" onClick={testWizardConnection} disabled={wizardScanning || wizardProbing || !wizardNode}>
-                    {wizardProbing ? 'Finding streams…' : 'Test Connection & Find Streams'}
+                  <button className="primary-button" type="button" onClick={() => testWizardConnection()} disabled={wizardScanning || wizardProbing || !wizardNode}>
+                    {wizardProbing ? 'Finding streams…' : 'Find Streams'}
                   </button>
                   <button className="ghost-button" type="button" onClick={startWizardScan} disabled={wizardScanning}>Rescan network</button>
                 </div>
@@ -1239,11 +1237,8 @@ export default function Dashboard() {
                 {currentUser?.email?.charAt(0).toUpperCase() || 'U'}
               </div>
             </div>
-            <button className="primary-button" onClick={() => { setShowAddCam((v) => !v); setAddCamError(''); }}>
+            <button className="primary-button" onClick={() => setWizardOpen(true)}>
               + Add Camera
-            </button>
-            <button className="ghost-button" onClick={() => setWizardOpen(true)}>
-              + Create Incident
             </button>
           </div>
         </header>
@@ -1565,9 +1560,9 @@ export default function Dashboard() {
               <button
                 className="ghost-button"
                 type="button"
-                onClick={() => { setShowAddCam((v) => !v); setAddCamError(''); }}
+                onClick={() => setWizardOpen(true)}
               >
-                {showAddCam ? 'Cancel' : '+ Add Camera'}
+                + Add Camera
               </button>
             </div>
 
@@ -1575,68 +1570,6 @@ export default function Dashboard() {
               <p className="checkout-status checkout-status-error" role="alert">
                 Camera list failed to load: {camerasError}
               </p>
-            )}
-
-            {showAddCam && (
-              <form className="add-cam-form" onSubmit={submitAddCamera}>
-                <label className="search-field">
-                  <span>Camera Name</span>
-                  <input
-                    value={addCamForm.name}
-                    onChange={(e) => setAddCamForm((p) => ({ ...p, name: e.target.value }))}
-                    placeholder="e.g. Back Yard"
-                    required
-                    autoFocus
-                  />
-                </label>
-                <label className="search-field">
-                  <span>RTSP Stream URL</span>
-                  <input
-                    value={addCamForm.rtsp_url}
-                    onChange={(e) => setAddCamForm((p) => ({ ...p, rtsp_url: e.target.value }))}
-                    placeholder="rtsp://your-camera-ip:554/stream"
-                    required
-                  />
-                </label>
-                <label className="search-field">
-                  <span>Location (optional)</span>
-                  <input
-                    value={addCamForm.location}
-                    onChange={(e) => setAddCamForm((p) => ({ ...p, location: e.target.value }))}
-                    placeholder="e.g. back_yard"
-                  />
-                </label>
-                <label className="search-field">
-                  <span>Latitude (optional)</span>
-                  <input
-                    type="number"
-                    step="any"
-                    value={addCamForm.lat}
-                    onChange={(e) => setAddCamForm((p) => ({ ...p, lat: e.target.value }))}
-                    placeholder="e.g. 45.8154"
-                  />
-                </label>
-                <label className="search-field">
-                  <span>Longitude (optional)</span>
-                  <input
-                    type="number"
-                    step="any"
-                    value={addCamForm.lng}
-                    onChange={(e) => setAddCamForm((p) => ({ ...p, lng: e.target.value }))}
-                    placeholder="e.g. 15.9819"
-                  />
-                </label>
-                <div className="add-cam-actions">
-                  {addCamError && <p className="checkout-status checkout-status-error">{addCamError}</p>}
-                  <button
-                    className="primary-button"
-                    type="submit"
-                    disabled={addCamSaving || !addCamForm.name.trim() || !addCamForm.rtsp_url.trim()}
-                  >
-                    {addCamSaving ? 'Saving...' : 'Add Camera'}
-                  </button>
-                </div>
-              </form>
             )}
 
             <div className="camera-list">
@@ -1702,7 +1635,7 @@ export default function Dashboard() {
                     <button 
                       className="ghost-button" 
                       type="button"
-                      onClick={() => { setShowAddCam((v) => !v); setAddCamError(''); }}
+                      onClick={() => setWizardOpen(true)}
                       style={{ marginTop: '1rem' }}
                     >
                       Add Camera

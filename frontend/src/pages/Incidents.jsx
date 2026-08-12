@@ -23,8 +23,12 @@ const PAGE_CSS = `
   .incident-actions { display: flex; gap: .5rem; }
   .action-btn { padding: .4rem .8rem; border-radius: 6px; font-size: .75rem; cursor: pointer; border: none; transition: all .2s; }
   .action-btn-view { background: rgba(0,212,255,.2); color: var(--accent-primary, #00d4ff); }
-  .action-btn-edit { background: rgba(87,125,196,.2); color: var(--text-secondary, #8ab0c9); }
   .action-btn:hover { filter: brightness(1.2); }
+  .incident-detail-row td { background: rgba(0,212,255,.03); }
+  .incident-detail-grid { display: grid; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); gap: .6rem 1rem; margin-bottom: .4rem; }
+  .incident-detail-grid span { font-size: .8rem; color: var(--text-secondary, #8ab0c9); }
+  .incident-detail-grid strong { display: block; font-size: .68rem; text-transform: uppercase; letter-spacing: .04em; color: var(--text-muted, #6a8aaa); margin-bottom: 2px; }
+  .incident-detail-desc { font-size: .85rem; color: var(--text-secondary, #8ab0c9); margin: .25rem 0 0; }
   .empty-incidents { text-align: center; padding: 4rem; background: rgba(10,18,38,.85); border: 1px solid rgba(87,140,255,.18); border-radius: 16px; }
   .empty-incidents h2 { color: var(--text-primary, #dff7ff); margin-bottom: 1rem; }
   .empty-incidents p { color: var(--text-secondary, #8ab0c9); }
@@ -39,6 +43,7 @@ export default function Incidents() {
   const [incidents, setIncidents] = useState([]);
   const [loading, setLoading] = useState(true);
   const [statusFilter, setStatusFilter] = useState('all');
+  const [expandedId, setExpandedId] = useState(null);
 
   useEffect(() => {
     fetchIncidents();
@@ -123,7 +128,8 @@ export default function Incidents() {
             </thead>
             <tbody>
               {filteredIncidents.map(incident => (
-                <tr key={incident.id}>
+                <React.Fragment key={incident.id}>
+                <tr>
                   <td>
                     <div className={`severity-indicator ${getSeverityClass(incident.severity)}`} />
                   </td>
@@ -142,11 +148,34 @@ export default function Incidents() {
                   </td>
                   <td>
                     <div className="incident-actions">
-                      <button className="action-btn action-btn-view">View</button>
-                      <button className="action-btn action-btn-edit">Edit</button>
+                      <button
+                        className="action-btn action-btn-view"
+                        onClick={() => setExpandedId(expandedId === incident.id ? null : incident.id)}
+                      >
+                        {expandedId === incident.id ? 'Hide' : 'View'}
+                      </button>
                     </div>
                   </td>
                 </tr>
+                {expandedId === incident.id && (
+                  <tr className="incident-detail-row">
+                    <td colSpan={6}>
+                      <div className="incident-detail-grid">
+                        <span><strong>Event ID</strong>{incident.event_id || '—'}</span>
+                        <span><strong>Camera</strong>{incident.camera_id || '—'}</span>
+                        <span><strong>Type</strong>{incident.object_type || '—'}</span>
+                        <span><strong>Confidence</strong>{incident.confidence != null ? `${Math.round(Number(incident.confidence) * 100)}%` : '—'}</span>
+                        <span><strong>Severity</strong>{incident.severity || '—'}</span>
+                        <span><strong>Status</strong>{incident.status || '—'}</span>
+                        <span><strong>Assigned operator</strong>{incident.assigned_operator_id || '—'}</span>
+                        <span><strong>Acknowledged</strong>{incident.acknowledged_at ? new Date(incident.acknowledged_at).toLocaleString() : '—'}</span>
+                        <span><strong>Resolved</strong>{incident.resolved_at ? new Date(incident.resolved_at).toLocaleString() : '—'}</span>
+                      </div>
+                      {incident.source && <p className="incident-detail-desc">{incident.source}</p>}
+                    </td>
+                  </tr>
+                )}
+                </React.Fragment>
               ))}
             </tbody>
           </table>

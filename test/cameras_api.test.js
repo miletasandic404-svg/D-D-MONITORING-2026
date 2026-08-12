@@ -1,0 +1,253 @@
+'use strict';
+
+/**
+ * Tests for api/cameras.js — the camera API dispatcher.
+ *
+ * Phase 2 regression suite: direct camera CREATION through POST /api/cameras
+ * is disabled — every camera must be created through the verified setup
+ * pipeline (POST /api/cameras?path=setup-create -> task queue ->
+ * camera-setup-agent -> RTSP/ONVIF verification -> preview -> DB
+ * registration). This endpoint only keeps accepting metadata updates for
+ * cameras that already exist (created through that pipeline), so an
+ * unverified camera can never be inserted via a direct POST.
+ *
+ * All external dependencies are faked before the module under test is
+ * required, so these tests never hit a real database, a real session store,
+ * MediaMTX, or Redis (same technique as test/camera_cloud.test.js).
+ */
+
+const { test, describe, beforeEach } = require('node:test');
+const assert = require('node:assert/strict');
+
+// ── fake db ──────────────────────────────────────────────────────────────
+const db = require('../db/index');
+let queryCalls = [];
+let dbScript = null; // (text, params) => { rows, rowCount }
+
+function resetFakes() {
+  queryCalls = [];
+  dbScript = null;
+}
+
+db.queryAsOrg = async (orgId, text, params) => {
+  queryCalls.push({ orgId, text, params });
+  if (dbScript) return dbScript(text, params);
+  return { rows: [], rowCount: 0 };
+};
+
+// ── fake auth ────────────────────────────────────────────────────────────
+const authModule = require('../lib/_auth');
+authModule.requireAuth = async () => ({
+  userId: 'user-1',
+  organizationId: 'org-1',
+  role: 'org_admin',
+});
+authModule.getAccessibleCameraIds = async () => null;
+
+// ── fake rate limit ──────────────────────────────────────────────────────
+const rateLimitModule = require('../lib/_rate_limit');
+rateLimitModule.rateLimit = async () => true;
+
+// ── fake media node picker (used by setup-create) ────────────────────────
+const mediaNodesModule = require('../lib/_media_nodes');
+mediaNodesModule.pickMediaNodeForCamera = async () => ({
+  id: 'node-1',
+  public_hls_url: 'https://hls.example.test/hls',
+});
+
+// ── fake MediaMTX client (no network) ────────────────────────────────────
+const mediamtxModule = require('../lib/_mediamtx_client');
+mediamtxModule.addOrUpdateCameraPath = async () => true;
+mediamtxModule.deleteCameraPath = async () => true;
+
+// ── load module under test AFTER patching its dependencies ───────────────
+const handler = require('../api/cameras');
+
+// ── req/res test helpers ──────────────────────────────────────────────────
+function makeReq({ method = 'GET', query = {}, body = {} } = {}) {
+  return { method, query, body, headers: {}, socket: { remoteAddress: '127.0.0.1' } };
+}
+
+function makeRes() {
+  const res = {
+    statusCode: 200,
+    headers: {},
+    body: null,
+    setHeader(k, v) { this.headers[k] = v; },
+    status(code) { this.statusCode = code; return this; },
+    json(payload) { this.body = payload; return this; },
+  };
+  return res;
+}
+
+const existingRow = {
+  organization_id: 'org-1',
+  media_node_id: 'node-1',
+  rtsp_url: 'rtsp://camera-ip/stream',
+};
+
+const otherOrgRow = {
+  organization_id: 'org-2',
+  media_node_id: 'node-9',
+  rtsp_url: 'rtsp://other-org/stream',
+};
+
+describe('api/cameras — Phase 2: no direct camera creation', () => {
+  beforeEach(() => {
+    resetFakes();
+  });
+
+  test('POST /api/cameras with an unknown id is rejected (409) and no camera INSERT runs', async () => {
+    dbScript = () => ({ rows: [], rowCount: 0 }); // camera does not exist
+    const req = makeReq({
+      method: 'POST',
+      body: { id: 'CAM-NEW', name: 'New cam', rtsp_url: 'rtsp://new-cam/stream' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 409);
+    assert.match(res.body.error, /Direct camera creation is disabled/i);
+    const inserts = queryCalls.filter((c) => c.text.startsWith('INSERT INTO cameras'));
+    assert.equal(inserts.length, 0, 'an unverified camera may never be inserted via direct POST');
+  });
+
+  test('POST /api/cameras with an existing id updates metadata of a verified camera', async () => {
+    dbScript = (text) => {
+      if (text.includes('SELECT 1 FROM cameras WHERE organization_id')) return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT organization_id, media_node_id, rtsp_url FROM cameras')) {
+        return { rows: [{ ...existingRow }] };
+      }
+      if (text.startsWith('INSERT INTO cameras')) return { rows: [], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      body: { id: 'CAM-01', name: 'Renamed', rtsp_url: 'rtsp://camera-ip/stream', location: 'yard' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.body.success, true);
+    const insert = queryCalls.find((c) => c.text.startsWith('INSERT INTO cameras'));
+    assert.ok(insert, 'an upsert ran for the existing camera');
+    assert.equal(insert.orgId, 'org-1');
+    assert.ok(insert.text.includes('ON CONFLICT (id) DO UPDATE'));
+  });
+
+  test('POST /api/cameras with an id belonging to another org is rejected (403)', async () => {
+    dbScript = (text) => {
+      if (text.includes('SELECT organization_id, media_node_id, rtsp_url FROM cameras')) {
+        return { rows: [{ ...otherOrgRow }] };
+      }
+      return { rows: [], rowCount: 0 }; // dup-check passes; camera belongs to org-2
+    };
+    const req = makeReq({
+      method: 'POST',
+      body: { id: 'CAM-OTHER', name: 'Sneaky', rtsp_url: 'rtsp://other-org/stream' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /different organization/i);
+  });
+
+  test('POST /api/cameras?path=setup-create still creates a verified setup task', async () => {
+    dbScript = (text) => {
+      if (text.startsWith('INSERT INTO camera_setup_tasks')) {
+        return { rows: [{ id: 'task-1', status: 'pending' }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Back Yard' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.taskId, 'task-1');
+    assert.equal(res.body.node.id, 'node-1');
+    const taskInsert = queryCalls.find((c) => c.text.startsWith('INSERT INTO camera_setup_tasks'));
+    assert.ok(taskInsert, 'a setup task was created through the blessed pipeline');
+    assert.equal(taskInsert.orgId, 'org-1');
+  });
+
+  test('GET /api/cameras still lists the org cameras', async () => {
+    dbScript = (text) => {
+      if (text.includes('FROM cameras c')) {
+        return {
+          rows: [{ id: 'CAM-01', name: 'Back Yard', rtsp_url: 'rtsp://camera-ip/stream', enabled: true }],
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({ method: 'GET' });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.cameras.length, 1);
+    const listQuery = queryCalls.find((c) => c.text.includes('FROM cameras c'));
+    assert.equal(listQuery.orgId, 'org-1');
+  });
+
+  test('POST /api/cameras?path=setup-create (mode=scan) still creates a scan task', async () => {
+    dbScript = (text) => {
+      if (text.startsWith('INSERT INTO camera_setup_tasks')) {
+        return { rows: [{ id: 'task-scan-1', status: 'pending' }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'scan' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.taskId, 'task-scan-1');
+    const taskInsert = queryCalls.find((c) => c.text.startsWith('INSERT INTO camera_setup_tasks'));
+    assert.ok(taskInsert, 'a scan setup task was created');
+    assert.equal(taskInsert.orgId, 'org-1');
+    assert.equal(taskInsert.params[3], 'scan');
+  });
+
+  test('POST /api/cameras?path=setup-create (mode=onvif) stores encrypted credentials', async () => {
+    dbScript = (text) => {
+      if (text.startsWith('INSERT INTO camera_setup_tasks')) {
+        return { rows: [{ id: 'task-onvif-1', status: 'pending' }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'onvif', ip: '192.168.1.50', onvif_port: 80, username: 'admin', password: 'secret' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.taskId, 'task-onvif-1');
+    const taskInsert = queryCalls.find((c) => c.text.startsWith('INSERT INTO camera_setup_tasks'));
+    assert.ok(taskInsert, 'an onvif setup task was created');
+    assert.equal(taskInsert.orgId, 'org-1');
+    assert.equal(taskInsert.params[3], 'onvif');
+    // Credentials must never be stored in plaintext on the task row.
+    assert.ok(taskInsert.params[8] && typeof taskInsert.params[8] === 'string',
+      'encrypted_credentials must be a non-empty encrypted blob');
+    assert.ok(!taskInsert.params[8].includes('secret'),
+      'plaintext password must not appear in the stored credentials blob');
+  });
+});
