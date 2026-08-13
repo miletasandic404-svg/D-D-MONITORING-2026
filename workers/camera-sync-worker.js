@@ -89,17 +89,25 @@ async function fetchCamerasFromDb() {
   // is user-controlled) into its own MediaMTX. If the node has no org
   // assigned yet, only its own assigned cameras are synced -- never a
   // foreign org's unassigned cameras.
-  const query = MEDIA_NODE_ID
-    ? `SELECT c.id, c.rtsp_url, c.media_node_id, c.rtsp_username, c.rtsp_password_encrypted
-       FROM cameras c
-       JOIN media_nodes n ON n.id = $1
-       WHERE (c.media_node_id = $1 OR c.media_node_id IS NULL)
-         AND c.rtsp_url IS NOT NULL
-         AND c.enabled = true
-         AND (n.organization_id IS NULL
-              OR c.organization_id = n.organization_id)`
-    : 'SELECT id, rtsp_url, media_node_id, rtsp_username, rtsp_password_encrypted FROM cameras WHERE rtsp_url IS NOT NULL AND enabled = true';
-  const params = MEDIA_NODE_ID ? [MEDIA_NODE_ID] : [];
+  // Security (model B) -- fail closed: the sync worker must be tied to a
+  // media node so it can be attributed to an organization. Without
+  // MEDIA_NODE_ID there is no way to scope the sync, and the previous
+  // unscoped SELECT over every enabled camera (with decryptable RTSP
+  // credentials) would let any node pull foreign organizations' streams.
+  if (!MEDIA_NODE_ID) {
+    logger.error('sync.media_node_id_missing');
+    return [];
+  }
+
+  const query = `SELECT c.id, c.rtsp_url, c.media_node_id, c.rtsp_username, c.rtsp_password_encrypted
+     FROM cameras c
+     JOIN media_nodes n ON n.id = $1
+     WHERE (c.media_node_id = $1 OR c.media_node_id IS NULL)
+       AND c.rtsp_url IS NOT NULL
+       AND c.enabled = true
+       AND (n.organization_id IS NULL
+            OR c.organization_id = n.organization_id)`;
+  const params = [MEDIA_NODE_ID];
   const result = await pool.query(query, params);
   return result.rows.map((c) => {
     // Reconstruct full RTSP URL with credentials for MediaMTX (it needs auth to pull from camera)
@@ -262,11 +270,15 @@ async function main() {
   }, SYNC_INTERVAL_SECONDS * 1000);
 }
 
-main().catch((err) => {
-  logger.error('worker.fatal', { error: err.message });
-  Sentry.captureException(err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    logger.error('worker.fatal', { error: err.message });
+    Sentry.captureException(err);
+    process.exit(1);
+  });
+}
+
+module.exports = { fetchCamerasFromDb, runFullSync, main };
 
 process.on('SIGTERM', async () => {
   logger.info('worker.sigterm');

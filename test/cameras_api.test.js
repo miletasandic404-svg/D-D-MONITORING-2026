@@ -22,11 +22,14 @@ const assert = require('node:assert/strict');
 // ── fake db ──────────────────────────────────────────────────────────────
 const db = require('../db/index');
 let queryCalls = [];
+let platformAdminCalls = [];
 let dbScript = null; // (text, params) => { rows, rowCount }
 
 function resetFakes() {
   queryCalls = [];
+  platformAdminCalls = [];
   dbScript = null;
+  authResponse = { userId: 'user-1', organizationId: 'org-1', role: 'org_admin' };
 }
 
 db.queryAsOrg = async (orgId, text, params) => {
@@ -35,13 +38,18 @@ db.queryAsOrg = async (orgId, text, params) => {
   return { rows: [], rowCount: 0 };
 };
 
+db.queryAsPlatformAdmin = async (text, params) => {
+  platformAdminCalls.push({ text, params });
+  if (dbScript) return dbScript(text, params);
+  return { rows: [], rowCount: 0 };
+};
+
 // ── fake auth ────────────────────────────────────────────────────────────
 const authModule = require('../lib/_auth');
-authModule.requireAuth = async () => ({
-  userId: 'user-1',
-  organizationId: 'org-1',
-  role: 'org_admin',
-});
+// Mutable response: handler je require-ovan posle ovoga i uhvatio je ovu
+// delegat funkciju, pa per-test promene idu kroz authResponse.
+let authResponse = { userId: 'user-1', organizationId: 'org-1', role: 'org_admin' };
+authModule.requireAuth = async () => authResponse;
 authModule.getAccessibleCameraIds = async () => null;
 
 // ── fake rate limit ──────────────────────────────────────────────────────
@@ -249,5 +257,74 @@ describe('api/cameras — Phase 2: no direct camera creation', () => {
       'encrypted_credentials must be a non-empty encrypted blob');
     assert.ok(!taskInsert.params[8].includes('secret'),
       'plaintext password must not appear in the stored credentials blob');
+  });
+
+  test('GET /api/cameras?path=setup-node (org user): health lookup is organization-scoped', async () => {
+    dbScript = (text) => {
+      if (text.includes('FROM media_nodes')) {
+        return { rows: [{ mediamtx_online: true, tunnel_online: false, health_json: null, health_checked_at: null }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({ method: 'GET', query: { path: 'setup-node' } });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+    // Health lookup mora ici kroz queryAsOrg (ne platform admin), sa
+    // eksplicitnim tenant filterom zasnovanim na auth.organizationId.
+    assert.equal(platformAdminCalls.length, 0, 'org user must never use queryAsPlatformAdmin');
+    const healthCall = queryCalls.find((c) => c.text.includes('FROM media_nodes'));
+    assert.ok(healthCall, 'health lookup ran');
+    assert.equal(healthCall.orgId, 'org-1');
+    assert.match(healthCall.text, /organization_id = \$1/);
+    assert.equal(healthCall.params[0], 'org-1', 'organization_id = $1 must be auth.organizationId');
+    assert.equal(healthCall.params[1], 'node-1', 'node id stays the second parameter');
+    assert.match(healthCall.text, /id = \$2/);
+  });
+
+  test('GET /api/cameras?path=setup-node (org user): node health je ogranicen na sopstvenu org', async () => {
+    // Cak i kada bi neki drugi node id dospeo u lookup, tenant filter
+    // (organization_id = $1) mora fail-closed: ne postoji nacin da se
+    // dobije health podatak node-a druge organizacije.
+    dbScript = (text) => {
+      if (text.includes('FROM media_nodes')) {
+        return { rows: [{ mediamtx_online: true, tunnel_online: false, health_json: null, health_checked_at: null }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({ method: 'GET', query: { path: 'setup-node' } });
+    const res = makeRes();
+    await handler(req, res);
+
+    const healthCall = queryCalls.find((c) => c.text.includes('FROM media_nodes'));
+    assert.ok(healthCall, 'health lookup ran');
+    assert.ok(healthCall.text.includes('organization_id = $1'));
+    assert.equal(healthCall.params[0], 'org-1');
+    // nodeId u query-ju NIJE ulazni parametar: node dolazi iskljucivo iz
+    // org-scoped pickera, a tenant filter je auth.organizationId.
+    assert.equal(req.query.nodeId, undefined);
+    assert.equal(healthCall.params[1], 'node-1', 'node id dolazi iz pickera, ne iz requesta');
+  });
+
+  test('GET /api/cameras?path=setup-node (platform_admin): globalni health behavior ostaje nepromenjen', async () => {
+    authResponse = { userId: 'admin-1', organizationId: 'org-1', userType: 'platform_admin' };
+    dbScript = (text) => {
+      if (text.includes('FROM media_nodes')) {
+        return { rows: [{ mediamtx_online: true, tunnel_online: false, health_json: null, health_checked_at: null }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({ method: 'GET', query: { path: 'setup-node' } });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(queryCalls.length, 0, 'platform_admin must not use queryAsOrg for health');
+    const healthCall = platformAdminCalls.find((c) => c.text.includes('FROM media_nodes'));
+    assert.ok(healthCall, 'platform health lookup ran through queryAsPlatformAdmin');
+    assert.doesNotMatch(healthCall.text, /organization_id/);
+    assert.deepEqual(healthCall.params, ['node-1']);
   });
 });

@@ -264,11 +264,23 @@ module.exports = async (req, res) => {
         return sendError(res, 409,
           'No online media node is available. Start the desktop media app on your local network (it runs camera discovery), then try again.');
       }
-      const healthRes = await db.queryAsPlatformAdmin(
-        `SELECT mediamtx_online, tunnel_online, health_json, health_checked_at
-         FROM media_nodes WHERE id = $1`,
-        [node.id],
-      );
+      // Defense-in-depth tenant scope: the node id already comes from the
+      // org-scoped picker above, but the health lookup must still be
+      // explicitly bounded to the caller's organization. platform_admin
+      // keeps the existing global lookup (media nodes are platform-managed).
+      const isPlatformAdmin = auth.userType === 'platform_admin';
+      const healthRes = isPlatformAdmin
+        ? await db.queryAsPlatformAdmin(
+            `SELECT mediamtx_online, tunnel_online, health_json, health_checked_at
+             FROM media_nodes WHERE id = $1`,
+            [node.id],
+          )
+        : await db.queryAsOrg(
+            auth.organizationId,
+            `SELECT mediamtx_online, tunnel_online, health_json, health_checked_at
+             FROM media_nodes WHERE id = $2 AND organization_id = $1`,
+            [auth.organizationId, node.id],
+          );
       const h = healthRes.rows[0] || null;
       let health = null;
       if (h) {
