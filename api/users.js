@@ -137,11 +137,11 @@ module.exports = async (req, res) => {
       try {
         const result = await db.queryAsOrg(
           auth.organizationId,
-          `SELECT id, email, display_name, user_type AS role, status, created_at
+          `SELECT id, email, name, user_type AS role, status, "createdAt" AS created_at
            FROM users
            WHERE organization_id = $1
              AND user_type = 'operator'
-           ORDER BY created_at DESC`,
+           ORDER BY "createdAt" DESC`,
           [auth.organizationId],
         );
 
