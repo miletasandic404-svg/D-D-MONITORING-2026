@@ -73,3 +73,114 @@ describe('pickMediaNodeForCamera', () => {
     assert.equal(lastQuery, null, 'must not query the DB at all without an organizationId');
   });
 });
+
+describe('media-nodes API heartbeat organization scoping', () => {
+  let mockReq, mockRes, mockDbQuery, mockDbQueryAsOrg;
+  let lastQueryText, lastQueryParams, lastOrgId;
+
+  beforeEach(() => {
+    lastQueryText = null;
+    lastQueryParams = null;
+    lastOrgId = null;
+
+    mockDbQuery = async (text, params) => {
+      lastQueryText = text;
+      lastQueryParams = params;
+      // Simulate node lookup
+      if (text.includes('SELECT') && text.includes('heartbeat_secret')) {
+        return { rows: [{ id: 'node-1', heartbeat_secret: 'secret123', organization_id: 'org-a' }] };
+      }
+      // Simulate UPDATE
+      return { rows: [] };
+    };
+
+    mockDbQueryAsOrg = async (orgId, text, params) => {
+      lastOrgId = orgId;
+      lastQueryText = text;
+      lastQueryParams = params;
+      return { rows: [] };
+    };
+
+    mockReq = {
+      method: '',
+      query: {},
+      body: {},
+      headers: {
+        'x-forwarded-for': '127.0.0.1',
+      },
+    };
+
+    mockRes = {
+      status: (code) => ({ json: (data) => ({ status: code, data }) }),
+      setHeader: () => mockRes,
+    };
+
+    // Mock rate limit to always allow
+    const rateLimitModule = require('../lib/_rate_limit');
+    rateLimitModule.rateLimit = async () => true;
+  });
+
+  test('heartbeat for node bound to organization uses queryAsOrg with correct org_id', async () => {
+    const db = require('../db/index');
+    const originalQuery = db.query;
+    const originalQueryAsOrg = db.queryAsOrg;
+
+    db.query = mockDbQuery;
+    db.queryAsOrg = mockDbQueryAsOrg;
+
+    // Load the API handler
+    const handler = require('../api/media-nodes');
+
+    mockReq.method = 'POST';
+    mockReq.query = { nodeId: 'node-1' };
+    mockReq.body = { heartbeat_secret: 'secret123', status: 'online' };
+
+    await handler(mockReq, mockRes);
+
+    // Restore
+    db.query = originalQuery;
+    db.queryAsOrg = originalQueryAsOrg;
+
+    assert.equal(lastOrgId, 'org-a', 'queryAsOrg should be called with node\'s organization_id');
+    assert.match(lastQueryText, /WHERE id = \$6 AND organization_id = \$7/,
+      'UPDATE must include organization_id in WHERE clause');
+    // Parameters: [status, region, mediamtx_online, tunnel_online, healthJson, nodeId, organization_id]
+    assert.equal(lastQueryParams[5], 'node-1');
+    assert.equal(lastQueryParams[6], 'org-a');
+  });
+
+  test('heartbeat for unbound node uses regular query (legacy compatibility)', async () => {
+    const db = require('../db/index');
+    const originalQuery = db.query;
+    const originalQueryAsOrg = db.queryAsOrg;
+
+    // Mock node without organization_id
+    mockDbQuery = async (text, params) => {
+      lastQueryText = text;
+      lastQueryParams = params;
+      if (text.includes('SELECT') && text.includes('heartbeat_secret')) {
+        return { rows: [{ id: 'node-2', heartbeat_secret: 'secret456', organization_id: null }] };
+      }
+      return { rows: [] };
+    };
+
+    db.query = mockDbQuery;
+    db.queryAsOrg = mockDbQueryAsOrg;
+
+    const handler = require('../api/media-nodes');
+
+    mockReq.method = 'POST';
+    mockReq.query = { nodeId: 'node-2' };
+    mockReq.body = { heartbeat_secret: 'secret456', status: 'online' };
+
+    await handler(mockReq, mockRes);
+
+    // Restore
+    db.query = originalQuery;
+    db.queryAsOrg = originalQueryAsOrg;
+
+    assert.equal(lastOrgId, null, 'queryAsOrg should NOT be called for unbound nodes');
+    assert.match(lastQueryText, /WHERE id = \$3/,
+      'UPDATE for unbound node uses regular query without organization_id filter');
+  });
+});

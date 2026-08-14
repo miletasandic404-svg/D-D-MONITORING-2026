@@ -105,7 +105,7 @@ async function handlePostHeartbeat(req, res) {
 
   try {
     const node = await db.query(
-      `SELECT id, heartbeat_secret FROM media_nodes WHERE id = $1`,
+      `SELECT id, heartbeat_secret, organization_id FROM media_nodes WHERE id = $1`,
       [nodeId],
     );
 
@@ -113,21 +113,43 @@ async function handlePostHeartbeat(req, res) {
       return sendError(res, 401, 'Invalid node ID or heartbeat secret');
     }
 
+    const nodeData = node.rows[0];
     const { mediamtx_online, tunnel_online, health } = req.body || {};
     const healthJson = health ? (typeof health === 'string' ? health : JSON.stringify(health)) : null;
-    await db.query(
-      `UPDATE media_nodes
-       SET last_heartbeat_at = now(), status = $1, region = COALESCE($2, region),
-           mediamtx_online = COALESCE($4, mediamtx_online),
-           tunnel_online = COALESCE($5, tunnel_online),
-           health_json = COALESCE($6::jsonb, health_json),
-           health_checked_at = CASE WHEN $6::jsonb IS NOT NULL THEN now() ELSE health_checked_at END
-       WHERE id = $3`,
-      [status || 'online', region, nodeId,
-       mediamtx_online === undefined ? null : !!mediamtx_online,
-       tunnel_online === undefined ? null : !!tunnel_online,
-       healthJson],
-    );
+
+    // Security: if node is bound to an organization, scope the UPDATE to that org
+    // This prevents cross-organization heartbeat manipulation
+    if (nodeData.organization_id) {
+      await db.queryAsOrg(
+        nodeData.organization_id,
+        `UPDATE media_nodes
+         SET last_heartbeat_at = now(), status = $1, region = COALESCE($2, region),
+             mediamtx_online = COALESCE($3, mediamtx_online),
+             tunnel_online = COALESCE($4, tunnel_online),
+             health_json = COALESCE($5::jsonb, health_json),
+             health_checked_at = CASE WHEN $5::jsonb IS NOT NULL THEN now() ELSE health_checked_at END
+         WHERE id = $6 AND organization_id = $7`,
+        [status || 'online', region,
+         mediamtx_online === undefined ? null : !!mediamtx_online,
+         tunnel_online === undefined ? null : !!tunnel_online,
+         healthJson, nodeId, nodeData.organization_id],
+      );
+    } else {
+      // Unbound node (legacy): use platform admin scope
+      await db.query(
+        `UPDATE media_nodes
+         SET last_heartbeat_at = now(), status = $1, region = COALESCE($2, region),
+             mediamtx_online = COALESCE($4, mediamtx_online),
+             tunnel_online = COALESCE($5, tunnel_online),
+             health_json = COALESCE($6::jsonb, health_json),
+             health_checked_at = CASE WHEN $6::jsonb IS NOT NULL THEN now() ELSE health_checked_at END
+         WHERE id = $3`,
+        [status || 'online', region, nodeId,
+         mediamtx_online === undefined ? null : !!mediamtx_online,
+         tunnel_online === undefined ? null : !!tunnel_online,
+         healthJson],
+      );
+    }
 
     return sendSuccess(res, { synced: true });
   } catch (err) {

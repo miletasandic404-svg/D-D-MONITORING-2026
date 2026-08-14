@@ -226,8 +226,7 @@ module.exports = async (req, res) => {
 
       return sendSuccess(res, {
         user: { id: created.user.id, email: created.user.email, user_type, status: 'invited' },
-        message: `User ${email} invited successfully!`,
-        tempPassword,
+        message: `User ${email} invited successfully! Password reset link sent to email.`,
       });
     } catch (err) {
       logger.error('Error inviting user', { error: err.message });
