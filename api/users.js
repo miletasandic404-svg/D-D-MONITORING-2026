@@ -115,52 +115,46 @@ module.exports = async (req, res) => {
   }
 
   // ===== OPERATORS ROUTES =====
+  //
+  // Security fix: the legacy `operators` table does not exist anywhere in
+  // the schema (no migration ever created it), so every request against it
+  // failed with HTTP 500 (`relation "operators" does not exist`). Had the
+  // table existed, the old unscoped SELECT would also have leaked operator
+  // records from every organization. The operator role actually lives on
+  // the `users` table (user_type = 'operator'), so this endpoint is now an
+  // org-scoped read over `users`: only operators of the caller's own
+  // organization are ever returned. Operator creation/deletion is handled
+  // by the org-scoped /api/users invite and update routes.
   if (path === 'operators') {
-    if (req.method === 'DELETE') {
-      const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
-      if (!auth) return;
-      const id = req.url.split('/').pop();
-      try {
-        const result = await db.query('DELETE FROM operators WHERE id = $1 RETURNING id', [id]);
-        if (result.rowCount === 0) return sendError(res, 404, 'Operator not found.');
-        return sendSuccess(res, { deleted: id });
-      } catch (err) {
-        return sendError(res, 500, err.message);
-      }
-    }
     if (req.method === 'GET') {
       const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
       if (!auth) return;
+
+      if (!auth.organizationId) {
+        return sendError(res, 403, 'No organization associated with your account');
+      }
+
       try {
-        const result = await db.query(
-          'SELECT id, email, name, role, created_at, created_by FROM operators ORDER BY created_at DESC'
+        const result = await db.queryAsOrg(
+          auth.organizationId,
+          `SELECT id, email, name, user_type AS role, status, "createdAt" AS created_at
+           FROM users
+           WHERE organization_id = $1
+             AND user_type = 'operator'
+           ORDER BY "createdAt" DESC`,
+          [auth.organizationId],
         );
+
         return sendSuccess(res, { operators: result.rows });
       } catch (err) {
-        return sendError(res, 500, err.message);
-      }
-    }
-    if (req.method === 'POST') {
-      const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
-      if (!auth) return;
-      try {
-        const { email, name, role } = req.body || {};
-        if (!email || !name) return sendError(res, 400, 'email and name are required');
-        const result = await db.query(
-          'INSERT INTO operators (email, name, role, created_by) VALUES ($1, $2, $3, $4) RETURNING *',
-          [email.toLowerCase().trim(), name.trim(), role || 'operator', auth.userId]
-        );
-        return sendSuccess(res, { operator: result.rows[0] }, 201);
-      } catch (err) {
-        if (err.code === '23505') return sendError(res, 409, 'An operator with this email already exists.');
-        logger.error('POST /api/operators error', { error: err.message });
+        logger.error('GET /api/operators error', { error: err.message });
         Sentry.captureException(err);
         return sendError(res, 500, err.message);
       }
     }
+
     return sendError(res, 405, 'Method not allowed.');
   }
-
   // GET - List all users
   if (req.method === 'GET') {
     const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
