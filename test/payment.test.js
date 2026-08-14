@@ -83,9 +83,9 @@ const {
 
 function makePayment(overrides = {}) {
   return {
-    id: 'pay-1',
+    id: '123e4567-e89b-12d3-a456-426614174000',
     user_id: null,
-    organization_id: 'org-1',
+    organization_id: '123e4567-e89b-12d3-a456-426614174000',
     provider: 'stripe',
     provider_payment_id: 'pi_test_123',
     provider_order_id: null,
@@ -221,11 +221,12 @@ describe('activatePaymentForOrganization — idempotency', () => {
   beforeEach(() => resetFakes());
 
   test('already-active payment with same org returns immediately without DB writes', async () => {
-    const orgId = 'org-1';
+    const orgId = '123e4567-e89b-12d3-a456-426614174000';
     const payment = makePayment({
       status: 'paid',
       activation_status: 'active',
       activated_organization_id: orgId,
+      organization_id: orgId,
       activated_at: new Date().toISOString(),
     });
 
@@ -242,21 +243,22 @@ describe('activatePaymentForOrganization — idempotency', () => {
     assert.strictEqual(transactionCalls.length, 0, 'transaction must not be entered for already-active payment');
   });
 
-  test('attempting to activate for a different org throws 409', async () => {
+  test('attempting to activate for a different org throws 403', async () => {
     const payment = makePayment({
       status: 'paid',
       activation_status: 'active',
-      activated_organization_id: 'org-A',
+      activated_organization_id: '123e4567-e89b-12d3-a456-426614174000',
+      organization_id: '123e4567-e89b-12d3-a456-426614174000',
       activated_at: new Date().toISOString(),
     });
 
     fakeQueryFn = async () => ({ rows: [payment] });
 
     await assert.rejects(
-      () => activatePaymentForOrganization({ paymentId: payment.id, organizationId: 'org-B' }),
+      () => activatePaymentForOrganization({ paymentId: payment.id, organizationId: '123e4567-e89b-12d3-a456-426614174001' }),
       (err) => {
-        assert.strictEqual(err.statusCode, 409);
-        assert.ok(/already activated another organization/i.test(err.message));
+        assert.strictEqual(err.statusCode, 403);
+        assert.ok(/different organization/i.test(err.message));
         return true;
       },
     );
@@ -269,14 +271,15 @@ describe('activatePaymentForOrganization — race condition guard (FOR UPDATE)',
   beforeEach(() => resetFakes());
 
   test('second concurrent caller that finds locked record already active returns without extra writes', async () => {
-    const orgId = 'org-1';
+    const orgId = '123e4567-e89b-12d3-a456-426614174000';
     // Pre-activation state from getPaymentById (outer check).
-    const pendingPayment = makePayment({ status: 'paid', activation_status: 'pending' });
+    const pendingPayment = makePayment({ status: 'paid', activation_status: 'pending', organization_id: orgId });
     // Locked state returned inside the transaction (simulates winner already committed).
     const activePayment = makePayment({
       status: 'paid',
       activation_status: 'active',
       activated_organization_id: orgId,
+      organization_id: orgId,
       activated_at: new Date().toISOString(),
     });
 
@@ -403,14 +406,186 @@ describe('handleRefundedActivation', () => {
   });
 });
 
-// ── 4. Failed activation audit events ────────────────────────────────────────
+// ── 4. Payment ownership validation ────────────────────────────────────────────
+
+describe('activatePaymentForOrganization — payment ownership validation', () => {
+  beforeEach(() => resetFakes());
+
+  test('same-org payment activation succeeds', async () => {
+    const orgId = '123e4567-e89b-12d3-a456-426614174000';
+    const payment = makePayment({
+      status: 'paid',
+      activation_status: 'pending',
+      organization_id: orgId,
+    });
+
+    let orgUpdated = false;
+
+    fakeQueryFn = async (text) => {
+      const t = text.trim().toUpperCase();
+      if (t.startsWith('SELECT')) return { rows: [payment] };
+      if (t.includes('UPDATE ORGANIZATIONS')) {
+        orgUpdated = true;
+        return { rows: [] };
+      }
+      if (t.startsWith('UPDATE')) {
+        return { rows: [{ ...payment, activation_status: 'active', activated_organization_id: orgId }] };
+      }
+      return { rows: [] };
+    };
+
+    const result = await activatePaymentForOrganization({
+      paymentId: payment.id,
+      organizationId: orgId,
+    });
+
+    assert.strictEqual(result.activation_status, 'active');
+    assert.ok(orgUpdated, 'organization should be updated for same-org payment');
+  });
+
+  test('foreign-org payment activation is rejected with 403', async () => {
+    const payment = makePayment({
+      status: 'paid',
+      activation_status: 'pending',
+      organization_id: '123e4567-e89b-12d3-a456-426614174000',
+    });
+
+    fakeQueryFn = async () => ({ rows: [payment] });
+
+    await assert.rejects(
+      () => activatePaymentForOrganization({ paymentId: payment.id, organizationId: '123e4567-e89b-12d3-a456-426614174001' }),
+      (err) => {
+        assert.strictEqual(err.statusCode, 403);
+        assert.ok(/different organization/i.test(err.message));
+        return true;
+      },
+    );
+  });
+
+  test('payment with null organization_id can be activated by any org', async () => {
+    const orgId = '123e4567-e89b-12d3-a456-426614174000';
+    const payment = makePayment({
+      status: 'paid',
+      activation_status: 'pending',
+      organization_id: null, // unassigned payment
+    });
+
+    let orgUpdated = false;
+
+    fakeQueryFn = async (text) => {
+      const t = text.trim().toUpperCase();
+      if (t.startsWith('SELECT')) return { rows: [payment] };
+      if (t.includes('UPDATE ORGANIZATIONS')) {
+        orgUpdated = true;
+        return { rows: [] };
+      }
+      if (t.startsWith('UPDATE')) {
+        return { rows: [{ ...payment, activation_status: 'active', activated_organization_id: orgId }] };
+      }
+      return { rows: [] };
+    };
+
+    const result = await activatePaymentForOrganization({
+      paymentId: payment.id,
+      organizationId: orgId,
+    });
+
+    assert.strictEqual(result.activation_status, 'active');
+    assert.ok(orgUpdated, 'unassigned payment should be activatable');
+  });
+
+  test('already-activated payment remains protected from foreign org', async () => {
+    const payment = makePayment({
+      status: 'paid',
+      activation_status: 'active',
+      activated_organization_id: '123e4567-e89b-12d3-a456-426614174000',
+      organization_id: '123e4567-e89b-12d3-a456-426614174000',
+    });
+
+    fakeQueryFn = async () => ({ rows: [payment] });
+
+    await assert.rejects(
+      () => activatePaymentForOrganization({ paymentId: payment.id, organizationId: '123e4567-e89b-12d3-a456-426614174001' }),
+      (err) => {
+        assert.strictEqual(err.statusCode, 403);
+        assert.ok(/different organization/i.test(err.message));
+        return true;
+      },
+    );
+  });
+});
+
+describe('ensureValidOnboardingPayment — payment ownership validation', () => {
+  beforeEach(() => resetFakes());
+
+  const { ensureValidOnboardingPayment } = require('../lib/payment_service');
+
+  test('same-org payment validation succeeds', async () => {
+    const orgId = '123e4567-e89b-12d3-a456-426614174000';
+    const payment = makePayment({
+      status: 'paid',
+      organization_id: orgId,
+      plan_id: 'starter',
+    });
+
+    fakeQueryFn = async () => ({ rows: [payment] });
+
+    const result = await ensureValidOnboardingPayment({
+      paymentId: payment.id,
+      organizationId: orgId,
+    });
+
+    assert.strictEqual(result.planId, 'starter');
+    assert.ok(result.payment);
+  });
+
+  test('foreign-org payment validation is rejected with 403', async () => {
+    const payment = makePayment({
+      status: 'paid',
+      organization_id: '123e4567-e89b-12d3-a456-426614174000',
+      plan_id: 'starter',
+    });
+
+    fakeQueryFn = async () => ({ rows: [payment] });
+
+    await assert.rejects(
+      () => ensureValidOnboardingPayment({ paymentId: payment.id, organizationId: '123e4567-e89b-12d3-a456-426614174001' }),
+      (err) => {
+        assert.strictEqual(err.statusCode, 403);
+        assert.ok(/different organization/i.test(err.message));
+        return true;
+      },
+    );
+  });
+
+  test('payment with null organization_id can be validated by any org', async () => {
+    const orgId = '123e4567-e89b-12d3-a456-426614174000';
+    const payment = makePayment({
+      status: 'paid',
+      organization_id: null,
+      plan_id: 'starter',
+    });
+
+    fakeQueryFn = async () => ({ rows: [payment] });
+
+    const result = await ensureValidOnboardingPayment({
+      paymentId: payment.id,
+      organizationId: orgId,
+    });
+
+    assert.strictEqual(result.planId, 'starter');
+    assert.ok(result.payment);
+  });
+});
+
+// ── 5. Failed activation audit events ────────────────────────────────────────
 
 describe('activatePaymentForOrganization — failed activation audit event', () => {
   beforeEach(() => resetFakes());
 
   test('emits org.plan_activation_failed audit event when the activation transaction fails', async () => {
-    const orgId = 'org-1';
-    const payment = makePayment({ status: 'paid', activation_status: 'pending' });
+    const orgId = '123e4567-e89b-12d3-a456-426614174000';
+    const payment = makePayment({ status: 'paid', activation_status: 'pending', organization_id: orgId });
 
     let auditInserted = false;
     let auditAction = null;
@@ -449,8 +624,8 @@ describe('activatePaymentForOrganization — failed activation audit event', () 
   });
 
   test('emits org.plan_activation_failed when plan is unsupported', async () => {
-    const orgId = 'org-1';
-    const payment = makePayment({ status: 'paid', activation_status: 'pending', plan_id: 'unknown_plan' });
+    const orgId = '123e4567-e89b-12d3-a456-426614174000';
+    const payment = makePayment({ status: 'paid', activation_status: 'pending', plan_id: 'unknown_plan', organization_id: orgId });
 
     let auditInserted = false;
     let auditAction = null;
