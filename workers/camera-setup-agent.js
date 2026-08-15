@@ -53,7 +53,7 @@ const os = require('os');
 const crypto = require('crypto');
 const { discoverCamera, scanSubnet } = require('../lib/_onvif_client');
 const { probeRtspUrl, embedCredentials } = require('../lib/_rtsp_probe');
-const { rtspCommonConnector } = require('../lib/_camera_connectors');
+const { rtspCommonConnector, connectors, getConnector } = require('../lib/_camera_connectors');
 const { addOrUpdateCameraPath, deleteCameraPath, getPathStatus } = require('../lib/_mediamtx_client');
 const { reportNodeHealth, checkTunnel, HEARTBEAT_LOOP_MS } = require('../lib/_node_health');
 const { encrypt, decrypt, extractCredentialsFromUrl, stripCredentialsFromUrl } = require('../lib/_crypto');
@@ -404,47 +404,39 @@ async function runProbe(task) {
   let onvif_supported = false;
   let streams = [];
 
-  // 1) ONVIF first — full discovery (manufacturer/model/streams). Each stream
-  //    is then verified with a real RTSP handshake (auth + availability).
-  try {
-    const cam = await discoverCamera(ip, port, creds.username, creds.password);
-    onvif_supported = true;
-    manufacturer = cam.manufacturer || 'Unknown';
-    model = cam.model || 'Unknown';
-    firmware_version = cam.firmware_version || null;
-    const candidates = (cam.rtsp_urls || []).map((url, i) => ({
-      url: stripCredentialsFromUrl(url),
-      label: streamLabel(url, i),
-    }));
-    for (const s of candidates) {
-      const r = await probeRtspUrl(s.url, {
-        username: creds.username || undefined,
-        password: creds.password || undefined,
-        timeoutMs: 2500,
-      });
-      streams.push({
-        ...s,
-        reachable: r.reachable,
-        authenticated: r.stream_available,
-        stream_available: r.stream_available,
-        status: r.status,
-        error: r.error || null,
-        host: r.host,
-        port: r.port,
-      });
-    }
-  } catch (err) {
-    logger.warn('probe.onvif_failed_fallback', { task_id: task.id, ip, error: err.message });
-  }
+  // 1) Try all registered connectors in order: ONVIF → Xiongmai DVRIP → RTSP-common
+  //    Each connector is an isolated vendor path. Stop when one succeeds.
+  for (const connector of connectors) {
+    try {
+      logTask('probe.try_connector', task, { connector_id: connector.id, connector_name: connector.name });
 
-  // 2) Fallback for cameras WITHOUT ONVIF — well-known vendor RTSP paths,
-  //    each verified with a real handshake. ONVIF stays primary.
-  if (streams.length === 0) {
-    const fallback = await rtspCommonConnector(ip, {
-      username: creds.username,
-      password: creds.password,
-    });
-    streams = fallback.streams;
+      const result = await connector.discover(ip, {
+        username: creds.username,
+        password: creds.password,
+        port: connector.id === 'onvif' ? port : undefined,
+      });
+
+      // Merge results
+      if (result.onvif_supported) {
+        onvif_supported = true;
+        manufacturer = result.manufacturer || manufacturer;
+        model = result.model || model;
+        firmware_version = result.firmware_version || firmware_version;
+      }
+
+      if (result.dvrip_supported) {
+        manufacturer = result.manufacturer || manufacturer;
+        model = result.model || model;
+      }
+
+      if (result.streams && result.streams.length > 0) {
+        streams = result.streams;
+        logTask('probe.connector_success', task, { connector_id: connector.id, streams: streams.length });
+        break; // Stop at first successful connector
+      }
+    } catch (err) {
+      logTask('probe.connector_failed', task, { connector_id: connector.id, error: err.message });
+    }
   }
 
   const needCredentials = streams.length === 0 ||
