@@ -140,7 +140,8 @@ export default function Dashboard() {
   const [wizardTask, setWizardTask] = useState(null);       // { status, error, result }
   const [wizardTaskId, setWizardTaskId] = useState(null);
   const [wizardError, setWizardError] = useState('');
-  const [wizardPreview, setWizardPreview] = useState(null); // { cameraId, name, hlsUrl }
+   const [wizardPreview, setWizardPreview] = useState(null); // { cameraId, name, hlsUrl }
+  const [wizardDvripDetected, setWizardDvripDetected] = useState(false); // DVRIP-only camera found during probe (no RTSP streams)
   const wizardPreviewRef = useRef(null);
 
   // Audio alarm incident count tracker
@@ -166,10 +167,10 @@ export default function Dashboard() {
     setWizardPassword('');
     setWizardTask(null);
     setWizardTaskId(null);
-    setWizardError('');
-    setWizardPreview(null);
-    setNewCamera({ id: '', name: '', rtsp_url: '', location: '', lat: '', lng: '', enabled: true, resolution: '1920x1080', fps: 30, codec: 'H264' });
-  };
+     setWizardError('');
+     setWizardPreview(null);
+     setWizardDvripDetected(false);
+   };
   const openWizard = () => {
     setWizardOpen(true);
     resetWizardState();
@@ -300,6 +301,14 @@ export default function Dashboard() {
       if (t.status === 'failed') { setWizardError(t.error || 'Connection test failed'); return; }
       const streams = t.result?.streams || [];
       if (streams.length === 0) {
+        // DVRIP-only Xiongmai camera: DVRIP auth succeeded but it has no RTSP
+        // streams by design. Offer a dedicated "Register DVRIP Camera" path
+        // instead of the generic "no streams found" dead-end.
+        if (t.result?.dvrip_supported) {
+          setWizardDvripDetected(true);
+          setWizardError('');
+          return;
+        }
         if (t.result?.need_credentials) {
           setWizardError('No streams found without valid credentials — enter the camera username/password above and try again.');
           setWizardStep(1);
@@ -407,6 +416,64 @@ export default function Dashboard() {
   const saveWizardCamera = async () => {
     await refreshWizardCameras();
     closeWizard(true);
+  };
+
+  // Register a DVRIP-only (Xiongmai) camera: authenticates over the real DVRIP
+  // protocol on the media node and stores a cameras row with
+  // connection_type='dvrip' + ip/port so xiongmai-stream-worker bridges it.
+  // No RTSP URL is required (unlike the RTSP/ONVIF preview path).
+  const registerDvripCamera = async () => {
+    const cam = wizardSelectedCam;
+    const ip = (cam?.ip || wizardManualIp || '').trim();
+    if (!ip) { alert('Enter the camera IP address or select one from the scan results.'); return; }
+    setWizardSaving(true);
+    setWizardError('');
+    setWizardDvripDetected(false);
+    setWizardPreview(null);
+    setWizardPreviewReady(false);
+    setWizardTokenOk(false);
+    setWizardStep(1);
+    try {
+      const res = await api.post('/camera-setup', {
+        mode: 'dvrip',
+        ip,
+        onvif_port: 34567,
+        username: wizardUsername.trim() || null,
+        password: wizardPassword.trim() || null,
+        camera_name: newCamera.name.trim() || null,
+      });
+      const taskId = res.data?.taskId;
+      if (!taskId) throw new Error('No task id returned');
+      setWizardTaskId(taskId);
+      const t = await pollWizardTask(taskId);
+      if (!t) { setWizardError('DVRIP registration timed out. Is the desktop media app running?'); setWizardDvripDetected(true); return; }
+      if (t.status === 'failed') { setWizardError(t.error || 'DVRIP registration failed'); setWizardDvripDetected(true); return; }
+      const cameraId = t.camera_id || t.result?.camera_id;
+      const base = t.node_hls_base_url || wizardNode?.public_hls_url || hlsBaseUrl;
+      if (base) {
+        const hlsUrl = `${base.replace(/\/$/, '')}/${cameraId}/index.m3u8`;
+        setWizardPreview({ cameraId, name: (newCamera.name.trim() || `DVRIP ${ip}`), hlsUrl });
+        try {
+          const vr = await api.post('/camera-views', { camera_id: cameraId });
+          const token = vr.data?.streamToken;
+          if (token) {
+            const tokUrl = `${hlsUrl}?token=${encodeURIComponent(token)}`;
+            setWizardPreview((p) => ({ ...p, hlsUrl: tokUrl }));
+            checkWizardHlsToken(tokUrl);
+          }
+        } catch (err) {
+          setWizardError(`Camera registered, but preview token failed: ${err?.response?.data?.error || err.message}`);
+        }
+      }
+      setWizardStep(3);
+    } catch (err) {
+      const msg = err?.response?.data?.error || err.message || 'Unknown error';
+      setWizardError(msg);
+      if (err?.response?.status === 409) alert(msg);
+      setWizardDvripDetected(true);
+    } finally {
+      setWizardSaving(false);
+    }
   };
 
   // Start the Cloudflare tunnel on the node (agent spawns cloudflared).
@@ -1029,6 +1096,14 @@ export default function Dashboard() {
                   </button>
                   <button className="ghost-button" type="button" onClick={startWizardScan} disabled={wizardScanning}>Rescan network</button>
                 </div>
+                {wizardDvripDetected && (
+                  <div style={{ marginTop: 8, padding: '10px 12px', border: '1px solid var(--color-warn, #f59e0b)', borderRadius: 8, background: 'rgba(245,158,11,.12)' }}>
+                    <p style={{ margin: '0 0 8px', fontSize: 13, color: 'var(--color-warn, #f59e0b)' }}>📷 Xiongmai DVRIP camera detected. This camera uses the proprietary DVRIP protocol (port 34567) and does not expose RTSP/ONVIF streams, so it can't be previewed the same way — but the local stream worker bridges it into MediaMTX automatically.</p>
+                    <button className="primary-button" type="button" onClick={registerDvripCamera} disabled={wizardSaving || !wizardNode}>
+                      {wizardSaving ? 'Registering…' : 'Register DVRIP Camera'}
+                    </button>
+                  </div>
+                )}
               </>
             )}
 

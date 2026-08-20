@@ -60,7 +60,7 @@ module.exports = async (req, res) => {
     if (!auth) return;
 
     const setupSchema = z.object({
-      mode: z.enum(['scan', 'onvif', 'manual', 'probe', 'preview', 'cleanup', 'start_tunnel']),
+      mode: z.enum(['scan', 'onvif', 'manual', 'probe', 'preview', 'cleanup', 'start_tunnel', 'dvrip']),
       ip: z.string().max(64).optional().nullable(),
       onvif_port: z.number().int().min(1).max(65535).optional().default(80),
       username: z.string().max(255).optional().nullable(),
@@ -386,7 +386,8 @@ module.exports = async (req, res) => {
 
       const baseSelect = `
         SELECT c.id, c.name, c.rtsp_url, c.location, c.lat, c.lng, c.enabled,
-               c.resolution, c.fps, c.codec, n.public_hls_url AS hls_base_url
+               c.resolution, c.fps, c.codec, c.connection_type, c.ip, c.port,
+               n.public_hls_url AS hls_base_url
         FROM cameras c
         LEFT JOIN media_nodes n ON n.id = c.media_node_id`;
 

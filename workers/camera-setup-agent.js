@@ -54,6 +54,7 @@ const crypto = require('crypto');
 const { discoverCamera, scanSubnet } = require('../lib/_onvif_client');
 const { probeRtspUrl, embedCredentials } = require('../lib/_rtsp_probe');
 const { rtspCommonConnector, connectors, getConnector } = require('../lib/_camera_connectors');
+const { DVRIP_PORT } = require('../lib/_xiongmai_dvrip');
 const { addOrUpdateCameraPath, deleteCameraPath, getPathStatus } = require('../lib/_mediamtx_client');
 const { reportNodeHealth, checkTunnel, HEARTBEAT_LOOP_MS } = require('../lib/_node_health');
 const { encrypt, decrypt, extractCredentialsFromUrl, stripCredentialsFromUrl } = require('../lib/_crypto');
@@ -284,6 +285,51 @@ async function insertCamera(task, rtspUrl, manufacturer, model) {
   return result.rows[0] ? result.rows[0].id : cameraId;
 }
 
+/**
+ * Register a DVRIP-only camera (e.g. Xiongmai/XMEye on port 34567) into the
+ * cameras table so the local xiongmai-stream-worker.js picks it up.
+ *
+ * Unlike insertCamera() — which is RTSP-centric and never touches
+ * connection_type/ip/port — this writes the fields the stream worker filters on:
+ *   connection_type='dvrip', ip, port, enabled=true, media_node_id,
+ *   organization_id (task-scoped, via queryAsTaskOrg for FORCE RLS), plus the
+ *   DVRIP credentials (rtsp_username / rtsp_password_encrypted, same columns
+ *   the stream worker reads as c.rtsp_username / c.rtsp_password_encrypted).
+ *
+ * It does NOT require an RTSP URL and does NOT register a MediaMTX path here —
+ * the stream worker generates the MediaMTX path itself once it starts the
+ * camera (see xiongmai-stream-worker.js#ensureMtxPublishPath).
+ * Backward compatible: existing RTSP/ONVIF inserts are untouched.
+ */
+async function insertDvripCamera(task, ip, port, creds) {
+  const cameraId = makeCameraId();
+  const name = (task.camera_name || '').trim()
+    || `DVRIP Camera ${ip || 'LAN'}`;
+  const encPassword = creds.password ? encrypt(creds.password) : null;
+
+  let result;
+  try {
+    result = await queryAsTaskOrg(task,
+      `INSERT INTO cameras (id, name, rtsp_url, enabled, organization_id, site_id, media_node_id,
+           rtsp_username, rtsp_password_encrypted, connection_type, ip, port)
+        VALUES ($1, $2, NULL, true, $3,
+          COALESCE($4, (SELECT id FROM sites WHERE organization_id = $3 ORDER BY created_at ASC LIMIT 1)),
+          $5, $6, $7, 'dvrip', $8, $9)
+        ON CONFLICT (id) DO NOTHING
+        RETURNING id`,
+      [cameraId, name, task.organization_id, task.site_id || null, MEDIA_NODE_ID,
+       creds.username || null, encPassword, ip, port],
+    );
+  } catch (err) {
+    // Unique violation on the generated id (extremely unlikely — random id).
+    if (err.code === '23505') {
+      throw new Error('A camera with this id already exists in this organization');
+    }
+    throw err;
+  }
+  return result.rows[0] ? result.rows[0].id : cameraId;
+}
+
 async function registerMediaPath(cameraId, rtspUrl) {
   try {
     await addOrUpdateCameraPath(cameraId, rtspUrl);
@@ -398,10 +444,11 @@ async function runProbe(task) {
   logTask('probe.start', task, { ip, port });
   const creds = getTaskCredentials(task);
 
-  let manufacturer = 'Unknown';
+   let manufacturer = 'Unknown';
   let model = 'Unknown';
   let firmware_version = null;
   let onvif_supported = false;
+  let dvrip_supported = false;
   let streams = [];
 
   // 1) Try all registered connectors in order: ONVIF → Xiongmai DVRIP → RTSP-common
@@ -425,6 +472,7 @@ async function runProbe(task) {
       }
 
       if (result.dvrip_supported) {
+        dvrip_supported = true;
         manufacturer = result.manufacturer || manufacturer;
         model = result.model || model;
       }
@@ -448,6 +496,7 @@ async function runProbe(task) {
     model,
     firmware_version,
     onvif_supported,
+    dvrip_supported,
     rtsp_reachable: streams.some((s) => s.reachable),
     streams,
     need_credentials: needCredentials,
@@ -476,6 +525,71 @@ async function runPreview(task) {
     result: JSON.stringify({ camera_id: cameraId, rtsp_url: stripCredentialsFromUrl(task.rtsp_url), rtsp_ok: true }),
   });
   logTask('task.done', task, { camera_id: cameraId });
+}
+
+/**
+ * DVRIP mode — register a proprietary DVRIP/Xiongmai camera (e.g. an X2C-WQ
+ * on TCP port 34567) that does NOT speak RTSP/ONVIF.
+ *
+ * Flow:
+ *   1. Authenticate over the real DVRIP protocol (XiongmaiDvripAdapter via the
+ *      registered 'xiongmai-dvrip' connector — reuses existing, validated POC
+ *      auth code; no RTSP handshake required).
+ *   2. On success, insert a cameras row with connection_type='dvrip', ip/port
+ *      so the local xiongmai-stream-worker.js discovers and bridges it.
+ *
+ * This path is intentionally separate from runOnvif/runManual/runPreview
+ * (which are RTSP-only and call verifyRtsp). DVRIP cameras legitimately have
+ * no RTSP streams, so streams.length===0 here is a SUCCESS, not a failure.
+ */
+async function runDvrip(task) {
+  const ip = task.ip;
+  if (!ip) throw new Error('Camera IP is required for DVRIP mode');
+
+  // SSRF guard (same stance as onvif/manual: LAN cameras are the product).
+  await assertSafeTarget(ip, { allowPrivate: true });
+
+  const port = Number(task.onvif_port) || DVRIP_PORT;
+  const creds = getTaskCredentials(task);
+  logTask('dvrip.start', task, { ip, port });
+
+  // Reuse the registered Xiongmai connector: it probes (TCP 34567) + authenticates
+  // (Sofia-hash login) and returns { dvrip_supported, manufacturer, model, streams:[] }.
+  // A thrown error here == auth/connection failure -> task marked failed.
+  const connector = getConnector('xiongmai-dvrip');
+  if (!connector) throw new Error('DVRIP connector is not registered on this node');
+
+  const cam = await connector.discover(ip, {
+    username: creds.username,
+    password: creds.password,
+    port,
+  });
+
+  if (!cam || !cam.dvrip_supported) {
+    throw new Error(`DVRIP not supported or authentication failed on ${ip}:${port} (verify IP, port 34567 and credentials)`);
+  }
+
+  if (!await verifyTaskOwnership(task.id)) {
+    throw new Error('Task was reclaimed by another node — aborting to prevent duplicate registration');
+  }
+
+  const cameraId = await insertDvripCamera(task, ip, port, creds);
+  // Deliberately NO registerMediaPath here: DVRIP cameras have no RTSP URL.
+  // The stream worker (xiongmai-stream-worker.js) creates the MediaMTX publish
+  // path itself once it starts this camera (lazy-on-404).
+  await setTaskStatus(task.id, 'done', {
+    camera_id: cameraId,
+    result: JSON.stringify({
+      camera_id: cameraId,
+      connection_type: 'dvrip',
+      ip,
+      port,
+      manufacturer: cam.manufacturer || 'Unknown',
+      model: cam.model || 'Unknown',
+      rtsp_ok: false,
+    }),
+  });
+  logTask('task.done', { ...task, camera_id: cameraId }, { camera_id: cameraId });
 }
 
 /**
@@ -556,6 +670,7 @@ async function processTask(task) {
     if (task.mode === 'preview') return await runPreview(task);
     if (task.mode === 'cleanup') return await runCleanup(task);
     if (task.mode === 'start_tunnel') return await runStartTunnel(task);
+    if (task.mode === 'dvrip') return await runDvrip(task);
     throw new Error(`Unknown mode: ${task.mode}`);
   } catch (err) {
     logTask('task.failed', task, { error: err.message });
