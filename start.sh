@@ -40,6 +40,10 @@ echo "[start.sh] Pokrecem camera-sync-worker..."
 node /app/workers/camera-sync-worker.js &
 WORKER_PID=$!
 
+echo "[start.sh] Pokrecem xiongmai-stream-worker..."
+node /app/workers/xiongmai-stream-worker.js &
+XIONGMAI_PID=$!
+
 # Heartbeat worker -- pokrece se samo ako su sve tri neophodne
 # env varijable postavljene (konfigurisu se kao Fly.io secrets:
 #   fly secrets set API_BASE_URL="https://www.dnd-monitoring.com/api" -a dnd-media-server
@@ -58,10 +62,10 @@ else
   echo "[start.sh] API_BASE_URL/MEDIA_NODE_ID/MEDIA_NODE_HEARTBEAT_SECRET nisu postavljeni -- heartbeat worker se preskace."
 fi
 
-echo "[start.sh] Procesi pokrenuti (mediamtx=$MEDIAMTX_PID, worker=$WORKER_PID${HEARTBEAT_PID:+, heartbeat=$HEARTBEAT_PID}). Cekam..."
+echo "[start.sh] Procesi pokrenuti (mediamtx=$MEDIAMTX_PID, worker=$WORKER_PID, xiongmai=$XIONGMAI_PID${HEARTBEAT_PID:+, heartbeat=$HEARTBEAT_PID}). Cekam..."
 
 # Skupi aktivne PID-ove u niz da wait -n i kill budu konzistentni.
-PIDS=("$MEDIAMTX_PID" "$WORKER_PID")
+PIDS=("$MEDIAMTX_PID" "$WORKER_PID" "$XIONGMAI_PID")
 if [ -n "$HEARTBEAT_PID" ]; then
   PIDS+=("$HEARTBEAT_PID")
 fi

@@ -21,6 +21,10 @@ node_modules/
 .vscode/
 .claude/
 *.log
+*.key
+*.crt
+*.pem
+.kilo/
 
 # Docs not needed inside the image
 *.md

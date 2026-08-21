@@ -24,9 +24,8 @@ COPY --from=mediamtx-src /mediamtx /usr/local/bin/mediamtx
 WORKDIR /app
 COPY --from=worker-deps /worker/node_modules ./node_modules
 COPY media-server/package.json ./package.json
-COPY workers/camera-sync-worker.js ./workers/camera-sync-worker.js
-COPY workers/media-node-heartbeat.js ./workers/media-node-heartbeat.js
-COPY lib/_mediamtx_client.js ./lib/_mediamtx_client.js
+COPY workers/ ./workers/
+COPY lib/ ./lib/
 
 # --- MediaMTX konfiguracija ---
 COPY media-server/mediamtx.yml /mediamtx.yml
