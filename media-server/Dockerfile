@@ -12,7 +12,7 @@ RUN npm install --production --omit=dev
 FROM bluenviron/mediamtx:latest AS mediamtx-src
 
 FROM node:20-alpine
-RUN apk add --no-cache bash curl ca-certificates
+RUN apk add --no-cache bash curl ca-certificates ffmpeg
 
 # --- MediaMTX binarni fajl (TLS root sertifikati dolaze iz Alpine-ovog
 #     sopstvenog ca-certificates paketa iznad -- zvanicni
