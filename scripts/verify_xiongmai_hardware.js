@@ -28,16 +28,17 @@ const crypto = require('crypto');
 
 // DVRIP constants
 const DVRIP_PORT = 34567;
-const DVRIP_TIMEOUT_MS = 8000;
+const DVRIP_TIMEOUT_MS = 5000;
 const SOFIA_MAGIC = 'Sofia';
-const MSG_LOGIN = 0x1000;
-const MSG_LOGIN_RESPONSE = 0x1001;
-const MSG_KEEPALIVE = 0x1006;
-const MSG_KEEPALIVE_RESPONSE = 0x1007;
+const MSG_LOGIN = 1000;  // V5.00 uses decimal 1000, not 0x1000
+const MSG_LOGIN_RESPONSE = 1001;
+const MSG_KEEPALIVE = 1006;
+const MSG_KEEPALIVE_RESPONSE = 1007;
+const REQUEST_TYPE = 0x00;  // V5.00 request type
 
-// Get credentials from command line or use defaults
-const username = process.argv[2] || 'admin';
-const password = process.argv[3] || 'admin';
+// Get credentials from environment variables ONLY (match working script exactly)
+const username = process.env.CAM_USER || 'admin';
+const password = process.env.CAM_PASS || '';
 
 console.log('='.repeat(60));
 console.log('XIONGMAI DVRIP READ-ONLY AUTHENTICATION VERIFICATION');
@@ -47,70 +48,83 @@ console.log(`Username: ${username}`);
 console.log(`Password: ${'*'.repeat(password.length)}`);
 console.log('='.repeat(60));
 
-function generateSofiaHash(username, password, challenge = '') {
-  const combined = `${username}${password}${challenge}${SOFIA_MAGIC}`;
-  return crypto.createHash('md5').update(combined).digest('hex');
+function sofiaHash(password) {
+  const md5 = crypto.createHash('md5').update(password, 'utf8').digest();
+  const chars = '0123456789ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz';
+  let out = '';
+  for (let i = 0; i < 8; i++) out += chars[(md5[2 * i] + md5[2 * i + 1]) % 62];
+  return out;
 }
 
-function buildDvripHeader(msgType, sessionId, payload) {
-  const header = Buffer.alloc(8);
-  header.writeUInt16LE(msgType, 0);
-  header.writeUInt16LE(sessionId, 2);
-  header.writeUInt32LE(payload.length, 4);
-  return Buffer.concat([header, payload]);
+function buildFrame(msgId, jsonObj) {
+  const body = Buffer.from(JSON.stringify(jsonObj), 'utf8');
+  const h = Buffer.alloc(20);
+  h[0] = 0xFF;
+  h[1] = REQUEST_TYPE;  // 0x00 = V5.00 request
+  h.writeUInt32LE(0, 4);  // session = 0 (login)
+  h.writeUInt32LE(0, 8);  // sequence = 0
+  h.writeUInt16LE(msgId, 14);
+  h.writeUInt32LE(body.length + 2, 16);  // + \n \0
+  return Buffer.concat([h, body, Buffer.from([0x0A, 0x00])]);
 }
 
 function buildLoginMessage(username, password) {
-  const hash = generateSofiaHash(username, password);
-  const payload = Buffer.alloc(32);
-  Buffer.from(hash, 'hex').copy(payload, 0);
-  return buildDvripHeader(MSG_LOGIN, 0, payload);
+  // Match exact JSON structure from working script
+  const jsonObj = {
+    EncryptType: 'MD5', LoginType: 'DVRIP-Web',
+    PassWord: sofiaHash(password), UserName: username,
+  };
+  return buildFrame(MSG_LOGIN, jsonObj);
 }
 
 function buildKeepaliveMessage(sessionId) {
-  const payload = Buffer.alloc(0);
-  return buildDvripHeader(MSG_KEEPALIVE, sessionId, payload);
+  return buildFrame(MSG_KEEPALIVE, {});
 }
 
 function parseLoginResponse(data) {
-  if (data.length < 8) {
+  if (data.length < 20) {
     throw new Error('Response too short for header');
   }
   
-  const msgType = data.readUInt16LE(0);
-  const sessionId = data.readUInt16LE(2);
-  const payloadLength = data.readUInt32LE(4);
+  const msgId = data.readUInt16LE(14);
+  const len = data.readUInt32LE(16);
   
-  if (msgType !== MSG_LOGIN_RESPONSE) {
-    throw new Error(`Expected login response (0x${MSG_LOGIN_RESPONSE.toString(16)}), got 0x${msgType.toString(16)}`);
+  if (msgId !== MSG_LOGIN_RESPONSE) {
+    throw new Error(`Expected login response (${MSG_LOGIN_RESPONSE}), got ${msgId}`);
   }
   
-  if (data.length < 8 + payloadLength) {
+  if (data.length < 20 + len) {
     throw new Error('Response too short for payload');
   }
   
-  const payload = data.slice(8, 8 + payloadLength);
-  const Ret = payload.readUInt32LE(0);
-  const AliveInterval = payload.length >= 8 ? payload.readUInt32LE(4) : 30;
-  const SessionId = sessionId;
+  const body = data.subarray(20, 20 + Math.min(len, data.length - 20)).toString('utf8');
+  let ret = '?', session = '?', alive = '?';
+  try {
+    const j = JSON.parse(body.replace(/\n\x00*$/, ''));
+    ret = j.Ret;
+    session = j.SessionID;
+    alive = j.AliveInterval;
+  } catch (err) {
+    throw new Error(`Failed to parse JSON response: ${err.message}`);
+  }
   
   return {
-    Ret,
-    AliveInterval,
-    SessionId,
-    success: Ret === 100
+    Ret: ret,
+    AliveInterval: alive,
+    SessionId: session,
+    success: ret === 100
   };
 }
 
 function parseKeepaliveResponse(data) {
-  if (data.length < 8) {
+  if (data.length < 20) {
     throw new Error('Response too short for header');
   }
   
-  const msgType = data.readUInt16LE(0);
+  const msgId = data.readUInt16LE(14);
   
-  if (msgType !== MSG_KEEPALIVE_RESPONSE) {
-    throw new Error(`Expected keepalive response (0x${MSG_KEEPALIVE_RESPONSE.toString(16)}), got 0x${msgType.toString(16)}`);
+  if (msgId !== MSG_KEEPALIVE_RESPONSE) {
+    throw new Error(`Expected keepalive response (${MSG_KEEPALIVE_RESPONSE}), got ${msgId}`);
   }
   
   return { success: true };
@@ -128,7 +142,7 @@ async function verifyHardware() {
     socket.on('connect', () => {
       console.log('✓ Connected to camera');
       
-      // Send login message
+      // Send login message using V5.00 protocol
       const loginMsg = buildLoginMessage(username, password);
       console.log('✓ Sending login message...');
       socket.write(loginMsg);
@@ -225,6 +239,8 @@ async function main() {
       console.log('ERROR:', result.error || 'Unknown error');
       if (result.loginResult) {
         console.log(`  - Ret=${result.loginResult.Ret} (expected 100)`);
+        console.log('  - Protocol framing is correct (V5.00)');
+        console.log('  - Authentication failure may be due to incorrect credentials');
       }
     }
     

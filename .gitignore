@@ -21,4 +21,8 @@ dist-ssr
 *.sln
 *.sw?
 .env
+.env.production
+.env.production.local
 .vercel
+workers/auto.crt
+workers/auto.key

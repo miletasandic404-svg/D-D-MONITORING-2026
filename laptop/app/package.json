@@ -2,8 +2,9 @@
   "name": "dnd-laptop-media-worker",
   "version": "1.0.0",
   "private": true,
-  "description": "camera-sync-worker + media-node-heartbeat for the D&D Monitoring laptop media node",
+  "description": "camera-sync-worker + media-node-heartbeat + xiongmai-stream-worker for the D&D Monitoring laptop media node",
   "dependencies": {
+    "@sentry/node": "^8.0.0",
     "pg": "^8.13.1",
     "dotenv": "^16.4.5"
   }

@@ -6,17 +6,19 @@ REM ============================================================
 REM  D&D Monitoring — Laptop Media Node start skripta
 REM  Pokrece: MediaMTX + camera-sync-worker + media-node-heartbeat
 REM
-REM  POPUNI TRI STVARI ISPOD (ostalo je vec ispravno):
-REM   1. DATABASE_URL            -> isti Neon connection string kao na Vercelu
-REM   2. MEDIA_NODE_ID           -> iz registracije noda (korak 3 u README.md)
+REM  POPUNI ČETIRI STVARI ISPOD (ostalo je vec ispravno):
+REM   1. DATABASE_URL              -> isti Neon connection string kao na Vercelu
+REM   2. MEDIA_NODE_ID             -> iz registracije noda (korak 3 u README.md)
 REM   3. MEDIA_NODE_HEARTBEAT_SECRET -> isti secret iz registracije
+REM   4. CREDENTIAL_ENCRYPTION_KEY -> isti 32-byte base64 key kao na Vercelu (za dešifrovanje lozinki kamera)
 REM  Zatim pokreni:  start-laptop.bat
 REM ============================================================
 
-REM ---- EDIT OVE TRI LINIJE ----
+REM ---- EDIT OVE ČETIRI LINIJE ----
 set DATABASE_URL=postgresql://USER:PASS@HOST/neondb?sslmode=require
 set MEDIA_NODE_ID=PASTE_NODE_UUID_HERE
 set MEDIA_NODE_HEARTBEAT_SECRET=PASTE_HEARTBEAT_SECRET_HERE
+set CREDENTIAL_ENCRYPTION_KEY=PASTE_32_BYTE_BASE64_KEY_HERE
 REM ------------------------------
 
 set API_BASE_URL=https://www.dnd-monitoring.com/api
@@ -59,8 +61,11 @@ start "DND-heartbeat" /min cmd /c "cd /d %~dp0app && node workers\media-node-hea
 echo [start] Pokrecem camera-setup-agent (wizard executor)...
 start "DND-camera-setup" /min cmd /c "cd /d %~dp0app && node workers\camera-setup-agent.js"
 
+echo [start] Pokrecem xiongmai-stream-worker (DVRIP kamere)...
+start "DND-xiongmai-stream" /min cmd /c "cd /d %~dp0app && node workers\xiongmai-stream-worker.js"
+
 echo.
-echo [start] SVE POKRENUTO. Prozori: DND-MediaMTX, DND-camera-sync, DND-heartbeat.
+echo [start] SVE POKRENUTO. Prozori: DND-MediaMTX, DND-camera-sync, DND-heartbeat, DND-camera-setup, DND-xiongmai-stream.
 echo [start] Logove gledaj u svakom prozoru posebno.
 echo [start] Provera: curl http://127.0.0.1:9997/v3/config/global/get
 

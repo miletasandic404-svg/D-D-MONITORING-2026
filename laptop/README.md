@@ -19,6 +19,7 @@ media node platforme. Laptop pokreće **MediaMTX** (RTSP → HLS) + **camera-syn
 │  192.168.1.16│ rtsp://admin@ │  ├─ MediaMTX :8888    │──HLS (HTTPS)──▶ Dashboard
 └─────────────┘   :554/...     │  │   (RTSP→HLS)       │   (hls.js sa tokenom)
                                │  ├─ camera-sync-worker│──▶ Neon DB (čita cameras)
+                               │  ├─ xiongmai-stream-worker│──▶ DVRIP kamere → FFmpeg → MediaMTX
                                │  ├─ media-node-heart. │──▶ /api/media-nodes/heartbeat
                                │  └─ REST API :9997    │   (samo lokalno!)
                                └───────────────────────┘
@@ -48,9 +49,14 @@ C:\dnd-media\
 │   ├── node_modules\         (npm install)
 │   ├── workers\
 │   │   ├── camera-sync-worker.js
+│   │   ├── xiongmai-stream-worker.js
 │   │   └── media-node-heartbeat.js
 │   └── lib\
-│       └── _mediamtx_client.js
+│       ├── _mediamtx_client.js
+│       ├── _xiongmai_dvrip.js
+│       ├── _xiongmai_video.js
+│       ├── _crypto.js
+│       └── _logger.js
 ├── .env                       (opciono — varijable se mogu postaviti i u .bat)
 └── start-laptop.bat
 ```
@@ -61,15 +67,17 @@ Najbrži put do `app\`: klonirajte repo pa kopirajte:
 git clone https://github.com/miletasandic7/D-D-MONITORING-2026.git C:\dnd-monitoring-repo
 mkdir C:\dnd-media\app
 copy C:\dnd-monitoring-repo\workers\camera-sync-worker.js        C:\dnd-media\app\workers\
+copy C:\dnd-monitoring-repo\workers\xiongmai-stream-worker.js     C:\dnd-media\app\workers\
 copy C:\dnd-monitoring-repo\workers\media-node-heartbeat.js      C:\dnd-media\app\workers\
 copy C:\dnd-monitoring-repo\workers\camera-setup-agent.js        C:\dnd-media\app\workers\
 copy C:\dnd-monitoring-repo\lib\_mediamtx_client.js              C:\dnd-media\app\lib\
-copy C:\dnd-monitoring-repo\lib\_onvif_client.js                 C:\dnd-media\app\lib\
-copy C:\dnd-monitoring-repo\lib\_node_health.js                C:\dnd-media\app\lib\
+copy C:\dnd-monitoring-repo\lib\_xiongmai_dvrip.js                C:\dnd-media\app\lib\
+copy C:\dnd-monitoring-repo\lib\_xiongmai_video.js                C:\dnd-media\app\lib\
 copy C:\dnd-monitoring-repo\lib\_crypto.js                     C:\dnd-media\app\lib\
 copy C:\dnd-monitoring-repo\lib\_rtsp_probe.js                 C:\dnd-media\app\lib\
 copy C:\dnd-monitoring-repo\lib\_camera_connectors.js          C:\dnd-media\app\lib\
 copy C:\dnd-monitoring-repo\lib\_logger.js                      C:\dnd-media\app\lib\
+copy C:\dnd-monitoring-repo\lib\_sentry.js                      C:\dnd-media\app\lib\
 copy C:\dnd-monitoring-repo\laptop\app\package.json              C:\dnd-media\app\
 copy C:\dnd-monitoring-repo\laptop\mediamtx.yml                  C:\dnd-media\mediamtx\
 copy C:\dnd-monitoring-repo\laptop\start-laptop.bat              C:\dnd-media\
