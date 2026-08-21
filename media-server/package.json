@@ -4,6 +4,7 @@
   "private": true,
   "description": "Camera sync worker for the D&D Monitoring MediaMTX media server",
   "dependencies": {
-    "pg": "^8.13.1"
+    "pg": "^8.13.1",
+    "@sentry/node": "^8.0.0"
   }
 }
