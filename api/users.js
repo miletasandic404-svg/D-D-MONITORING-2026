@@ -189,7 +189,8 @@ module.exports = async (req, res) => {
 
       // Check if email already exists
       try {
-        const existingUser = await db.query(
+        const existingUser = await db.queryAsOrg(
+          auth.organizationId,
           'SELECT id FROM users WHERE email = $1',
           [email.toLowerCase()],
         );

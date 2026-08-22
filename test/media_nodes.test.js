@@ -75,13 +75,14 @@ describe('pickMediaNodeForCamera', () => {
 });
 
 describe('media-nodes API heartbeat organization scoping', () => {
-  let mockReq, mockRes, mockDbQuery, mockDbQueryAsOrg;
-  let lastQueryText, lastQueryParams, lastOrgId;
+  let mockReq, mockRes, mockDbQuery, mockDbQueryAsOrg, mockDbQueryAsPlatformAdmin;
+  let lastQueryText, lastQueryParams, lastOrgId, lastPlatformAdminQuery;
 
   beforeEach(() => {
     lastQueryText = null;
     lastQueryParams = null;
     lastOrgId = null;
+    lastPlatformAdminQuery = null;
 
     mockDbQuery = async (text, params) => {
       lastQueryText = text;
@@ -98,6 +99,16 @@ describe('media-nodes API heartbeat organization scoping', () => {
       lastOrgId = orgId;
       lastQueryText = text;
       lastQueryParams = params;
+      return { rows: [] };
+    };
+
+    mockDbQueryAsPlatformAdmin = async (text, params) => {
+      lastPlatformAdminQuery = { text, params };
+      lastQueryText = text;
+      lastQueryParams = params;
+      if (text.includes('SELECT') && text.includes('heartbeat_secret')) {
+        return { rows: [{ id: 'node-1', heartbeat_secret: 'secret123', organization_id: 'org-a' }] };
+      }
       return { rows: [] };
     };
 
@@ -124,9 +135,11 @@ describe('media-nodes API heartbeat organization scoping', () => {
     const db = require('../db/index');
     const originalQuery = db.query;
     const originalQueryAsOrg = db.queryAsOrg;
+    const originalQueryAsPlatformAdmin = db.queryAsPlatformAdmin;
 
     db.query = mockDbQuery;
     db.queryAsOrg = mockDbQueryAsOrg;
+    db.queryAsPlatformAdmin = mockDbQueryAsPlatformAdmin;
 
     // Load the API handler
     const handler = require('../api/media-nodes');
@@ -140,6 +153,7 @@ describe('media-nodes API heartbeat organization scoping', () => {
     // Restore
     db.query = originalQuery;
     db.queryAsOrg = originalQueryAsOrg;
+    db.queryAsPlatformAdmin = originalQueryAsPlatformAdmin;
 
     assert.equal(lastOrgId, 'org-a', 'queryAsOrg should be called with node\'s organization_id');
     assert.match(lastQueryText, /WHERE id = \$6 AND organization_id = \$7/,
@@ -149,23 +163,17 @@ describe('media-nodes API heartbeat organization scoping', () => {
     assert.equal(lastQueryParams[6], 'org-a');
   });
 
-  test('heartbeat for unbound node uses regular query (legacy compatibility)', async () => {
+  test('heartbeat for unbound node uses queryAsPlatformAdmin (RLS bypass)', async () => {
     const db = require('../db/index');
     const originalQuery = db.query;
     const originalQueryAsOrg = db.queryAsOrg;
+    const originalQueryAsPlatformAdmin = db.queryAsPlatformAdmin;
 
-    // Mock node without organization_id
-    mockDbQuery = async (text, params) => {
-      lastQueryText = text;
-      lastQueryParams = params;
-      if (text.includes('SELECT') && text.includes('heartbeat_secret')) {
-        return { rows: [{ id: 'node-2', heartbeat_secret: 'secret456', organization_id: null }] };
-      }
-      return { rows: [] };
-    };
+    lastPlatformAdminQuery = null;
 
     db.query = mockDbQuery;
     db.queryAsOrg = mockDbQueryAsOrg;
+    db.queryAsPlatformAdmin = mockDbQueryAsPlatformAdmin;
 
     const handler = require('../api/media-nodes');
 
@@ -178,9 +186,11 @@ describe('media-nodes API heartbeat organization scoping', () => {
     // Restore
     db.query = originalQuery;
     db.queryAsOrg = originalQueryAsOrg;
+    db.queryAsPlatformAdmin = originalQueryAsPlatformAdmin;
 
     assert.equal(lastOrgId, null, 'queryAsOrg should NOT be called for unbound nodes');
-    assert.match(lastQueryText, /WHERE id = \$3/,
-      'UPDATE for unbound node uses regular query without organization_id filter');
+    assert.ok(lastPlatformAdminQuery, 'queryAsPlatformAdmin should be called for unbound nodes (RLS bypass)');
+    assert.match(lastPlatformAdminQuery.text, /media_nodes/,
+      'queryAsPlatformAdmin should access media_nodes table');
   });
 });

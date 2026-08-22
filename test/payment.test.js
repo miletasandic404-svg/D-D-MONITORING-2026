@@ -45,6 +45,7 @@ function resetFakes() {
 // Patch db before the payment_service module is loaded.
 const originalQuery = db.query;
 const originalQueryAsOrg = db.queryAsOrg;
+const originalQueryAsPlatformAdmin = db.queryAsPlatformAdmin;
 const originalTransaction = db.transaction;
 
 db.query = async (text, params) => {
@@ -55,6 +56,12 @@ db.query = async (text, params) => {
 
 db.queryAsOrg = async (orgId, text, params) => {
   queryCalls.push({ text, params, orgId });
+  if (fakeQueryFn) return fakeQueryFn(text, params);
+  return { rows: [] };
+};
+
+db.queryAsPlatformAdmin = async (text, params) => {
+  queryCalls.push({ text, params, platformAdmin: true });
   if (fakeQueryFn) return fakeQueryFn(text, params);
   return { rows: [] };
 };

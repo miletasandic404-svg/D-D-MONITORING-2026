@@ -133,7 +133,8 @@ async function handleActivity(req, res, eventId) {
       return sendError(res, 404, 'Incident not found in your organization');
     }
 
-    const { rows } = await db.query(
+    const { rows } = await db.queryAsOrg(
+      auth.organizationId,
       `SELECT l.id, l.action, l.note, l.created_at, l.user_id, u.email AS user_email
        FROM incident_activity_log l
        LEFT JOIN users u ON u.id = l.user_id
@@ -206,13 +207,15 @@ async function handleStatus(req, res, eventId) {
     await db.queryAsOrg(auth.organizationId, `UPDATE incidents SET ${updates.join(', ')} WHERE id = $${paramIndex}`, values);
 
     if (status) {
-      await db.query(
+      await db.queryAsOrg(
+        auth.organizationId,
         'INSERT INTO incident_activity_log (incident_id, user_id, action, note) VALUES ($1, $2, $3, $4)',
         [incident.id, auth.userId, 'status_changed', `Status changed from ${incident.status} to ${status}`],
       );
     }
     if (targetOperatorId !== undefined) {
-      await db.query(
+      await db.queryAsOrg(
+        auth.organizationId,
         'INSERT INTO incident_activity_log (incident_id, user_id, action, note) VALUES ($1, $2, $3, $4)',
         [incident.id, auth.userId, targetOperatorId ? 'assigned' : 'unassigned',
           targetOperatorId ? `Assigned to operator ${targetOperatorId}` : 'Unassigned'],

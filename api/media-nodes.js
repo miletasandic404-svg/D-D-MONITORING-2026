@@ -73,7 +73,7 @@ async function handlePostMediaNodes(req, res) {
 
   try {
     const heartbeatSecret = generateHeartbeatSecret();
-    const inserted = await db.query(
+    const inserted = await db.queryAsPlatformAdmin(
       `INSERT INTO media_nodes (region, hostname, name, public_hls_url, capacity, heartbeat_secret, organization_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7)
        RETURNING id, region, hostname, name, public_hls_url, capacity, organization_id`,
@@ -104,7 +104,7 @@ async function handlePostHeartbeat(req, res) {
   }
 
   try {
-    const node = await db.query(
+    const node = await db.queryAsPlatformAdmin(
       `SELECT id, heartbeat_secret, organization_id FROM media_nodes WHERE id = $1`,
       [nodeId],
     );
@@ -136,7 +136,7 @@ async function handlePostHeartbeat(req, res) {
       );
     } else {
       // Unbound node (legacy): use platform admin scope
-      await db.query(
+      await db.queryAsPlatformAdmin(
         `UPDATE media_nodes
          SET last_heartbeat_at = now(), status = $1, region = COALESCE($2, region),
              mediamtx_online = COALESCE($4, mediamtx_online),
