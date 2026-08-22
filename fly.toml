@@ -10,10 +10,13 @@
 # =========================================================
 
 app = "dnd-media-server"
-primary_region = "fra"  # Frankfurt - blizu ostatka infrastrukture (Neon EU, Vercel)
+primary_region = "fra"
 
 [build]
   dockerfile = "media-server/Dockerfile"
+
+[min_machines_running]
+  min_machines_running = 2
 
 [env]
   # Sledece varijable se postavljaju kao Fly.io secrets, NE ovde
