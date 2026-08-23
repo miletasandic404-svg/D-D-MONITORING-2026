@@ -1,6 +1,14 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useRef } from 'react';
 import api from '../services/api';
 import { useNavigate } from 'react-router-dom';
+import Hls from 'hls.js';
+
+const hlsBaseUrl = (import.meta.env.VITE_HLS_BASE_URL || '/hls').replace(/\/$/, '');
+
+function buildHlsManifestUrl(cameraId, cameraHlsBaseUrl) {
+  const base = (cameraHlsBaseUrl || hlsBaseUrl).replace(/\/$/, '');
+  return `${base}/${cameraId}/index.m3u8`;
+}
 
 const PAGE_CSS = `
   .cameras-page { padding: 2rem; color: var(--text-primary, #e5eef7); }
@@ -259,6 +267,10 @@ export default function Cameras() {
   const [cameras, setCameras] = useState([]);
   const [loading, setLoading] = useState(true);
   const [showAddForm, setShowAddForm] = useState(false);
+  const [selectedCamera, setSelectedCamera] = useState(null);
+  const [streamCamera, setStreamCamera] = useState(null);
+  const videoRef = useRef(null);
+  const hlsRef = useRef(null);
 
   useEffect(() => {
     fetchCameras();
@@ -284,6 +296,46 @@ export default function Cameras() {
     total: cameras.length,
     online: cameras.filter(c => c.enabled !== false).length,
     offline: cameras.filter(c => c.enabled === false).length
+  };
+
+  const handleViewStream = async (camera) => {
+    setStreamCamera(camera);
+    try {
+      const tokenRes = await api.post('/cameras/verify-stream-token', { camera_id: camera.id });
+      const streamToken = tokenRes.data.token;
+      setTimeout(() => {
+        const video = videoRef.current;
+        if (!video || !streamCamera) return;
+        const manifestUrl = `${buildHlsManifestUrl(camera.id, camera.hls_base_url)}?token=${encodeURIComponent(streamToken)}`;
+        console.log('HLS URL:', manifestUrl);
+        if (hlsRef.current) {
+          hlsRef.current.destroy();
+          hlsRef.current = null;
+        }
+        if (Hls.isSupported()) {
+          const hls = new Hls();
+          hls.on(Hls.Events.ERROR, (_event, data) => {
+            if (!data.fatal) return;
+            console.error('HLS error:', data);
+          });
+          hls.loadSource(manifestUrl);
+          hls.attachMedia(video);
+          hlsRef.current = hls;
+        } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
+          video.src = manifestUrl;
+        }
+      }, 100);
+    } catch (err) {
+      console.error('Failed to get stream token:', err);
+    }
+  };
+
+  const handleCloseStream = () => {
+    if (hlsRef.current) {
+      hlsRef.current.destroy();
+      hlsRef.current = null;
+    }
+    setStreamCamera(null);
   };
 
   return (
@@ -336,14 +388,53 @@ export default function Cameras() {
                   </div>
                 </div>
                 <div className="camera-actions">
-                  <button className="cam-btn cam-btn-secondary">Settings</button>
-                  <button className="cam-btn cam-btn-primary">View Stream</button>
+                  <button className="cam-btn cam-btn-secondary" onClick={() => setSelectedCamera(camera)}>Settings</button>
+                  <button className="cam-btn cam-btn-primary" onClick={() => handleViewStream(camera)}>View Stream</button>
                 </div>
               </div>
             ))}
           </div>
         )}
       </main>
+
+      {selectedCamera && (
+        <div className="modal-overlay" onClick={() => setSelectedCamera(null)} style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,.7)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ background: 'rgba(10,18,38,.95)', border: '1px solid rgba(87,140,255,.3)', borderRadius: '20px', padding: '2rem', width: '100%', maxWidth: '500px', maxHeight: '80vh', overflowY: 'auto' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '1.5rem' }}>
+              <h2 style={{ fontFamily: "'Orbitron', sans-serif", fontSize: '1.2rem', color: '#dff5ff', margin: 0 }}>Camera Settings</h2>
+              <button onClick={() => setSelectedCamera(null)} style={{ background: 'none', border: 'none', color: '#8ab0c9', fontSize: '1.5rem', cursor: 'pointer' }}>&times;</button>
+            </div>
+            <div style={{ display: 'grid', gap: '1rem' }}>
+              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Name</label><div style={{ color: '#dff7ff', marginTop: '.25rem' }}>{selectedCamera.name}</div></div>
+              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>ID</label><div style={{ color: '#dff7ff', marginTop: '.25rem', fontSize: '.85rem', fontFamily: 'monospace' }}>{selectedCamera.id}</div></div>
+              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Location</label><div style={{ color: '#dff7ff', marginTop: '.25rem' }}>{selectedCamera.location || 'Not set'}</div></div>
+              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>FPS</label><div style={{ color: '#dff7ff', marginTop: '.25rem' }}>{selectedCamera.fps || 'Unknown'}</div></div>
+              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Status</label><div style={{ color: selectedCamera.enabled !== false ? '#00d450' : '#ff5050', marginTop: '.25rem' }}>{selectedCamera.enabled !== false ? 'Online' : 'Offline'}</div></div>
+              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>HLS Base URL</label><div style={{ color: '#dff7ff', marginTop: '.25rem', fontSize: '.85rem', fontFamily: 'monospace', wordBreak: 'break-all' }}>{selectedCamera.hls_base_url || 'Default'}</div></div>
+            </div>
+            <button onClick={() => setSelectedCamera(null)} style={{ marginTop: '1.5rem', width: '100%', padding: '.8rem', background: 'rgba(87,125,196,.2)', border: 'none', color: '#dff7ff', borderRadius: '8px', cursor: 'pointer' }}>Close</button>
+          </div>
+        </div>
+      )}
+
+      {streamCamera && (
+        <div className="modal-overlay" onClick={handleCloseStream} style={{ position: 'fixed', top: 0, left: 0, right: 0, bottom: 0, background: 'rgba(0,0,0,.85)', display: 'flex', alignItems: 'center', justifyContent: 'center', zIndex: 1000 }}>
+          <div className="modal-content" onClick={e => e.stopPropagation()} style={{ background: '#000', border: '1px solid rgba(87,140,255,.3)', borderRadius: '16px', width: '100%', maxWidth: '900px', maxHeight: '90vh', overflow: 'hidden' }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', padding: '1rem', background: 'rgba(10,18,38,.95)' }}>
+              <h2 style={{ fontFamily: "'Orbitron', sans-serif", fontSize: '1rem', color: '#dff5ff', margin: 0 }}>{streamCamera.name}</h2>
+              <button onClick={handleCloseStream} style={{ background: 'none', border: 'none', color: '#8ab0c9', fontSize: '1.5rem', cursor: 'pointer' }}>&times;</button>
+            </div>
+            <div style={{ background: '#000', display: 'flex', alignItems: 'center', justifyContent: 'center', minHeight: '400px' }}>
+              <video
+                ref={videoRef}
+                controls
+                autoPlay
+                style={{ width: '100%', maxHeight: '70vh', background: '#000' }}
+              />
+            </div>
+          </div>
+        </div>
+      )}
     </>
   );
 }

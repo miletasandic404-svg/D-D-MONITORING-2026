@@ -24,5 +24,7 @@ dist-ssr
 .env.production
 .env.production.local
 .vercel
+workers/.kilo/
 workers/auto.crt
 workers/auto.key
+.env*

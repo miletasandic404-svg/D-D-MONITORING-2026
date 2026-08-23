@@ -1,7 +1,5 @@
-// Load .env if one exists, without assuming any fixed install path (e.g.
-// C:\dnd-media). Walks up from THIS FILE'S OWN directory rather than
-// process.cwd(), so it works regardless of how/where the worker is launched
-// from. Silent no-op if dotenv isn't installed or no .env is found -- real
+// Load .env from the app root (parent of workers directory).
+// Silent no-op if dotenv isn't installed or no .env is found -- real
 // environment variables (e.g. set directly in start-laptop.bat) still work.
 (function loadNearestDotEnv() {
   let dotenv;
@@ -12,16 +10,10 @@
   }
   const fs = require('fs');
   const path = require('path');
-  let dir = __dirname;
-  for (let i = 0; i < 6; i++) {
-    const candidate = path.join(dir, '.env');
-    if (fs.existsSync(candidate)) {
-      dotenv.config({ path: candidate });
-      return;
-    }
-    const parent = path.dirname(dir);
-    if (parent === dir) break;
-    dir = parent;
+  const appRoot = path.join(__dirname, '..');
+  const candidate = path.join(appRoot, '.env');
+  if (fs.existsSync(candidate)) {
+    dotenv.config({ path: candidate });
   }
 })();
 
@@ -125,6 +117,23 @@ async function fetchCamerasFromDb() {
   });
 }
 
+async function fetchDvripCameraIdsFromDb() {
+  if (!MEDIA_NODE_ID) {
+    return [];
+  }
+  const query = `SELECT c.id
+     FROM cameras c
+     JOIN media_nodes n ON n.id = $1
+     WHERE (c.media_node_id = $1 OR c.media_node_id IS NULL)
+       AND c.connection_type = 'dvrip'
+       AND c.enabled = true
+       AND (n.organization_id IS NULL
+            OR c.organization_id = n.organization_id)`;
+  const params = [MEDIA_NODE_ID];
+  const result = await pool.query(query, params);
+  return result.rows.map((r) => r.id);
+}
+
 async function runFullSync() {
   const startedAt = Date.now();
   let cameras;
@@ -201,6 +210,9 @@ async function runFullSync() {
 
   // Ukloni "osirotele" MediaMTX putanje -- postoje na MediaMTX-u ali
   // vise ne postoje (ili su iskljucene/bez rtsp_url) u bazi.
+  // IZUZETAK: DVRIP kamere (connection_type='dvrip') nemaju rtsp_url,
+  // ali ih xiongmai-stream-worker aktivno streamuje. Njihove putanje
+  // NE smeti brisati kao "osirotele".
   let removed = 0;
   try {
     // Ako je prvi listConfiguredPaths() (iznad) pao, currentPaths je []
@@ -211,7 +223,19 @@ async function runFullSync() {
     // koristimo, pa ovo nikad ne moze pogresno obrisati validnu
     // putanju.
     const configuredPaths = currentPaths.length ? currentPaths : await listConfiguredPaths();
-    const dbCameraIds = new Set(cameras.map((c) => c.id));
+
+    // Fetch DVRIP camera IDs to protect their paths from orphan cleanup
+    let dvripCameraIds = [];
+    try {
+      dvripCameraIds = await fetchDvripCameraIdsFromDb();
+      if (dvripCameraIds.length > 0) {
+        logger.info('sync.dvrip_cameras_found', { count: dvripCameraIds.length, camera_ids: dvripCameraIds });
+      }
+    } catch (err) {
+      logger.warn('sync.dvrip_cameras_read_failed', { error: err.message });
+    }
+
+    const dbCameraIds = new Set([...cameras.map((c) => c.id), ...dvripCameraIds]);
     for (const p of configuredPaths) {
       const pathName = p && p.name;
       if (pathName && !dbCameraIds.has(pathName)) {
