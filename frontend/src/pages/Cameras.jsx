@@ -301,8 +301,8 @@ export default function Cameras() {
   const handleViewStream = async (camera) => {
     setStreamCamera(camera);
     try {
-      const tokenRes = await api.post('/cameras/verify-stream-token', { camera_id: camera.id });
-      const streamToken = tokenRes.data.token;
+      const tokenRes = await api.post('/camera-views', { camera_id: camera.id });
+      const streamToken = tokenRes.data.streamToken;
       setTimeout(() => {
         const video = videoRef.current;
         if (!video || !streamCamera) return;
