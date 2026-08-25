@@ -137,7 +137,7 @@ describe('lib/_mediamtx_client — addOrUpdateCameraPath', () => {
     assert.equal(receivedRequests[2].body.source, 'publisher');
   });
 
-  test('non-conflict 400 error is re-thrown', async () => {
+  test('unrelated 400 error is re-thrown, DELETE not called', async () => {
     requestHandler = (req, res) => {
       receivedRequests.push({ method: req.method, url: req.url });
       res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -147,7 +147,10 @@ describe('lib/_mediamtx_client — addOrUpdateCameraPath', () => {
     const mediamtxClient = require('../lib/_mediamtx_client');
     await assert.rejects(
       () => mediamtxClient.addOrUpdateCameraPath('cam-6', 'publisher'),
-      /HTTP 400/
+      /MediaMTX API POST.*HTTP 400/
     );
+
+    assert.equal(receivedRequests.length, 1);
+    assert.equal(receivedRequests[0].method, 'POST');
   });
 });
