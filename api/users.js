@@ -21,7 +21,7 @@ const inviteSchema = z.object({
 
 // ─── Zod schema for user update ────────────────────────────────
 const updateSchema = z.object({
-  id: z.string().uuid('User ID must be a valid UUID'),
+  id: z.string().min(1, 'User ID is required'),
   user_type: z.enum(['operator', 'org_admin', 'platform_admin']).optional(),
   status: z.enum(['active', 'invited', 'disabled']).optional(),
 });
@@ -279,18 +279,45 @@ module.exports = async (req, res) => {
         params,
       );
 
-      return sendSuccess(res, { message: 'User updated successfully' });
-    } catch (err) {
-      if (err.name === 'ZodError') {
-        return sendError(res, 400, 'Validation failed',
-          err.issues.map(e => ({ field: e.path.join('.'), message: e.message }))
-        );
-      }
-      logger.error('Error updating user', { error: err.message });
-      Sentry.captureException(err);
-      return sendError(res, 500, err.message);
-    }
-  }
+       return sendSuccess(res, { message: 'User updated successfully' });
+     } catch (err) {
+       if (err.name === 'ZodError') {
+         return sendError(res, 400, 'Validation failed',
+           err.issues.map(e => ({ field: e.path.join('.'), message: e.message }))
+         );
+       }
+       logger.error('Error updating user', { error: err.message });
+       Sentry.captureException(err);
+       return sendError(res, 500, err.message);
+     }
+   }
 
-  return sendError(res, 405, 'Method not allowed');
+   // DELETE - Delete a user (org-scoped)
+   if (req.method === 'DELETE') {
+     const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
+     if (!auth) return;
+
+     try {
+       const { id } = req.query;
+       if (!id) return sendError(res, 400, 'id is required');
+
+       const result = await db.queryAsOrg(
+         auth.organizationId,
+         'DELETE FROM users WHERE id = $1 AND organization_id = $2 RETURNING id, email',
+         [id, auth.organizationId],
+       );
+
+       if (result.rows.length === 0) {
+         return sendError(res, 404, 'User not found');
+       }
+
+       return sendSuccess(res, { message: 'User deleted successfully' });
+     } catch (err) {
+       logger.error('DELETE /api/users error', { error: err.message });
+       Sentry.captureException(err);
+       return sendError(res, 500, err.message);
+     }
+   }
+
+   return sendError(res, 405, 'Method not allowed');
 };

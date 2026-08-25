@@ -1,12 +1,11 @@
 import React, { lazy, Suspense } from 'react';
-import { BrowserRouter as Router, Routes, Route } from 'react-router-dom';
+import { BrowserRouter as Router, Routes, Route, Navigate } from 'react-router-dom';
 import Login from './pages/Login';
 import ResetPassword from './pages/ResetPassword';
+import { getCurrentUser } from './services/auth-client';
 
-// Dashboard is code-split: HLS.js + all heavy libs only load after login
 const Dashboard = lazy(() => import('./pages/Dashboard'));
 
-// Lazy load new pages
 const Users = lazy(() => import('./pages/Users'));
 const Settings = lazy(() => import('./pages/Settings'));
 const Subscription = lazy(() => import('./pages/Subscription'));
@@ -23,6 +22,15 @@ const LicensePlateRecognition = lazy(() => import('./pages/LicensePlateRecogniti
 const EmergencyDispatch = lazy(() => import('./pages/EmergencyDispatch'));
 const Onboarding = lazy(() => import('./pages/Onboarding'));
 
+function RequireRole({ children, allowedRoles }) {
+  const user = getCurrentUser();
+  const userType = user?.user_type;
+  if (!userType || !allowedRoles.includes(userType)) {
+    return <Navigate to="/dashboard" replace />;
+  }
+  return children;
+}
+
 function App() {
   return (
     <Router>
@@ -33,7 +41,14 @@ function App() {
           <Route path="/reset-password" element={<ResetPassword />} />
           <Route path="/onboarding" element={<Onboarding />} />
           <Route path="/dashboard" element={<Dashboard />} />
-          <Route path="/users" element={<Users />} />
+          <Route
+            path="/users"
+            element={
+              <RequireRole allowedRoles={['platform_admin', 'org_admin']}>
+                <Users />
+              </RequireRole>
+            }
+          />
           <Route path="/settings" element={<Settings />} />
           <Route path="/subscription" element={<Subscription />} />
           <Route path="/reports" element={<Reports />} />

@@ -86,7 +86,6 @@ export default function Users() {
     setListError('');
     try {
       const res = await api.get('/users');
-      console.log('Users API response:', res.data);
       setUsers(res.data.users || []);
     } catch (err) {
       console.error('Failed to fetch users:', err);
@@ -258,31 +257,7 @@ export default function Users() {
                       {user.status || 'active'}
                     </span>
                   </div>
-                  {(() => {
-                    console.log('User:', user.email, 'user_type:', user.user_type, 'condition:', user.user_type === 'operator');
-                    // Temporarily show button for all users for testing with very visible styles
-                    return (
-                      <button
-                        style={{ 
-                          padding: '.5rem 1rem', 
-                          fontSize: '1rem', 
-                          background: '#ff0000', 
-                          border: '2px solid #000000', 
-                          color: '#ffffff', 
-                          borderRadius: '8px', 
-                          cursor: 'pointer', 
-                          display: 'block',
-                          marginTop: '10px',
-                          fontWeight: 'bold',
-                          zIndex: 9999
-                        }}
-                        onClick={() => openAssignModal(user)}
-                      >
-                        Assign Site (TEST)
-                      </button>
-                    );
-                  })()}
-                  {getUserAssignments(user.id).length > 0 && (
+                   {getUserAssignments(user.id).length > 0 && (
                     <div style={{ fontSize: '.75rem', color: 'var(--text-secondary, #8ab0c9)' }}>
                       {getUserAssignments(user.id).map(a => a.site_name).join(', ')}
                     </div>

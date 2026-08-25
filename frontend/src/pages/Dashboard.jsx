@@ -2,7 +2,7 @@ import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Hls from 'hls.js';
-import { getSession, signOut } from '../services/auth-client';
+import { getSession, signOut, getCurrentUser } from '../services/auth-client';
 import { useBilling } from '../hooks/useBilling';
 import BillingPanel from '../components/dashboard/BillingPanel';
 
@@ -86,6 +86,7 @@ function useDebounce(value, delay = 250) {
 export default function Dashboard() {
   const navigate = useNavigate();
   const [authChecked, setAuthChecked] = useState(false);
+  const [currentUser, setCurrentUser] = useState(null);
   const [incidents, setIncidents] = useState([]);
   const [incidentsLoaded, setIncidentsLoaded] = useState(false);
   const [cameras, setCameras] = useState(null);
@@ -209,12 +210,17 @@ export default function Dashboard() {
   // the local media node via camera-setup-agent.js; the wizard only creates
   // tasks and polls results. No SQL, no MediaMTX/Cloudflare config needed.
   const pollWizardTask = async (taskId) => {
+    const pollTimer = performance.now();
+    console.log("[STARTUP] pollWizardTask started");
     for (let attempt = 0; attempt < 90; attempt += 1) {
       try {
         const res = await api.get(`/camera-setup/${taskId}`);
         const t = res.data?.task || res.data;
         setWizardTask(t);
-        if (t?.status === 'done' || t?.status === 'failed') return t;
+        if (t?.status === 'done' || t?.status === 'failed') {
+          console.log("[STARTUP] pollWizardTask completed in", performance.now() - pollTimer, "ms");
+          return t;
+        }
       } catch (err) {
         /* transient — keep polling */
       }
@@ -225,7 +231,9 @@ export default function Dashboard() {
 
   const refreshWizardCameras = async () => {
     try {
+      const cameraTimer = performance.now();
       const res = await api.get('/cameras');
+      console.log("[STARTUP] /cameras completed in", performance.now() - cameraTimer, "ms");
       const list = res.data?.cameras || [];
       setCameras(list);
       return list;
@@ -237,7 +245,9 @@ export default function Dashboard() {
   // Auto-pick the best online media node and fetch its live health.
   const fetchWizardNode = async () => {
     try {
+      const nodeTimer = performance.now();
       const res = await api.get('/camera-setup/node');
+      console.log("[STARTUP] /camera-setup/node completed in", performance.now() - nodeTimer, "ms");
       setWizardNode(res.data?.node || null);
       setWizardNodeError('');
       return res.data?.node || null;
@@ -620,17 +630,21 @@ export default function Dashboard() {
   // Auth guard - redirect to login if no active session
   useEffect(() => {
     (async () => {
+      console.log("[STARTUP] auth guard useEffect started");
+      const sessionTimer = performance.now();
       try {
         const session = await getSession();
+        console.log("[STARTUP] getSession completed in", performance.now() - sessionTimer, "ms");
         if (!session || !session.user) {
           // Clear stale session data
           localStorage.removeItem('currentUser');
           await signOut();
           navigate('/', { replace: true });
         } else {
-          // Sync user info from server session
+          // Sync user info from-server session
           localStorage.setItem('currentUser', JSON.stringify(session.user));
-          await billing.loadBillingState();
+          setCurrentUser(session.user);
+          billing.loadBillingState();
           setAuthChecked(true);
         }
       } catch (err) {
@@ -707,14 +721,19 @@ export default function Dashboard() {
   // Only fetch data once auth is confirmed
   useEffect(() => {
     if (!authChecked) return;
+    const incidentsTimer = performance.now();
 
     api
       .get('/incidents')
       .then((res) => {
+        console.log("[STARTUP] /incidents completed in", performance.now() - incidentsTimer, "ms");
         setIncidents(res.data.incidents || []);
         setIncidentsLoaded(true);
       })
-      .catch((err) => setError(err.message));
+      .catch((err) => {
+        console.log("[STARTUP] /incidents failed after", performance.now() - incidentsTimer, "ms");
+        setError(err.message);
+      });
   }, [authChecked]);
 
   // Audio alarm: play 3 beeps when new 'New' incidents arrive
@@ -730,14 +749,17 @@ export default function Dashboard() {
   // Fetch cameras once auth is confirmed
   useEffect(() => {
     if (!authChecked) return;
+    const camerasTimer = performance.now();
 
     api
       .get('/cameras')
       .then((res) => {
+        console.log("[STARTUP] /cameras completed in", performance.now() - camerasTimer, "ms");
         setCameras(res.data.cameras || []);
         setCamerasError(null);
       })
       .catch((err) => {
+        console.log("[STARTUP] /cameras failed after", performance.now() - camerasTimer, "ms");
         const backendMessage = err.response?.data?.error;
         setCamerasError(
           backendMessage ||
@@ -950,7 +972,6 @@ export default function Dashboard() {
   };
 
   if (!authChecked) return null;
-
   if (error) {
     return (
       <div className="dashboard-shell">
@@ -1227,7 +1248,9 @@ export default function Dashboard() {
               <div className="sidebar-group-items">
                 <button className="sidebar-nav-item" onClick={() => navigate('/emergency')}>Emergency</button>
                 <button className="sidebar-nav-item" onClick={() => navigate('/reports')}>Reports</button>
-                <button className="sidebar-nav-item" onClick={() => navigate('/users')}>Users</button>
+                {(currentUser?.user_type === 'org_admin' || currentUser?.user_type === 'platform_admin') && (
+                  <button className="sidebar-nav-item" onClick={() => navigate('/users')}>Users</button>
+                )}
                 <button className="sidebar-nav-item" onClick={() => navigate('/settings')}>Settings</button>
               </div>
             )}
