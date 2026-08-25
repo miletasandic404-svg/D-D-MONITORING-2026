@@ -123,7 +123,7 @@ function AddCameraForm({ onSuccess, onCancel }) {
         username: newCamera.username || undefined,
         password: newCamera.password || undefined,
       });
-      const taskId = createRes.data.task_id;
+      const taskId = createRes.data.taskId;
       const result = await pollTask(taskId, 60000);
       if (result.status === 'done') {
         const parsed = result.result && typeof result.result === 'string'
@@ -303,17 +303,23 @@ export default function Cameras() {
     try {
       const tokenRes = await api.post('/camera-views', { camera_id: camera.id });
       const streamToken = tokenRes.data.streamToken;
+      const targetCamera = camera;
       setTimeout(() => {
         const video = videoRef.current;
-        if (!video || !streamCamera) return;
-        const manifestUrl = `${buildHlsManifestUrl(camera.id, camera.hls_base_url)}?token=${encodeURIComponent(streamToken)}`;
+        if (!video) return;
+        const manifestUrl = `${buildHlsManifestUrl(targetCamera.id, targetCamera.hls_base_url)}?token=${encodeURIComponent(streamToken)}`;
         console.log('HLS URL:', manifestUrl);
         if (hlsRef.current) {
           hlsRef.current.destroy();
           hlsRef.current = null;
         }
         if (Hls.isSupported()) {
-          const hls = new Hls();
+          const hls = new Hls({
+            lowLatencyMode: true,
+            liveSyncDuration: 2,
+            maxBufferLength: 3,
+            backBufferLength: 1,
+          });
           hls.on(Hls.Events.ERROR, (_event, data) => {
             if (!data.fatal) return;
             console.error('HLS error:', data);

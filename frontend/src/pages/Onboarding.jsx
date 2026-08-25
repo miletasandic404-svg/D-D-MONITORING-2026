@@ -456,7 +456,7 @@ export default function Onboarding() {
         username: camUser || undefined,
         password: camPass || undefined,
       });
-      const taskId = createData.task_id;
+      const taskId = createData.taskId;
 
       // Poll for completion
       const deadline = Date.now() + 90000;
