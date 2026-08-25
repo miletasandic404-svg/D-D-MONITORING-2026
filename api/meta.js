@@ -4,16 +4,17 @@ const cronPendingActivationsHandler = require('../lib/handlers/cron-pending-acti
 const cronRetentionHandler = require('../lib/handlers/cron-retention');
 
 module.exports = async (req, res) => {
-  const path = req.url || '';
-  if (path.startsWith('/api/verify-stream-token')) {
-    return verifyStreamTokenHandler(req, res);
-  }
-  if (path.startsWith('/api/cron-pending-activations')) {
-    return cronPendingActivationsHandler(req, res);
-  }
-  if (path.startsWith('/api/cron-retention')) {
-    return cronRetentionHandler(req, res);
-  }
+const handler = req.query?.handler || '';
+
+if (handler === 'verify-stream-token') {
+  return verifyStreamTokenHandler(req, res);
+}
+if (handler === 'cron-pending-activations') {
+  return cronPendingActivationsHandler(req, res);
+}
+if (handler === 'cron-retention') {
+  return cronRetentionHandler(req, res);
+}
   // Default to health
   return healthHandler(req, res);
 };
