@@ -541,7 +541,6 @@ export default function Dashboard() {
 
   // Phase 4 - Audit Log
   const [auditLog, setAuditLog] = useState([]);
-  const currentUser = JSON.parse(localStorage.getItem('currentUser') || 'null');
   const addAuditEntry = (action) => setAuditLog((prev) => [{ id: Date.now(), ts: new Date().toLocaleTimeString(), user: currentUser?.email || 'operator', action }, ...prev].slice(0, 50));
 
   // Phase 4 - White-Label Branding
