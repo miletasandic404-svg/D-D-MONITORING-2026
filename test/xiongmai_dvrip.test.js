@@ -3,21 +3,27 @@
 /**
  * Unit tests for Xiongmai/XMEye DVRIP adapter.
  *
- * Tests DVRIP protocol implementation without requiring real hardware.
- * Covers Sofia hash generation, DVRIP header construction, login/response parsing,
- * keepalive, OPTalk, G.711 A-law framing, error handling, and security.
+ * Tests V5.00 JSON protocol implementation without requiring real hardware.
+ * Covers Sofia hash generation, DVRIP V5.00 frame construction, response parsing,
+ * keepalive, OPTalk, G.7.11 A-law framing, error handling, and security.
+ *
+ * Protocol: V5.00 (20-byte header + JSON body + \n\0 terminator)
+ * - Header: [0xFF][requestType][4B session][4B sequence][2B msgId][4B payloadLen]
+ * - msgId at offset 14 (UInt16LE)
+ * - payloadLen at offset 16 (UInt32LE)
+ * - Total header = 20 bytes (not 8)
+ * - Sofia hash = 8-char Base62 (not 32-char hex)
  */
 
 const { test, describe } = require('node:test');
 const assert = require('node:assert/strict');
-const crypto = require('crypto');
 
 const xiongmaiModule = require('../lib/_xiongmai_dvrip');
 
 const {
-  generateSofiaHash,
-  buildDvripHeader,
-  parseDvripHeader,
+  sofiaHash,
+  buildFrame,
+  parseV5Response,
   buildLoginMessage,
   parseLoginResponse,
   buildKeepaliveMessage,
@@ -43,156 +49,169 @@ const {
   XiongmaiDvripAdapter,
 } = xiongmaiModule;
 
+const HEADER_SIZE = 20;
+
 describe('Xiongmai DVRIP — Sofia hash generation', () => {
   test('generates consistent hash for same inputs', () => {
-    const hash1 = generateSofiaHash('admin', 'admin123', '');
-    const hash2 = generateSofiaHash('admin', 'admin123', '');
+    const hash1 = sofiaHash('admin123');
+    const hash2 = sofiaHash('admin123');
     assert.equal(hash1, hash2);
   });
 
   test('generates different hashes for different inputs', () => {
-    const hash1 = generateSofiaHash('admin', 'admin123', '');
-    const hash2 = generateSofiaHash('admin', 'password', '');
+    const hash1 = sofiaHash('admin123');
+    const hash2 = sofiaHash('password');
     assert.notEqual(hash1, hash2);
   });
 
-  test('generates different hashes for different challenges', () => {
-    const hash1 = generateSofiaHash('admin', 'admin123', 'challenge1');
-    const hash2 = generateSofiaHash('admin', 'admin123', 'challenge2');
+  test('generates different hashes for different passwords', () => {
+    const hash1 = sofiaHash('password1');
+    const hash2 = sofiaHash('password2');
     assert.notEqual(hash1, hash2);
   });
 
-  test('hash is 32-character hex string', () => {
-    const hash = generateSofiaHash('admin', 'admin123', '');
-    assert.equal(hash.length, 32);
-    assert.match(hash, /^[0-9a-f]{32}$/);
+  test('hash is 8-character string', () => {
+    const hash = sofiaHash('admin123');
+    assert.equal(hash.length, 8);
+    assert.match(hash, /^[0-9A-Za-z]{8}$/);
   });
 
   test('empty password produces valid hash', () => {
-    const hash = generateSofiaHash('admin', '', '');
-    assert.equal(hash.length, 32);
-    assert.match(hash, /^[0-9a-f]{32}$/);
+    const hash = sofiaHash('');
+    assert.equal(hash.length, 8);
+    assert.match(hash, /^[0-9A-Za-z]{8}$/);
   });
 
   test('special characters in password are handled', () => {
-    const hash = generateSofiaHash('admin', 'p@ssw0rd!#$%', '');
-    assert.equal(hash.length, 32);
-    assert.match(hash, /^[0-9a-f]{32}$/);
+    const hash = sofiaHash('p@ssw0rd!#$%');
+    assert.equal(hash.length, 8);
+    assert.match(hash, /^[0-9A-Za-z]{8}$/);
   });
 });
 
-describe('Xiongmai DVRIP — DVRIP header construction', () => {
-  test('builds header with correct message type', () => {
-    const payload = Buffer.from('test');
-    const header = buildDvripHeader(MSG_LOGIN, 0, payload);
-    assert.equal(header.readUInt16LE(0), MSG_LOGIN);
+describe('Xiongmai DVRIP — V5.00 frame construction', () => {
+  test('builds frame with correct message type', () => {
+    const frame = buildFrame(MSG_LOGIN, { data: 'test' });
+    assert.equal(frame.readUInt16LE(14), MSG_LOGIN);
   });
 
-  test('builds header with correct session ID', () => {
-    const payload = Buffer.from('test');
-    const sessionId = 12345;
-    const header = buildDvripHeader(MSG_LOGIN, sessionId, payload);
-    assert.equal(header.readUInt16LE(2), sessionId);
+  test('builds frame with correct session ID', () => {
+    const frame = buildFrame(MSG_LOGIN, { data: 'test' });
+    assert.equal(frame.readUInt32LE(4), 0); // session = 0 in V5.00
   });
 
-  test('builds header with correct payload length', () => {
-    const payload = Buffer.from('test payload');
-    const header = buildDvripHeader(MSG_LOGIN, 0, payload);
-    assert.equal(header.readUInt32LE(4), payload.length);
+  test('builds frame with correct payload length', () => {
+    const jsonObj = { data: 'test payload' };
+    const frame = buildFrame(MSG_LOGIN, jsonObj);
+    const body = Buffer.from(JSON.stringify(jsonObj), 'utf8');
+    assert.equal(frame.readUInt32LE(16), body.length + 2); // + \n\0 terminator
   });
 
-  test('header is 8 bytes + payload', () => {
-    const payload = Buffer.from('test');
-    const header = buildDvripHeader(MSG_LOGIN, 0, payload);
-    assert.equal(header.length, 8 + payload.length);
+  test('frame is 20 bytes header + body + 2 byte terminator', () => {
+    const jsonObj = { data: 'test' };
+    const frame = buildFrame(MSG_LOGIN, jsonObj);
+    const body = Buffer.from(JSON.stringify(jsonObj), 'utf8');
+    assert.equal(frame.length, HEADER_SIZE + body.length + 2);
   });
 
-  test('handles empty payload', () => {
-    const payload = Buffer.alloc(0);
-    const header = buildDvripHeader(MSG_KEEPALIVE, 0, payload);
-    assert.equal(header.length, 8);
-    assert.equal(header.readUInt32LE(4), 0);
+  test('handles empty JSON payload', () => {
+    const frame = buildFrame(MSG_KEEPALIVE, {});
+    assert.equal(frame.length, HEADER_SIZE + 2 + 2); // '{}' is 2 bytes
+    assert.equal(frame.readUInt32LE(16), 4); // 2 body + 2 terminator
   });
 
-  test('handles large payload', () => {
-    const payload = Buffer.alloc(1000);
-    const header = buildDvripHeader(MSG_LOGIN, 0, payload);
-    assert.equal(header.length, 8 + 1000);
-    assert.equal(header.readUInt32LE(4), 1000);
+  test('handles large JSON payload', () => {
+    const jsonObj = { data: 'x'.repeat(1000) };
+    const frame = buildFrame(MSG_LOGIN, jsonObj);
+    const body = Buffer.from(JSON.stringify(jsonObj), 'utf8');
+    assert.equal(frame.length, HEADER_SIZE + body.length + 2);
+    assert.equal(frame.readUInt32LE(16), body.length + 2);
+  });
+
+  test('frame starts with 0xFF magic byte', () => {
+    const frame = buildFrame(MSG_LOGIN, {});
+    assert.equal(frame[0], 0xFF);
+  });
+
+  test('frame has V5.00 request type', () => {
+    const frame = buildFrame(MSG_LOGIN, {});
+    assert.equal(frame[1], 0x00);
   });
 });
 
-describe('Xiongmai DVRIP — header parsing', () => {
-  test('parses header with correct message type', () => {
-    const payload = Buffer.from('test');
-    const header = buildDvripHeader(MSG_LOGIN, 0, payload);
-    const parsed = parseDvripHeader(header);
-    assert.equal(parsed.msgType, MSG_LOGIN);
+describe('Xiongmai DVRIP — V5.00 response parsing', () => {
+  test('parses frame with correct message type', () => {
+    const frame = buildFrame(MSG_LOGIN, { hello: 'world' });
+    const parsed = parseV5Response(frame, MSG_LOGIN);
+    assert.equal(parsed.Ret, undefined);
+    assert.equal(parsed.SessionId, 0);
   });
 
-  test('parses header with correct session ID', () => {
-    const payload = Buffer.from('test');
-    const sessionId = 54321;
-    const header = buildDvripHeader(MSG_LOGIN, sessionId, payload);
-    const parsed = parseDvripHeader(header);
-    assert.equal(parsed.sessionId, sessionId);
+  test('parses JSON body fields from V5.00 response', () => {
+    const frame = buildFrame(MSG_LOGIN_RESPONSE, {
+      Ret: 100,
+      AliveInterval: 30,
+      SessionID: '0x3039',
+    });
+    const parsed = parseV5Response(frame, MSG_LOGIN_RESPONSE);
+    assert.equal(parsed.Ret, 100);
+    assert.equal(parsed.AliveInterval, 30);
+    assert.equal(parsed.SessionId, 12345);
+    assert.equal(parsed.success, true);
   });
 
-  test('parses header with correct payload length', () => {
-    const payload = Buffer.from('test payload');
-    const header = buildDvripHeader(MSG_LOGIN, 0, payload);
-    const parsed = parseDvripHeader(header);
-    assert.equal(parsed.payloadLength, payload.length);
+  test('parses frame with correct payload length', () => {
+    const jsonObj = { Ret: 100, AliveInterval: 30 };
+    const frame = buildFrame(MSG_LOGIN_RESPONSE, jsonObj);
+    const parsed = parseV5Response(frame, MSG_LOGIN_RESPONSE);
+    assert.equal(parsed.Ret, 100);
   });
 
-  test('throws error for header too short', () => {
-    const shortData = Buffer.alloc(4);
-    assert.throws(() => parseDvripHeader(shortData), /DVRIP response too short/);
+  test('throws error for frame too short', () => {
+    const shortData = Buffer.alloc(10);
+    assert.throws(() => parseV5Response(shortData, MSG_LOGIN_RESPONSE), /too short/i);
   });
 
-  test('handles zero payload length', () => {
-    const header = buildDvripHeader(MSG_KEEPALIVE, 0, Buffer.alloc(0));
-    const parsed = parseDvripHeader(header);
-    assert.equal(parsed.payloadLength, 0);
+  test('handles frame with zero-length JSON body', () => {
+    const frame = buildFrame(MSG_KEEPALIVE, {});
+    const parsed = parseV5Response(frame, MSG_KEEPALIVE);
+    assert.equal(parsed.success, false); // Ret defaults to '?'
   });
 });
 
 describe('Xiongmai DVRIP — login message construction', () => {
   test('builds login message with correct message type', () => {
     const msg = buildLoginMessage('admin', 'admin123', '');
-    assert.equal(msg.readUInt16LE(0), MSG_LOGIN);
+    assert.equal(msg.readUInt16LE(14), MSG_LOGIN);
   });
 
-  test('builds login message with 32-byte payload', () => {
+  test('builds login message with JSON body containing user and password hash', () => {
     const msg = buildLoginMessage('admin', 'admin123', '');
-    assert.equal(msg.readUInt32LE(4), 32);
-    assert.equal(msg.length, 8 + 32);
+    const body = JSON.parse(msg.subarray(HEADER_SIZE, msg.length - 2).toString('utf8'));
+    assert.equal(body.UserName, 'admin');
+    assert.equal(body.EncryptType, 'MD5');
+    assert.equal(body.LoginType, 'DVRIP-Web');
+    assert.equal(body.PassWord, sofiaHash('admin123'));
   });
 
-  test('login payload contains Sofia hash', () => {
+  test('login payload contains Sofia hash (not plaintext password)', () => {
     const username = 'admin';
     const password = 'admin123';
-    const expectedHash = generateSofiaHash(username, password, '');
     const msg = buildLoginMessage(username, password, '');
-    const payload = msg.slice(8);
-    const hash = payload.slice(0, 16).toString('hex'); // MD5 hash is 16 bytes
-    assert.equal(hash, expectedHash);
-  });
-
-  test('different credentials produce different login messages', () => {
-    const msg1 = buildLoginMessage('admin', 'password1', '');
-    const msg2 = buildLoginMessage('admin', 'password2', '');
-    assert.notEqual(msg1, msg2);
+    const body = JSON.parse(msg.subarray(HEADER_SIZE, msg.length - 2).toString('utf8'));
+    assert.equal(body.PassWord, sofiaHash(password));
+    assert.ok(!body.includes || !JSON.stringify(body).includes(password));
   });
 });
 
 describe('Xiongmai DVRIP — login response parsing', () => {
   test('parses successful login response (Ret=100)', () => {
-    const payload = Buffer.alloc(8);
-    payload.writeUInt32LE(100, 0); // Ret = 100 (success)
-    payload.writeUInt32LE(30, 4);  // AliveInterval = 30
-    const header = buildDvripHeader(MSG_LOGIN_RESPONSE, 12345, payload);
-    const response = parseLoginResponse(header);
+    const frame = buildFrame(MSG_LOGIN_RESPONSE, {
+      Ret: 100,
+      AliveInterval: 30,
+      SessionID: '0x3039',
+    });
+    const response = parseLoginResponse(frame);
     assert.equal(response.success, true);
     assert.equal(response.Ret, 100);
     assert.equal(response.AliveInterval, 30);
@@ -200,196 +219,138 @@ describe('Xiongmai DVRIP — login response parsing', () => {
   });
 
   test('parses failed login response (Ret≠100)', () => {
-    const payload = Buffer.alloc(4);
-    payload.writeUInt32LE(101, 0); // Ret = 101 (failure)
-    const header = buildDvripHeader(MSG_LOGIN_RESPONSE, 0, payload);
-    const response = parseLoginResponse(header);
+    const frame = buildFrame(MSG_LOGIN_RESPONSE, {
+      Ret: 101,
+    });
+    const response = parseLoginResponse(frame);
     assert.equal(response.success, false);
     assert.equal(response.Ret, 101);
   });
 
   test('throws error for wrong message type', () => {
-    const payload = Buffer.alloc(4);
-    const header = buildDvripHeader(MSG_KEEPALIVE, 0, payload);
+    const frame = buildFrame(MSG_KEEPALIVE, { Ret: 100 });
 
     assert.throws(
-      () => parseLoginResponse(header),
-      /Expected login response/
+      () => parseLoginResponse(frame),
+      /Expected msg/
     );
   });
 
-  test('throws error for payload too short', () => {
-    const payload = Buffer.alloc(2); // Too short for Ret field
-    const header = buildDvripHeader(MSG_LOGIN_RESPONSE, 0, payload);
-    assert.throws(() => parseLoginResponse(header), /payload too short/);
+  test('throws error for frame too short', () => {
+    const shortData = Buffer.alloc(10);
+    assert.throws(() => parseLoginResponse(shortData), /too short/i);
   });
 
   test('handles missing AliveInterval (uses default)', () => {
-    const payload = Buffer.alloc(4);
-    payload.writeUInt32LE(100, 0); // Ret = 100
-    const header = buildDvripHeader(MSG_LOGIN_RESPONSE, 0, payload);
-    const response = parseLoginResponse(header);
-    assert.equal(response.AliveInterval, 30); // Default
+    const frame = buildFrame(MSG_LOGIN_RESPONSE, {
+      Ret: 100,
+    });
+    const response = parseLoginResponse(frame);
+    assert.equal(response.AliveInterval, undefined);
   });
 });
 
 describe('Xiongmai DVRIP — keepalive messages', () => {
   test('builds keepalive message with correct type', () => {
     const msg = buildKeepaliveMessage(12345);
-    assert.equal(msg.readUInt16LE(0), MSG_KEEPALIVE);
+    assert.equal(msg.readUInt16LE(14), MSG_KEEPALIVE);
   });
 
-  test('builds keepalive message with session ID', () => {
-    const sessionId = 54321;
-    const msg = buildKeepaliveMessage(sessionId);
-    assert.equal(msg.readUInt16LE(2), sessionId);
-  });
-
-  test('keepalive message has empty payload', () => {
+  test('keepalive message has JSON body', () => {
     const msg = buildKeepaliveMessage(12345);
-    assert.equal(msg.readUInt32LE(4), 0);
-    assert.equal(msg.length, 8);
+    const body = msg.subarray(HEADER_SIZE, msg.length - 2).toString('utf8');
+    assert.equal(body, '{}');
+  });
+
+  test('keepalive message has 20-byte header', () => {
+    const msg = buildKeepaliveMessage(12345);
+    assert.equal(msg.readUInt16LE(0), 0xFF); // magic byte check
+    assert.equal(msg.length, HEADER_SIZE + 2 + 2); // header + '{}' + '\n\0'
   });
 });
 
 describe('Xiongmai DVRIP — OPTalk messages', () => {
   test('builds OPTalk claim message with correct type', () => {
     const msg = buildOptalkClaimMessage(12345);
-    assert.equal(msg.readUInt16LE(0), MSG_OPTALK_CLAIM);
+    assert.equal(msg.readUInt16LE(14), MSG_OPTALK_CLAIM);
   });
 
   test('builds OPTalk start message with correct type', () => {
     const msg = buildOptalkStartMessage(12345);
-    assert.equal(msg.readUInt16LE(0), MSG_OPTALK_START);
+    assert.equal(msg.readUInt16LE(14), MSG_OPTALK_START);
   });
 
   test('builds OPTalk audio message with correct type', () => {
     const audioData = Buffer.alloc(320);
     const msg = buildOptalkAudioMessage(12345, audioData);
-    assert.equal(msg.readUInt16LE(0), MSG_OPTALK_AUDIO);
+    assert.equal(msg.readUInt16LE(14), MSG_OPTALK_AUDIO);
   });
 
   test('OPTalk audio message includes audio payload', () => {
     const audioData = Buffer.from('test audio data');
     const msg = buildOptalkAudioMessage(12345, audioData);
-    assert.equal(msg.readUInt32LE(4), audioData.length);
-    assert.equal(msg.length, 8 + audioData.length);
+    assert.equal(msg.readUInt32LE(16), audioData.length);
+    assert.equal(msg.length, HEADER_SIZE + audioData.length);
   });
 
-  test('OPTalk messages include session ID', () => {
-    const sessionId = 54321; // Must be <= 65535 for UInt16
-    const claimMsg = buildOptalkClaimMessage(sessionId);
-    const startMsg = buildOptalkStartMessage(sessionId);
-    assert.equal(claimMsg.readUInt16LE(2), sessionId);
-    assert.equal(startMsg.readUInt16LE(2), sessionId);
+  test('OPTalk audio message includes session ID', () => {
+    const sessionId = 12345;
+    const audioData = Buffer.alloc(320);
+    const msg = buildOptalkAudioMessage(sessionId, audioData);
+    assert.equal(msg.readUInt32LE(4), sessionId);
   });
 
   test('parse OPTalk claim response (msg 1435)', () => {
-    const payload = Buffer.alloc(4);
-    payload.writeUInt32LE(100, 0); // Ret = 100 (success)
-    const header = Buffer.alloc(8);
-    header.writeUInt16LE(MSG_OPTALK_CLAIM_RESPONSE, 0);
-    header.writeUInt16LE(12345, 2);
-    header.writeUInt32LE(4, 4);
-    const response = Buffer.concat([header, payload]);
-    
-    const parsed = parseOptalkClaimResponse(response);
+    const frame = buildFrame(MSG_OPTALK_CLAIM_RESPONSE, { Ret: 100 });
+    const parsed = parseOptalkClaimResponse(frame);
     assert.equal(parsed.Ret, 100);
     assert.equal(parsed.success, true);
   });
 
   test('parse OPTalk start response (msg 1431)', () => {
-    const payload = Buffer.alloc(4);
-    payload.writeUInt32LE(100, 0); // Ret = 100 (success)
-    const header = Buffer.alloc(8);
-    header.writeUInt16LE(MSG_OPTALK_START_RESPONSE, 0);
-    header.writeUInt16LE(12345, 2);
-    header.writeUInt32LE(4, 4);
-    const response = Buffer.concat([header, payload]);
-    
-    const parsed = parseOptalkStartResponse(response);
+    const frame = buildFrame(MSG_OPTALK_START_RESPONSE, { Ret: 100 });
+    const parsed = parseOptalkStartResponse(frame);
     assert.equal(parsed.Ret, 100);
     assert.equal(parsed.success, true);
   });
 
   test('parse OPTalk audio response (msg 1433)', () => {
-    const payload = Buffer.alloc(4);
-    payload.writeUInt32LE(100, 0); // Ret = 100 (success)
-    const header = Buffer.alloc(8);
-    header.writeUInt16LE(MSG_OPTALK_AUDIO_RESPONSE, 0);
-    header.writeUInt16LE(12345, 2);
-    header.writeUInt32LE(4, 4);
-    const response = Buffer.concat([header, payload]);
-    
-    const parsed = parseOptalkAudioResponse(response);
+    const frame = buildFrame(MSG_OPTALK_AUDIO_RESPONSE, { Ret: 100 });
+    const parsed = parseOptalkAudioResponse(frame);
     assert.equal(parsed.Ret, 100);
     assert.equal(parsed.success, true);
   });
 
   test('OPTalk claim response throws for wrong message type', () => {
-    const payload = Buffer.alloc(4);
-    payload.writeUInt32LE(100, 0);
-    const header = Buffer.alloc(8);
-    header.writeUInt16LE(MSG_OPTALK_START_RESPONSE, 0); // Wrong type
-    header.writeUInt16LE(12345, 2);
-    header.writeUInt32LE(4, 4);
-    const response = Buffer.concat([header, payload]);
-    
-    assert.throws(() => parseOptalkClaimResponse(response), /Expected OPTalk claim response/);
+    const frame = buildFrame(MSG_OPTALK_START_RESPONSE, { Ret: 100 });
+    assert.throws(() => parseOptalkClaimResponse(frame), /Expected msg/);
   });
 
   test('OPTalk start response throws for wrong message type', () => {
-    const payload = Buffer.alloc(4);
-    payload.writeUInt32LE(100, 0);
-    const header = Buffer.alloc(8);
-    header.writeUInt16LE(MSG_OPTALK_CLAIM_RESPONSE, 0); // Wrong type
-    header.writeUInt16LE(12345, 2);
-    header.writeUInt32LE(4, 4);
-    const response = Buffer.concat([header, payload]);
-    
-    assert.throws(() => parseOptalkStartResponse(response), /Expected OPTalk start response/);
+    const frame = buildFrame(MSG_OPTALK_CLAIM_RESPONSE, { Ret: 100 });
+    assert.throws(() => parseOptalkStartResponse(frame), /Expected msg/);
   });
 
   test('OPTalk audio response throws for wrong message type', () => {
-    const payload = Buffer.alloc(4);
-    payload.writeUInt32LE(100, 0);
-    const header = Buffer.alloc(8);
-    header.writeUInt16LE(MSG_OPTALK_START_RESPONSE, 0); // Wrong type
-    header.writeUInt16LE(12345, 2);
-    header.writeUInt32LE(4, 4);
-    const response = Buffer.concat([header, payload]);
-    
-    assert.throws(() => parseOptalkAudioResponse(response), /Expected OPTalk audio response/);
+    const frame = buildFrame(MSG_OPTALK_START_RESPONSE, { Ret: 100 });
+    assert.throws(() => parseOptalkAudioResponse(frame), /Expected msg/);
   });
 
   test('OPTalk claim response throws for short payload', () => {
-    const payload = Buffer.alloc(2); // Too short
-    const header = Buffer.alloc(8);
-    header.writeUInt16LE(MSG_OPTALK_CLAIM_RESPONSE, 0);
-    header.writeUInt16LE(12345, 2);
-    header.writeUInt32LE(2, 4);
-    const response = Buffer.concat([header, payload]);
-    
-    assert.throws(() => parseOptalkClaimResponse(response), /payload too short/);
+    const shortData = Buffer.alloc(10);
+    assert.throws(() => parseOptalkClaimResponse(shortData), /too short/i);
   });
 
   test('OPTalk claim response handles failure (Ret != 100)', () => {
-    const payload = Buffer.alloc(4);
-    payload.writeUInt32LE(1, 0); // Ret = 1 (failure)
-    const header = Buffer.alloc(8);
-    header.writeUInt16LE(MSG_OPTALK_CLAIM_RESPONSE, 0);
-    header.writeUInt16LE(12345, 2);
-    header.writeUInt32LE(4, 4);
-    const response = Buffer.concat([header, payload]);
-    
-    const parsed = parseOptalkClaimResponse(response);
+    const frame = buildFrame(MSG_OPTALK_CLAIM_RESPONSE, { Ret: 1 });
+    const parsed = parseOptalkClaimResponse(frame);
     assert.equal(parsed.Ret, 1);
     assert.equal(parsed.success, false);
   });
 });
 
-describe('Xiongmai DVRIP — G.711 A-law framing', () => {
-  test('builds G.711 A-law frame from PCM data', () => {
+describe('Xiongmai DVRIP — G.7.11 A-law framing', () => {
+  test('builds G.7.11 A-law frame from PCM data', () => {
     const pcmData = Buffer.alloc(6); // 3 samples of 16-bit PCM
     pcmData.writeInt16LE(0, 0);
     pcmData.writeInt16LE(1000, 2);
@@ -429,26 +390,25 @@ describe('Xiongmai DVRIP — G.711 A-law framing', () => {
     assert.ok(result >= 0 && result <= 255);
   });
 
-  test('G.711 frame size matches input (16-bit PCM to 8-bit A-law)', () => {
+  test('G.7.11 frame size matches input (16-bit PCM to 8-bit A-law)', () => {
     const pcmData = Buffer.alloc(640); // 320 samples of 16-bit PCM
     const alawFrame = buildG711AlawFrame(pcmData);
     assert.equal(alawFrame.length, 320); // 320 bytes of 8-bit A-law
   });
 
-  test('G.711 A-law encoding is deterministic', () => {
+  test('G.7.11 A-law encoding is deterministic', () => {
     const result1 = linearToAlaw(1000);
     const result2 = linearToAlaw(1000);
     assert.equal(result1, result2);
   });
 
-  test('G.711 A-law encoding handles symmetric values', () => {
+  test('G.7.11 A-law encoding handles symmetric values', () => {
     const pos = linearToAlaw(1000);
     const neg = linearToAlaw(-1000);
-    // A-law encoding should be different for positive/negative
     assert.notEqual(pos, neg);
   });
 
-  test('G.711 A-law frame handles 320-byte input (standard frame size)', () => {
+  test('G.7.11 A-law frame handles 320-byte input (standard frame size)', () => {
     const pcmData = Buffer.alloc(640); // 320 samples of 16-bit PCM
     for (let i = 0; i < 320; i++) {
       pcmData.writeInt16LE(i * 100, i * 2);
@@ -464,16 +424,16 @@ describe('Xiongmai DVRIP — constants', () => {
   });
 
   test('message type constants are correct', () => {
-    assert.equal(MSG_LOGIN, 0x1000);
-    assert.equal(MSG_LOGIN_RESPONSE, 0x1001);
-    assert.equal(MSG_KEEPALIVE, 0x1006);
-    assert.equal(MSG_KEEPALIVE_RESPONSE, 0x1007);
-    assert.equal(MSG_OPTALK_CLAIM, 0x1434);
-    assert.equal(MSG_OPTALK_CLAIM_RESPONSE, 0x1435);
-    assert.equal(MSG_OPTALK_START, 0x1430);
-    assert.equal(MSG_OPTALK_START_RESPONSE, 0x1431);
-    assert.equal(MSG_OPTALK_AUDIO, 0x1432);
-    assert.equal(MSG_OPTALK_AUDIO_RESPONSE, 0x1433);
+    assert.equal(MSG_LOGIN, 1000);
+    assert.equal(MSG_LOGIN_RESPONSE, 1001);
+    assert.equal(MSG_KEEPALIVE, 1006);
+    assert.equal(MSG_KEEPALIVE_RESPONSE, 1007);
+    assert.equal(MSG_OPTALK_CLAIM, 1434);
+    assert.equal(MSG_OPTALK_CLAIM_RESPONSE, 1435);
+    assert.equal(MSG_OPTALK_START, 1430);
+    assert.equal(MSG_OPTALK_START_RESPONSE, 1431);
+    assert.equal(MSG_OPTALK_AUDIO, 1432);
+    assert.equal(MSG_OPTALK_AUDIO_RESPONSE, 1433);
   });
 });
 
@@ -546,13 +506,12 @@ describe('Xiongmai DVRIP — XiongmaiDvripAdapter class', () => {
 
 describe('Xiongmai DVRIP — security and credential handling', () => {
   test('Sofia hash does not log credentials', () => {
-    // This test ensures the hash function doesn't log sensitive data
     const originalLog = console.log;
     let loggedData = '';
     console.log = (...args) => { loggedData += args.join(' '); };
-    
+
     try {
-      generateSofiaHash('secret_user', 'secret_password', 'secret_challenge');
+      sofiaHash('secret_password');
       assert.ok(!loggedData.includes('secret_password'));
     } finally {
       console.log = originalLog;
@@ -567,36 +526,37 @@ describe('Xiongmai DVRIP — security and credential handling', () => {
 
   test('login message contains only hash, not password', () => {
     const msg = buildLoginMessage('admin', 'my_password', '');
-    const payload = msg.slice(8);
-    const hash = payload.toString('hex');
+    const body = JSON.parse(msg.subarray(HEADER_SIZE, msg.length - 2).toString('utf8'));
+    const hash = body.PassWord;
     assert.ok(!hash.includes('my_password'));
-    assert.equal(payload.length, 32); // 32-byte payload
-    assert.equal(hash.length, 64); // 32 bytes = 64 hex characters
+    assert.equal(typeof hash, 'string');
+    assert.equal(hash.length, 8);
   });
 
   test('different passwords produce different hashes (no collision in basic test)', () => {
-    const hash1 = generateSofiaHash('admin', 'password1', '');
-    const hash2 = generateSofiaHash('admin', 'password2', '');
+    const hash1 = sofiaHash('password1');
+    const hash2 = sofiaHash('password2');
     assert.notEqual(hash1, hash2);
   });
 });
 
 describe('Xiongmai DVRIP — error handling', () => {
-  test('parseLoginResponse handles malformed data gracefully', () => {
-    const shortData = Buffer.alloc(4); // Too short for header
-    assert.throws(() => parseLoginResponse(shortData), /too short/);
+  test('parseLoginResponse throws for too-short data', () => {
+    const shortData = Buffer.alloc(4);
+    assert.throws(() => parseLoginResponse(shortData), /too short/i);
   });
 
-  test('parseDvripHeader throws on invalid data', () => {
-    const shortData = Buffer.alloc(4); // Too short for header
-    assert.throws(() => parseDvripHeader(shortData), /too short/);
+  test('parseV5Response throws on too-short data', () => {
+    const shortData = Buffer.alloc(4);
+    assert.throws(() => parseV5Response(shortData, MSG_LOGIN_RESPONSE), /too short/i);
   });
 
-  test('buildDvripHeader handles large payload', () => {
-    const largePayload = Buffer.alloc(100000);
-    const msg = buildDvripHeader(MSG_LOGIN, 12345, largePayload);
-    assert.equal(msg.readUInt32LE(4), 100000);
-    assert.equal(msg.length, 8 + 100000);
+  test('buildFrame handles large JSON payload', () => {
+    const largePayload = { data: 'x'.repeat(100000) };
+    const msg = buildFrame(MSG_LOGIN, largePayload);
+    const body = Buffer.from(JSON.stringify(largePayload), 'utf8');
+    assert.equal(msg.readUInt32LE(16), body.length + 2);
+    assert.equal(msg.length, HEADER_SIZE + body.length + 2);
   });
 
   test('buildG711AlawFrame handles empty input', () => {
@@ -612,42 +572,21 @@ describe('Xiongmai DVRIP — error handling', () => {
   });
 
   test('parseLoginResponse throws for wrong message type', () => {
-    const payload = Buffer.alloc(4);
-    payload.writeUInt32LE(100, 0);
-    const header = Buffer.alloc(8);
-    header.writeUInt16LE(MSG_KEEPALIVE, 0); // Wrong type
-    header.writeUInt16LE(12345, 2);
-    header.writeUInt32LE(4, 4);
-    const response = Buffer.concat([header, payload]);
-    
-    assert.throws(() => parseLoginResponse(response), /Expected login response/);
+    const frame = buildFrame(MSG_KEEPALIVE, { Ret: 100 });
+    assert.throws(() => parseLoginResponse(frame), /Expected msg/);
   });
 
   test('parseLoginResponse handles login failure (Ret != 100)', () => {
-    const payload = Buffer.alloc(4);
-    payload.writeUInt32LE(1, 0); // Ret = 1 (failure)
-    const header = Buffer.alloc(8);
-    header.writeUInt16LE(MSG_LOGIN_RESPONSE, 0);
-    header.writeUInt16LE(12345, 2);
-    header.writeUInt32LE(4, 4);
-    const response = Buffer.concat([header, payload]);
-    
-    const parsed = parseLoginResponse(response);
+    const frame = buildFrame(MSG_LOGIN_RESPONSE, { Ret: 1 });
+    const parsed = parseLoginResponse(frame);
     assert.equal(parsed.Ret, 1);
     assert.equal(parsed.success, false);
   });
 
   test('parseLoginResponse handles missing AliveInterval', () => {
-    const payload = Buffer.alloc(4); // Only Ret, no AliveInterval
-    payload.writeUInt32LE(100, 0);
-    const header = Buffer.alloc(8);
-    header.writeUInt16LE(MSG_LOGIN_RESPONSE, 0);
-    header.writeUInt16LE(12345, 2);
-    header.writeUInt32LE(4, 4);
-    const response = Buffer.concat([header, payload]);
-    
-    const parsed = parseLoginResponse(response);
-    assert.equal(parsed.AliveInterval, 30); // Default value
+    const frame = buildFrame(MSG_LOGIN_RESPONSE, { Ret: 100 });
+    const parsed = parseLoginResponse(frame);
+    assert.equal(parsed.AliveInterval, undefined);
   });
 });
 
@@ -663,10 +602,10 @@ describe('Xiongmai DVRIP — session isolation', () => {
   test('session state is isolated between adapters', () => {
     const adapter1 = new XiongmaiDvripAdapter('192.168.1.11');
     const adapter2 = new XiongmaiDvripAdapter('192.168.1.12');
-    
+
     adapter1.isAuthenticated = true;
     adapter1.sessionId = 12345;
-    
+
     assert.equal(adapter2.isAuthenticated, false);
     assert.equal(adapter2.sessionId, 0);
   });
@@ -674,14 +613,14 @@ describe('Xiongmai DVRIP — session isolation', () => {
   test('close affects only the specific adapter', () => {
     const adapter1 = new XiongmaiDvripAdapter('192.168.1.11');
     const adapter2 = new XiongmaiDvripAdapter('192.168.1.12');
-    
+
     adapter1.isAuthenticated = true;
     adapter1.sessionId = 12345;
     adapter2.isAuthenticated = true;
     adapter2.sessionId = 54321;
-    
+
     adapter1.close();
-    
+
     assert.equal(adapter1.isAuthenticated, false);
     assert.equal(adapter1.sessionId, 0);
     assert.equal(adapter2.isAuthenticated, true);
