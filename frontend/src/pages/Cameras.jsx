@@ -2,6 +2,7 @@ import React, { useState, useEffect, useRef } from 'react';
 import api from '../services/api';
 import { useNavigate } from 'react-router-dom';
 import Hls from 'hls.js';
+import TwoWayAudio from '../components/TwoWayAudio';
 
 const hlsBaseUrl = (import.meta.env.VITE_HLS_BASE_URL || '/hls').replace(/\/$/, '');
 
@@ -269,6 +270,7 @@ export default function Cameras() {
   const [showAddForm, setShowAddForm] = useState(false);
   const [selectedCamera, setSelectedCamera] = useState(null);
   const [streamCamera, setStreamCamera] = useState(null);
+  const [streamToken, setStreamToken] = useState(null);
   const videoRef = useRef(null);
   const hlsRef = useRef(null);
 
@@ -303,6 +305,7 @@ export default function Cameras() {
     try {
       const tokenRes = await api.post('/camera-views', { camera_id: camera.id });
       const streamToken = tokenRes.data.streamToken;
+      setStreamToken(streamToken);
       const targetCamera = camera;
       setTimeout(() => {
         const video = videoRef.current;
@@ -341,8 +344,32 @@ export default function Cameras() {
       hlsRef.current.destroy();
       hlsRef.current = null;
     }
+    setStreamToken(null);
     setStreamCamera(null);
   };
+
+  // ── Auto-detect Two-Way Audio capability per camera type ─────────────
+  function detectTwoWayAudioCapability(camera) {
+    if (!camera) return { supported: false, reason: 'camera not found' };
+    if (camera.connection_type === 'dvrip') {
+      return {
+        supported: true,
+        protocol: 'optalk',
+        audio_format: 'G.711 A-law',
+        audio_sample_rate: 8000,
+        audio_frame_size: 320,
+        reason: null,
+      };
+    }
+    return {
+      supported: false,
+      protocol: null,
+      audio_format: null,
+      audio_sample_rate: null,
+      audio_frame_size: null,
+      reason: 'No speaker/talkback detected for this camera type',
+    };
+  }
 
   return (
     <>
@@ -438,6 +465,16 @@ export default function Cameras() {
                 style={{ width: '100%', maxHeight: '70vh', background: '#000' }}
               />
             </div>
+            {streamToken && (
+              <div style={{ padding: '1rem' }}>
+                <TwoWayAudio
+                  cameraId={streamCamera.id}
+                  cameraName={streamCamera.name}
+                  streamToken={streamToken}
+                  capabilities={detectTwoWayAudioCapability(streamCamera)}
+                />
+              </div>
+            )}
           </div>
         </div>
       )}

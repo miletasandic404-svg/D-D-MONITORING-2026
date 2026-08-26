@@ -62,6 +62,22 @@ primary_region = "fra"
   [[services.ports]]
     port = 8889
 
+# --- Two-Way Audio API (browser ↔ camera speaker) ---
+# Exposed on external port 8890 with TLS. The frontend calls
+# https://dnd-media-server.fly.dev:8890/api/audio/<cameraId>/...
+# Stream tokens (from POST /api/camera-views) are validated against
+# camera_stream_tokens before any audio is forwarded to a camera.
+[[services]]
+  internal_port = 8890
+  protocol = "tcp"
+  [[services.ports]]
+    port = 8890
+    handlers = ["tls", "http"]
+  [services.concurrency]
+    type = "connections"
+    hard_limit = 100
+    soft_limit = 50
+
 # =========================================================
 # NAMERNO NEMA [[services]] bloka za port 9997 (MediaMTX REST API).
 # Taj port ostaje dostupan SAMO unutar kontejnera (localhost, gde ga

@@ -62,10 +62,14 @@ else
   echo "[start.sh] API_BASE_URL/MEDIA_NODE_ID/MEDIA_NODE_HEARTBEAT_SECRET nisu postavljeni -- heartbeat worker se preskace."
 fi
 
-echo "[start.sh] Procesi pokrenuti (mediamtx=$MEDIAMTX_PID, worker=$WORKER_PID, xiongmai=$XIONGMAI_PID${HEARTBEAT_PID:+, heartbeat=$HEARTBEAT_PID}). Cekam..."
+echo "[start.sh] Pokrecem two-way-audio-api..."
+node /app/workers/two-way-audio-api.js &
+TWA_PID=$!
+
+echo "[start.sh] Procesi pokrenuti (mediamtx=$MEDIAMTX_PID, worker=$WORKER_PID, xiongmai=$XIONGMAI_PID, audio-api=$TWA_PID${HEARTBEAT_PID:+, heartbeat=$HEARTBEAT_PID}). Cekam..."
 
 # Skupi aktivne PID-ove u niz da wait -n i kill budu konzistentni.
-PIDS=("$MEDIAMTX_PID" "$WORKER_PID" "$XIONGMAI_PID")
+PIDS=("$MEDIAMTX_PID" "$WORKER_PID" "$XIONGMAI_PID" "$TWA_PID")
 if [ -n "$HEARTBEAT_PID" ]; then
   PIDS+=("$HEARTBEAT_PID")
 fi

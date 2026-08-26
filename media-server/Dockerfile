@@ -37,7 +37,7 @@ RUN chmod +x /start.sh \
  && head -1 /start.sh | grep -q '^#!/bin/bash$' \
  && echo "start.sh OK: executable, correct shebang"
 
-EXPOSE 8554 8888 8889 9997
+EXPOSE 8554 8888 8889 8890 9997
 
 # node:20-alpine's base image sets ENTRYPOINT ["docker-entrypoint.sh"].
 # Without resetting it here, CMD below is passed to that inherited
