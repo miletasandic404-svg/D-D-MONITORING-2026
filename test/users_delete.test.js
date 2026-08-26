@@ -320,9 +320,6 @@ describe('api/users — Add Operator flow (POST)', () => {
       if (text.includes('SELECT id FROM users WHERE email')) {
         return { rows: [], rowCount: 0 };
       }
-      if (text.startsWith('UPDATE users')) {
-        return { rows: [], rowCount: 1 };
-      }
       return { rows: [], rowCount: 0 };
     };
 
@@ -341,11 +338,9 @@ describe('api/users — Add Operator flow (POST)', () => {
     assert.equal(mockedCreateUserCalls[0].organizationId, 'org-1');
     assert.equal(mockedCreateUserCalls[0].userType, 'operator');
 
-    // Verify UPDATE uses the same organization_id
-    const updateQuery = queryCalls.find(c => c.text.startsWith('UPDATE users'));
-    assert.ok(updateQuery, 'UPDATE query should have run');
-    assert.equal(updateQuery.params[0], 'org-1'); // organization_id = $1
-    assert.equal(updateQuery.params[1], 'operator'); // user_type = $2
+    // Verify NO redundant UPDATE query runs (organization_id set by createUser internally)
+    const updateQuery = queryCalls.find(c => c.text.startsWith('UPDATE users') && c.text.includes('organization_id'));
+    assert.ok(!updateQuery, 'Redundant UPDATE for organization_id should NOT run');
   });
 
   test('POST /api/users rejects operator role (403)', async () => {
@@ -385,9 +380,6 @@ describe('api/users — Add Operator flow (POST)', () => {
       if (text.includes('SELECT id FROM users WHERE email')) {
         return { rows: [], rowCount: 0 };
       }
-      if (text.startsWith('UPDATE users')) {
-        return { rows: [], rowCount: 1 };
-      }
       return { rows: [], rowCount: 0 };
     };
 
@@ -400,8 +392,9 @@ describe('api/users — Add Operator flow (POST)', () => {
 
     assert.equal(res.statusCode, 200);
 
-    const updateQuery = queryCalls.find(c => c.text.startsWith('UPDATE users'));
-    assert.equal(updateQuery.params[1], 'operator'); // default user_type
+    // Verify createUser was called with default user_type 'operator'
+    assert.equal(mockedCreateUserCalls.length, 1);
+    assert.equal(mockedCreateUserCalls[0].userType, 'operator');
   });
 
   test('POST /api/users returns 400 for invalid email', async () => {

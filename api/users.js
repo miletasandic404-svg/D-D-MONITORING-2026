@@ -155,6 +155,7 @@ module.exports = async (req, res) => {
 
     return sendError(res, 405, 'Method not allowed.');
   }
+
   // GET - List all users
   if (req.method === 'GET') {
     const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
@@ -187,7 +188,7 @@ module.exports = async (req, res) => {
       const data = inviteSchema.parse(req.body || {});
       const { email, user_type } = data;
 
-      // Check if email already exists
+      // Check if email already exists (org-scoped)
       try {
         const existingUser = await db.queryAsOrg(
           auth.organizationId,
@@ -216,14 +217,6 @@ module.exports = async (req, res) => {
         organizationId: auth.organizationId,
         userType: user_type,
       });
-
-      await db.queryAsOrg(
-        auth.organizationId,
-        `UPDATE users
-         SET organization_id = $1, user_type = $2, status = 'invited'
-         WHERE id = $3`,
-        [auth.organizationId, user_type, created.user.id],
-      );
 
       return sendSuccess(res, {
         user: { id: created.user.id, email: created.user.email, user_type, status: 'invited' },
@@ -279,45 +272,45 @@ module.exports = async (req, res) => {
         params,
       );
 
-       return sendSuccess(res, { message: 'User updated successfully' });
-     } catch (err) {
-       if (err.name === 'ZodError') {
-         return sendError(res, 400, 'Validation failed',
-           err.issues.map(e => ({ field: e.path.join('.'), message: e.message }))
-         );
-       }
-       logger.error('Error updating user', { error: err.message });
-       Sentry.captureException(err);
-       return sendError(res, 500, err.message);
-     }
-   }
+      return sendSuccess(res, { message: 'User updated successfully' });
+    } catch (err) {
+      if (err.name === 'ZodError') {
+        return sendError(res, 400, 'Validation failed',
+          err.issues.map(e => ({ field: e.path.join('.'), message: e.message }))
+        );
+      }
+      logger.error('Error updating user', { error: err.message });
+      Sentry.captureException(err);
+      return sendError(res, 500, err.message);
+    }
+  }
 
-   // DELETE - Delete a user (org-scoped)
-   if (req.method === 'DELETE') {
-     const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
-     if (!auth) return;
+  // DELETE - Delete a user (org-scoped)
+  if (req.method === 'DELETE') {
+    const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
+    if (!auth) return;
 
-     try {
-       const { id } = req.query;
-       if (!id) return sendError(res, 400, 'id is required');
+    try {
+      const { id } = req.query;
+      if (!id) return sendError(res, 400, 'id is required');
 
-       const result = await db.queryAsOrg(
-         auth.organizationId,
-         'DELETE FROM users WHERE id = $1 AND organization_id = $2 RETURNING id, email',
-         [id, auth.organizationId],
-       );
+      const result = await db.queryAsOrg(
+        auth.organizationId,
+        'DELETE FROM users WHERE id = $1 AND organization_id = $2 RETURNING id, email',
+        [id, auth.organizationId],
+      );
 
-       if (result.rows.length === 0) {
-         return sendError(res, 404, 'User not found');
-       }
+      if (result.rows.length === 0) {
+        return sendError(res, 404, 'User not found');
+      }
 
-       return sendSuccess(res, { message: 'User deleted successfully' });
-     } catch (err) {
-       logger.error('DELETE /api/users error', { error: err.message });
-       Sentry.captureException(err);
-       return sendError(res, 500, err.message);
-     }
-   }
+      return sendSuccess(res, { message: 'User deleted successfully' });
+    } catch (err) {
+      logger.error('DELETE /api/users error', { error: err.message });
+      Sentry.captureException(err);
+      return sendError(res, 500, err.message);
+    }
+  }
 
-   return sendError(res, 405, 'Method not allowed');
+  return sendError(res, 405, 'Method not allowed');
 };

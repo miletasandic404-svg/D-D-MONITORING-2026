@@ -28,13 +28,13 @@ describe('lib/auth.js — createUser field mapping', () => {
     authSource = fs.readFileSync(authFilePath, 'utf-8');
   });
 
-  test('createUser signUpEmail body uses organization_id as key', () => {
+  test('createUser signUpEmail body does NOT use organization_id (input: false)', () => {
     const match = authSource.match(/auth\.api\.signUpEmail\([\s\S]*?body:\s*\{([\s\S]*?)\}\s*\)/);
     assert.ok(match, 'Should find signUpEmail body block');
     const bodyContent = match[1];
 
-    assert.match(bodyContent, /organization_id\s*:/,
-      'signUpEmail body must use organization_id as a key');
+    assert.doesNotMatch(bodyContent, /organization_id\s*:/,
+      'signUpEmail body must NOT use organization_id (Better Auth has input: false)');
   });
 
   test('createUser signUpEmail body uses user_type as key', () => {
@@ -93,8 +93,8 @@ describe('lib/auth.js — createUser field mapping', () => {
   });
 
   test('Add Operator flow integrity: api/users.js calls createUser correctly', () => {
-    // Verify that api/users.js still calls createUser with org-scoped values
-    // and runs the catch-up UPDATE (safety net)
+    // Verify that api/users.js calls createUser with org-scoped values
+    // organization_id is set by createUser internally via updateUser
     const usersPath = path.join(__dirname, '..', 'api', 'users.js');
     const usersSource = fs.readFileSync(usersPath, 'utf-8');
 
@@ -103,8 +103,8 @@ describe('lib/auth.js — createUser field mapping', () => {
     assert.match(usersSource, /userType: user_type/,
       'api/users.js should pass user_type as userType');
 
-    // The catch-up UPDATE should still exist as safety net
-    assert.match(usersSource, /UPDATE users SET.*organization_id/,
-      'api/users.js should still have catch-up UPDATE for organization_id');
+    // No redundant UPDATE for organization_id should exist (set by createUser)
+    assert.doesNotMatch(usersSource, /UPDATE users[\s\S]*?organization_id[\s\S]*?user_type[\s\S]*?status[\s\S]*?WHERE id/,
+      'api/users.js should NOT have redundant UPDATE for organization_id');
   });
 });
