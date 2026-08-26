@@ -256,6 +256,15 @@ async function insertCamera(task, rtspUrl, manufacturer, model) {
     || [manufacturer, model].filter(Boolean).join(' ').trim()
     || `Camera ${task.ip || 'LAN'}`;
 
+  // Location metadata is forwarded through the task `result` jsonb payload by
+  // setup-create (the camera_setup_tasks table has no dedicated location columns).
+  // The media-node agent is the only process that can reach LAN cameras, so it
+  // persists the user-supplied location onto the created cameras row here.
+  const taskResult = (task.result && typeof task.result === 'object') ? task.result : {};
+  const locLocation = (taskResult && taskResult.location != null) ? taskResult.location : null;
+  const locLat = (taskResult && taskResult.lat != null) ? taskResult.lat : null;
+  const locLng = (taskResult && taskResult.lng != null) ? taskResult.lng : null;
+
   // Strip credentials from RTSP URL and store them encrypted separately
   const { url: cleanUrl, username, password } = extractCredentialsFromUrl(rtspUrl);
   const encPassword = password ? encrypt(password) : null;
@@ -265,14 +274,14 @@ async function insertCamera(task, rtspUrl, manufacturer, model) {
   try {
     result = await queryAsTaskOrg(task,
       `INSERT INTO cameras (id, name, rtsp_url, enabled, organization_id, site_id, media_node_id,
-           rtsp_username, rtsp_password_encrypted)
+           rtsp_username, rtsp_password_encrypted, location, lat, lng)
        VALUES ($1, $2, $3, true, $4,
          COALESCE($5, (SELECT id FROM sites WHERE organization_id = $4 ORDER BY created_at ASC LIMIT 1)),
-         $6, $7, $8)
+         $6, $7, $8, $9, $10, $11)
        ON CONFLICT (id) DO NOTHING
        RETURNING id`,
       [cameraId, name, cleanUrl, task.organization_id, task.site_id || null, MEDIA_NODE_ID,
-       username || null, encPassword],
+       username || null, encPassword, locLocation, locLat, locLng],
     );
   } catch (err) {
     // Phase 7: unique index uq_cameras_org_rtsp — the same RTSP source is
@@ -307,18 +316,24 @@ async function insertDvripCamera(task, ip, port, creds) {
     || `DVRIP Camera ${ip || 'LAN'}`;
   const encPassword = creds.password ? encrypt(creds.password) : null;
 
+  // Location metadata (if any) is forwarded via task.result jsonb by setup-create.
+  const taskResult = (task.result && typeof task.result === 'object') ? task.result : {};
+  const locLocation = (taskResult && taskResult.location != null) ? taskResult.location : null;
+  const locLat = (taskResult && taskResult.lat != null) ? taskResult.lat : null;
+  const locLng = (taskResult && taskResult.lng != null) ? taskResult.lng : null;
+
   let result;
   try {
     result = await queryAsTaskOrg(task,
       `INSERT INTO cameras (id, name, rtsp_url, enabled, organization_id, site_id, media_node_id,
-           rtsp_username, rtsp_password_encrypted, connection_type, ip, port)
+           rtsp_username, rtsp_password_encrypted, connection_type, ip, port, location, lat, lng)
         VALUES ($1, $2, NULL, true, $3,
           COALESCE($4, (SELECT id FROM sites WHERE organization_id = $3 ORDER BY created_at ASC LIMIT 1)),
-          $5, $6, $7, 'dvrip', $8, $9)
+          $5, $6, $7, 'dvrip', $8, $9, $10, $11, $12)
         ON CONFLICT (id) DO NOTHING
         RETURNING id`,
       [cameraId, name, task.organization_id, task.site_id || null, MEDIA_NODE_ID,
-       creds.username || null, encPassword, ip, port],
+       creds.username || null, encPassword, ip, port, locLocation, locLat, locLng],
     );
   } catch (err) {
     // Unique violation on the generated id (extremely unlikely — random id).

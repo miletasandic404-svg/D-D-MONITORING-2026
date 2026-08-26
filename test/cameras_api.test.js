@@ -328,3 +328,183 @@ describe('api/cameras — Phase 2: no direct camera creation', () => {
     assert.deepEqual(healthCall.params, ['node-1']);
   });
 });
+describe('api/cameras — camera location flow', () => {
+  beforeEach(() => {
+    resetFakes();
+  });
+
+  test('F) setup-create forwards location/lat/lng into the task result jsonb', async () => {
+    dbScript = (text) => {
+      if (text.startsWith('INSERT INTO camera_setup_tasks')) return { rows: [{ id: 'task-loc-1', status: 'pending' }] };
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Yard', location: 'Front yard', lat: 45.0, lng: -75.0 },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+    const taskInsert = queryCalls.find((c) => c.text.startsWith('INSERT INTO camera_setup_tasks'));
+    assert.ok(taskInsert, 'a setup task was created');
+    assert.match(taskInsert.text, /result/, 'INSERT must include the result column');
+    const payload = JSON.parse(taskInsert.params[12]);
+    assert.equal(payload.location, 'Front yard');
+    assert.equal(payload.lat, 45.0);
+    assert.equal(payload.lng, -75.0);
+  });
+
+  test('B) setup-create without location stores nulls in the task result jsonb', async () => {
+    dbScript = (text) => {
+      if (text.startsWith('INSERT INTO camera_setup_tasks')) return { rows: [{ id: 'task-loc-2', status: 'pending' }] };
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Yard' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    const taskInsert = queryCalls.find((c) => c.text.startsWith('INSERT INTO camera_setup_tasks'));
+    const payload = JSON.parse(taskInsert.params[12]);
+    assert.equal(payload.location, null);
+    assert.equal(payload.lat, null);
+    assert.equal(payload.lng, null);
+  });
+
+  test('D) setup-create rejects out-of-range latitude (400)', async () => {
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', location: 'x', lat: 95, lng: 0 },
+    });
+    const res = makeRes();
+    await handler(req, res);
+    assert.equal(res.statusCode, 400);
+  });
+
+  test('E) setup-create rejects out-of-range longitude (400)', async () => {
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'onvif', ip: '192.168.1.50', location: 'x', lat: 0, lng: 200 },
+    });
+    const res = makeRes();
+    await handler(req, res);
+    assert.equal(res.statusCode, 400);
+  });
+
+  test('H) GET /api/cameras returns location/lat/lng columns', async () => {
+    dbScript = (text) => {
+      if (text.includes('FROM cameras c')) {
+        return {
+          rows: [{ id: 'CAM-01', name: 'Yard', rtsp_url: 'rtsp://camera-ip/stream', enabled: true, location: 'Front yard', lat: 45.0, lng: -75.0 }],
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({ method: 'GET' });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+    const listQuery = queryCalls.find((c) => c.text.includes('FROM cameras c'));
+    assert.ok(listQuery, 'GET /cameras ran the cameras query');
+    assert.match(listQuery.text, /c\.location/, 'SELECT must include c.location');
+    assert.match(listQuery.text, /c\.lat/, 'SELECT must include c.lat');
+    assert.match(listQuery.text, /c\.lng/, 'SELECT must include c.lng');
+    assert.equal(res.body.cameras[0].location, 'Front yard');
+    assert.equal(res.body.cameras[0].lat, 45.0);
+    assert.equal(res.body.cameras[0].lng, -75.0);
+  });
+
+  test('A) POST /api/cameras (upsert) writes location/lat/lng to the cameras row', async () => {
+    dbScript = (text) => {
+      if (text.includes('SELECT 1 FROM cameras WHERE organization_id')) return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT organization_id, media_node_id, rtsp_url FROM cameras')) {
+        return { rows: [{ ...existingRow }] };
+      }
+      if (text.startsWith('INSERT INTO cameras')) return { rows: [], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      body: { id: 'CAM-01', name: 'Yard Cam', location: 'Front yard', lat: 45.0, lng: -75.0 },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.body.success, true);
+    const insert = queryCalls.find((c) => c.text.startsWith('INSERT INTO cameras'));
+    assert.ok(insert, 'an upsert ran for the existing camera');
+    assert.equal(insert.params[3], 'Front yard'); // location
+    assert.equal(insert.params[4], 45.0); // lat
+    assert.equal(insert.params[5], -75.0); // lng
+  });
+
+  test('C) POST /api/cameras (upsert) allows clearing location/lat/lng (NULL)', async () => {
+    dbScript = (text) => {
+      if (text.includes('SELECT 1 FROM cameras WHERE organization_id')) return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT organization_id, media_node_id, rtsp_url FROM cameras')) {
+        return { rows: [{ ...existingRow }] };
+      }
+      if (text.startsWith('INSERT INTO cameras')) return { rows: [], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      body: { id: 'CAM-01', name: 'Yard Cam' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 201);
+    const insert = queryCalls.find((c) => c.text.startsWith('INSERT INTO cameras'));
+    assert.equal(insert.params[3], null); // location
+    assert.equal(insert.params[4], null); // lat
+    assert.equal(insert.params[5], null); // lng
+  });
+
+  test('D) POST /api/cameras rejects invalid latitude (400)', async () => {
+    const req = makeReq({ method: 'POST', body: { id: 'CAM-01', name: 'x', lat: 95, lng: 0 } });
+    const res = makeRes();
+    await handler(req, res);
+    assert.equal(res.statusCode, 400);
+  });
+
+  test('E) POST /api/cameras rejects invalid longitude (400)', async () => {
+    const req = makeReq({ method: 'POST', body: { id: 'CAM-01', name: 'x', lat: 0, lng: 200 } });
+    const res = makeRes();
+    await handler(req, res);
+    assert.equal(res.statusCode, 400);
+  });
+
+  test('I) POST /api/cameras: updating a camera of another org is blocked (403, no INSERT)', async () => {
+    dbScript = (text) => {
+      if (text.includes('SELECT organization_id, media_node_id, rtsp_url FROM cameras')) {
+        return { rows: [{ ...otherOrgRow }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      body: { id: 'CAM-OTHER', name: 'x', location: 'yard', lat: 1, lng: 2 },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /different organization/i);
+    const cameraInsert = queryCalls.find((c) => c.text.startsWith('INSERT INTO cameras'));
+    assert.equal(cameraInsert, undefined, 'no camera INSERT must run for a different-org camera');
+  });
+});
+

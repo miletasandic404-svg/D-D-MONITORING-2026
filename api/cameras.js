@@ -69,6 +69,13 @@ module.exports = async (req, res) => {
       camera_name: z.string().max(255).optional().nullable(),
       site_id: z.string().uuid().optional().nullable(),
       camera_id: z.string().max(64).optional().nullable(),
+      // Location metadata is forwarded through the task `result` jsonb payload so
+      // the media-node agent can persist it on the created cameras row. The
+      // dedicated location columns are part of the cameras table (no task-level
+      // column), so they are carried via result JSON instead of a schema change.
+      location: z.string().max(200).optional().nullable(),
+      lat: z.number().min(-90).max(90).optional().nullable(),
+      lng: z.number().min(-180).max(180).optional().nullable(),
     });
 
     let data;
@@ -125,12 +132,13 @@ module.exports = async (req, res) => {
       const inserted = await db.queryAsOrg(
         auth.organizationId,
         `INSERT INTO camera_setup_tasks
-           (organization_id, site_id, created_by, mode, ip, onvif_port, username, password, encrypted_credentials, rtsp_url, camera_name)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+           (organization_id, site_id, created_by, mode, ip, onvif_port, username, password, encrypted_credentials, rtsp_url, camera_name, assigned_node_id, result)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13)
          RETURNING id, status`,
         [auth.organizationId, data.site_id || null, auth.userId, data.mode,
-         data.ip || null, data.onvif_port || 80, null, null,
-         encryptedCredentials, cleanRtspUrl, data.camera_name || null],
+          data.ip || null, data.onvif_port || 80, null, null,
+          encryptedCredentials, cleanRtspUrl, data.camera_name || null, node.id,
+          JSON.stringify({ location: data.location ?? null, lat: data.lat ?? null, lng: data.lng ?? null })],
       );
       const task = inserted.rows[0];
       await logAudit({

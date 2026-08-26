@@ -123,6 +123,9 @@ function AddCameraForm({ onSuccess, onCancel }) {
         camera_name: newCamera.name.trim(),
         username: newCamera.username || undefined,
         password: newCamera.password || undefined,
+        location: newCamera.location || null,
+        lat: newCamera.lat ? parseFloat(newCamera.lat) : null,
+        lng: newCamera.lng ? parseFloat(newCamera.lng) : null,
       });
       const taskId = createRes.data.taskId;
       const result = await pollTask(taskId, 60000);
@@ -269,6 +272,19 @@ export default function Cameras() {
   const [loading, setLoading] = useState(true);
   const [showAddForm, setShowAddForm] = useState(false);
   const [selectedCamera, setSelectedCamera] = useState(null);
+  const [editLocation, setEditLocation] = useState('');
+  const [editLat, setEditLat] = useState('');
+  const [editLng, setEditLng] = useState('');
+  const [editError, setEditError] = useState('');
+  const [editSaving, setEditSaving] = useState(false);
+  useEffect(() => {
+    if (selectedCamera) {
+      setEditLocation(selectedCamera.location || '');
+      setEditLat(selectedCamera.lat != null ? String(selectedCamera.lat) : '');
+      setEditLng(selectedCamera.lng != null ? String(selectedCamera.lng) : '');
+      setEditError('');
+    }
+  }, [selectedCamera]);
   const [streamCamera, setStreamCamera] = useState(null);
   const [streamToken, setStreamToken] = useState(null);
   const videoRef = useRef(null);
@@ -346,6 +362,35 @@ export default function Cameras() {
     }
     setStreamToken(null);
     setStreamCamera(null);
+  };
+
+  const handleSaveLocation = async () => {
+    const latVal = editLat;
+    const lngVal = editLng;
+    if (latVal && (isNaN(parseFloat(latVal)) || parseFloat(latVal) < -90 || parseFloat(latVal) > 90)) {
+      setEditError('Latitude must be between -90 and 90');
+      return;
+    }
+    if (lngVal && (isNaN(parseFloat(lngVal)) || parseFloat(lngVal) < -180 || parseFloat(lngVal) > 180)) {
+      setEditError('Longitude must be between -180 and 180');
+      return;
+    }
+    setEditSaving(true);
+    try {
+      await api.post('/cameras', {
+        id: selectedCamera.id,
+        name: selectedCamera.name,
+        location: editLocation || null,
+        lat: latVal ? parseFloat(latVal) : null,
+        lng: lngVal ? parseFloat(lngVal) : null,
+      });
+      setSelectedCamera(null);
+      fetchCameras();
+    } catch (e) {
+      setEditError(e.response?.data?.error || 'Failed to save location');
+    } finally {
+      setEditSaving(false);
+    }
   };
 
   // ── Auto-detect Two-Way Audio capability per camera type ─────────────
@@ -438,14 +483,20 @@ export default function Cameras() {
               <button onClick={() => setSelectedCamera(null)} style={{ background: 'none', border: 'none', color: '#8ab0c9', fontSize: '1.5rem', cursor: 'pointer' }}>&times;</button>
             </div>
             <div style={{ display: 'grid', gap: '1rem' }}>
-              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Name</label><div style={{ color: '#dff7ff', marginTop: '.25rem' }}>{selectedCamera.name}</div></div>
-              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>ID</label><div style={{ color: '#dff7ff', marginTop: '.25rem', fontSize: '.85rem', fontFamily: 'monospace' }}>{selectedCamera.id}</div></div>
-              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Location</label><div style={{ color: '#dff7ff', marginTop: '.25rem' }}>{selectedCamera.location || 'Not set'}</div></div>
-              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>FPS</label><div style={{ color: '#dff7ff', marginTop: '.25rem' }}>{selectedCamera.fps || 'Unknown'}</div></div>
-              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Status</label><div style={{ color: selectedCamera.enabled !== false ? '#00d450' : '#ff5050', marginTop: '.25rem' }}>{selectedCamera.enabled !== false ? 'Online' : 'Offline'}</div></div>
-              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>HLS Base URL</label><div style={{ color: '#dff7ff', marginTop: '.25rem', fontSize: '.85rem', fontFamily: 'monospace', wordBreak: 'break-all' }}>{selectedCamera.hls_base_url || 'Default'}</div></div>
-            </div>
-            <button onClick={() => setSelectedCamera(null)} style={{ marginTop: '1.5rem', width: '100%', padding: '.8rem', background: 'rgba(87,125,196,.2)', border: 'none', color: '#dff7ff', borderRadius: '8px', cursor: 'pointer' }}>Close</button>
+             <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Name</label><div style={{ color: '#dff7ff', marginTop: '.25rem' }}>{selectedCamera.name}</div></div>
+             <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>ID</label><div style={{ color: '#dff7ff', marginTop: '.25rem', fontSize: '.85rem', fontFamily: 'monospace' }}>{selectedCamera.id}</div></div>
+             <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Location</label><input type="text" placeholder="e.g. Front yard" value={editLocation} onChange={(e) => setEditLocation(e.target.value)} style={{ marginTop: '.25rem', padding: '.8rem', background: 'rgba(87,125,196,.1)', border: '1px solid rgba(87,125,196,.3)', borderRadius: '8px', color: '#dff7ff', width: '100%', boxSizing: 'border-box' }} /></div>
+             <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Latitude</label><input type="number" step="any" placeholder="-90 to 90" value={editLat} onChange={(e) => setEditLat(e.target.value)} style={{ marginTop: '.25rem', padding: '.8rem', background: 'rgba(87,125,196,.1)', border: '1px solid rgba(87,125,196,.3)', borderRadius: '8px', color: '#dff7ff', width: '100%', boxSizing: 'border-box' }} /></div>
+             <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Longitude</label><input type="number" step="any" placeholder="-180 to 180" value={editLng} onChange={(e) => setEditLng(e.target.value)} style={{ marginTop: '.25rem', padding: '.8rem', background: 'rgba(87,125,196,.1)', border: '1px solid rgba(87,125,196,.3)', borderRadius: '8px', color: '#dff7ff', width: '100%', boxSizing: 'border-box' }} /></div>
+             <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>FPS</label><div style={{ color: '#dff7ff', marginTop: '.25rem' }}>{selectedCamera.fps || 'Unknown'}</div></div>
+             <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Status</label><div style={{ color: selectedCamera.enabled !== false ? '#00d450' : '#ff5050', marginTop: '.25rem' }}>{selectedCamera.enabled !== false ? 'Online' : 'Offline'}</div></div>
+             <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>HLS Base URL</label><div style={{ color: '#dff7ff', marginTop: '.25rem', fontSize: '.85rem', fontFamily: 'monospace', wordBreak: 'break-all' }}>{selectedCamera.hls_base_url || 'Default'}</div></div>
+           </div>
+           {editError && <p style={{ color: '#ff5050', marginTop: '.75rem', fontSize: '.9rem' }}>{editError}</p>}
+           <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.5rem' }}>
+           <button onClick={handleSaveLocation} disabled={editSaving} style={{ flex: 1, padding: '.8rem', background: 'linear-gradient(135deg,#00d4ff,#8c4dff)', color: '#03101c', border: 'none', borderRadius: '8px', fontSize: '.8rem', fontWeight: 'bold', cursor: 'pointer' }}>{editSaving ? 'Saving...' : 'Save Location'}</button>
+           <button onClick={() => setSelectedCamera(null)} style={{ flex: 1, marginTop: '1.5rem', width: '100%', padding: '.8rem', background: 'rgba(87,125,196,.2)', border: 'none', color: '#dff7ff', borderRadius: '8px', cursor: 'pointer' }}>Close</button>
+           </div>
           </div>
         </div>
       )}
