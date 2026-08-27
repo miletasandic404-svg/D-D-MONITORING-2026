@@ -4,6 +4,7 @@ import api from '../services/api';
 import Hls from 'hls.js';
 import { getSession, signOut, getCurrentUser } from '../services/auth-client';
 import { useBilling } from '../hooks/useBilling';
+import { captureSnapshot } from '../services/snapshot';
 import BillingPanel from '../components/dashboard/BillingPanel';
 
 const hlsBaseUrl = (import.meta.env.VITE_HLS_BASE_URL || '/hls').replace(/\/$/, '');
@@ -91,6 +92,7 @@ export default function Dashboard() {
   const [incidentsLoaded, setIncidentsLoaded] = useState(false);
   const [cameras, setCameras] = useState(null);
   const [camerasError, setCamerasError] = useState(null);
+  const [healthData, setHealthData] = useState(null);
   const [streamErrors, setStreamErrors] = useState({});
   const [snapshotStatus, setSnapshotStatus] = useState({});
   const [updatingIncidentId, setUpdatingIncidentId] = useState(null);
@@ -571,35 +573,20 @@ export default function Dashboard() {
     setTimeout(() => setTalkdownActive(null), 5000);
   };
 
-  // Captures the current frame from a camera's <video> element via
-  // Canvas and uploads it through POST /api/snapshots (Phase 3). This
-  // only works once the stream has an actual frame decoded -- if the
-  // video hasn't started playing yet, the canvas capture will be blank,
-  // which is why we check readyState first.
+  // Capture the current frame from a camera's <video> element via Canvas
+  // and upload it through POST /api/snapshots (Phase 3). This only works
+  // once the stream has an actual frame decoded -- if the video hasn't
+  // started playing yet, captureSnapshot throws a clear error.
   const takeSnapshot = async (camId) => {
-    const video = document.getElementById(`video-${camId}`);
-    if (!video || video.readyState < 2) {
-      setSnapshotStatus((prev) => ({ ...prev, [camId]: 'error' }));
-      setTimeout(() => setSnapshotStatus((prev) => ({ ...prev, [camId]: null })), 3000);
-      return;
-    }
-
-    setSnapshotStatus((prev) => ({ ...prev, [camId]: 'capturing' }));
     try {
-      const canvas = document.createElement('canvas');
-      canvas.width = video.videoWidth;
-      canvas.height = video.videoHeight;
-      canvas.getContext('2d').drawImage(video, 0, 0, canvas.width, canvas.height);
-      const imageBase64 = canvas.toDataURL('image/jpeg', 0.9);
-
-      await api.post('/snapshots', { camera_id: camId, image_base64: imageBase64 });
-      setSnapshotStatus((prev) => ({ ...prev, [camId]: 'success' }));
+      await captureSnapshot(camId, {
+        onStatus: (s) => setSnapshotStatus((prev) => ({ ...prev, [camId]: s })),
+      });
       const camName = cameras.find((c) => c.id === camId)?.name || camId;
       addAuditEntry(`Captured snapshot from ${camName}`);
     } catch (err) {
-      console.error('Snapshot capture error:', err);
+      console.error('Snapshot capture error:', err.message);
       setSnapshotStatus((prev) => ({ ...prev, [camId]: 'error' }));
-    } finally {
       setTimeout(() => setSnapshotStatus((prev) => ({ ...prev, [camId]: null })), 3000);
     }
   };
@@ -766,11 +753,24 @@ export default function Dashboard() {
             ? `Camera service returned an error (HTTP ${err.response.status}).`
             : 'Could not reach the camera API. Check your network connection or API deployment.')
         );
-        setCameras([]);
-      });
-  }, [authChecked]);
+         setCameras([]);
+       });
+   }, [authChecked]);
 
-  // Initialize HLS for each camera video element. As of Phase 2, each
+   // Fetch dashboard health metrics once auth is confirmed
+   useEffect(() => {
+     if (!authChecked) return;
+     api
+       .get('/health/dashboard')
+       .then((res) => {
+         setHealthData(res.data);
+       })
+       .catch(() => {
+         setHealthData(null);
+       });
+   }, [authChecked]);
+
+   // Initialize HLS for each camera video element. As of Phase 2, each
   // camera stream requires a short-lived token (see api/camera-views and
   // media-server's authHTTPAddress hook) -- the raw manifest URL alone is
   // no longer sufficient, and every view is logged server-side.
@@ -1461,12 +1461,12 @@ export default function Dashboard() {
           </article>
           <article className="metric-card">
             <p className="metric-label">Active Streams</p>
-            {cameras === null ? (
+            {healthData === null ? (
               <div className="skeleton skeleton-number" />
             ) : (
-              <strong>{cameras.length ? activeCameras : '-'}</strong>
+              <strong>{healthData.streams?.active ?? '-'}</strong>
             )}
-            <span>{cameras === null ? <div className="skeleton skeleton-text short" /> : cameras.length ? 'Live HLS connections' : 'No cameras configured'}</span>
+            <span>{healthData === null ? <div className="skeleton skeleton-text short" /> : 'Enabled cameras on online media nodes'}</span>
           </article>
           <article className="metric-card">
             <p className="metric-label">Open Alerts</p>

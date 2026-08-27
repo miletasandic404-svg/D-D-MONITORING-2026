@@ -67,9 +67,11 @@ function AddCameraForm({ onSuccess, onCancel }) {
   const [error, setError] = useState('');
 
 
-  // Manual form state
+   // Manual form state
   const [newCamera, setNewCamera] = useState({ name: '', stream_url: '', username: '', password: '', location: '', lat: '', lng: '' });
   const [saving, setSaving] = useState(false);
+  const [geoLoading, setGeoLoading] = useState(false);
+  const [geoError, setGeoError] = useState('');
 
   // Unified "Discover automatically" entry: opens the existing V3 camera wizard
   // (Dashboard), which runs Scan LAN / ONVIF through the media-node task queue.
@@ -160,6 +162,38 @@ function AddCameraForm({ onSuccess, onCancel }) {
     }
   };
 
+   // Request the browser's current location and populate lat/lng.
+   // Only triggered by an explicit user click — never on mount.
+   const getCurrentLocation = () => {
+     if (!navigator.geolocation) {
+       setGeoError('Geolocation is not supported by your browser. Please enter coordinates manually.');
+       return;
+     }
+     setGeoLoading(true);
+     setGeoError('');
+     navigator.geolocation.getCurrentPosition(
+       (pos) => {
+         setNewCamera((prev) => ({
+           ...prev,
+           lat: pos.coords.latitude.toFixed(6),
+           lng: pos.coords.longitude.toFixed(6),
+         }));
+         setGeoLoading(false);
+       },
+       (err) => {
+         setGeoLoading(false);
+         if (err.code === err.PERMISSION_DENIED) {
+           setGeoError('Location permission denied. Please enter coordinates manually.');
+         } else if (err.code === err.TIMEOUT) {
+           setGeoError('Location request timed out. Please enter coordinates manually.');
+         } else {
+           setGeoError('Location unavailable. Please enter coordinates manually.');
+         }
+       },
+       { timeout: 8000 },
+     );
+    };
+
   const inputStyle = { padding: '.8rem', background: 'rgba(87,125,196,.1)', border: '1px solid rgba(87,125,196,.3)', borderRadius: '8px', color: '#dff7ff', width: '100%', boxSizing: 'border-box' };
 
   return (
@@ -227,21 +261,41 @@ function AddCameraForm({ onSuccess, onCancel }) {
               onChange={(e) => setNewCamera({ ...newCamera, location: e.target.value })}
               style={inputStyle}
             />
-            <input
-              type="number"
-              placeholder="Latitude"
-              value={newCamera.lat}
-              onChange={(e) => setNewCamera({ ...newCamera, lat: e.target.value })}
-              style={inputStyle}
-            />
-            <input
-              type="number"
-              placeholder="Longitude"
-              value={newCamera.lng}
-              onChange={(e) => setNewCamera({ ...newCamera, lng: e.target.value })}
-              style={{ ...inputStyle, gridColumn: '1 / -1' }}
-            />
-          </div>
+             <input
+               type="number"
+               placeholder="Latitude"
+               value={newCamera.lat}
+               onChange={(e) => setNewCamera({ ...newCamera, lat: e.target.value })}
+               style={inputStyle}
+             />
+             <input
+               type="number"
+               placeholder="Longitude"
+               value={newCamera.lng}
+               onChange={(e) => setNewCamera({ ...newCamera, lng: e.target.value })}
+               style={inputStyle}
+             />
+           </div>
+           <div style={{ display: 'flex', gap: '.5rem', alignItems: 'center', marginTop: '.5rem' }}>
+             <button
+               type="button"
+               onClick={getCurrentLocation}
+               disabled={geoLoading}
+               style={{
+                 padding: '.5rem 1rem',
+                 background: 'rgba(0,212,255,.15)',
+                 border: '1px solid rgba(0,212,255,.4)',
+                 borderRadius: '8px',
+                 color: '#00d4ff',
+                 fontSize: '.8rem',
+                 cursor: geoLoading ? 'default' : 'pointer',
+                 opacity: geoLoading ? 0.6 : 1,
+               }}
+             >
+               {geoLoading ? 'Locating...' : '📍 Use my current location'}
+             </button>
+             {geoError && <span style={{ color: '#ffb432', fontSize: '.75rem' }}>{geoError}</span>}
+           </div>
           <p style={{ color: '#8ab0c9', fontSize: '.8rem', marginTop: '.75rem' }}>
             The camera is verified with a real RTSP handshake (reachability + authentication) before it is saved. Wrong credentials are rejected with a clear error.
           </p>

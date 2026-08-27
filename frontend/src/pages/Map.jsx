@@ -35,6 +35,7 @@ const PAGE_CSS = `
 export default function Map() {
   const [cameras, setCameras] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [error, setError] = useState(null);
   const [showLabels, setShowLabels] = useState(true);
   const [selectedCamera, setSelectedCamera] = useState(null);
 
@@ -43,15 +44,21 @@ export default function Map() {
   }, []);
 
   const fetchCameras = async () => {
+    setLoading(true);
+    setError(null);
     try {
       const res = await api.get('/cameras');
       setCameras(res.data.cameras || []);
     } catch (err) {
       console.error('Failed to fetch cameras:', err);
+      setError('Failed to load camera data. Please try again.');
+      setCameras([]);
     } finally {
       setLoading(false);
     }
   };
+
+  const camerasWithLocation = cameras.filter(c => c.lat != null && c.lng != null);
 
   return (
     <>
@@ -66,14 +73,24 @@ export default function Map() {
             >
               Labels
             </button>
-            <button className="map-btn">Refresh</button>
+            <button className="map-btn" onClick={fetchCameras}>Refresh</button>
           </div>
         </div>
 
         <div className="map-container">
           <div className="map-grid" />
           
-          {cameras.length === 0 && !loading ? (
+          {loading ? (
+            <div className="empty-map">
+              <h2>Loading map...</h2>
+            </div>
+          ) : error ? (
+            <div className="empty-map">
+              <h2>Error Loading Map</h2>
+              <p>{error}</p>
+              <button className="map-btn" onClick={fetchCameras} style={{ marginTop: '1rem' }}>Retry</button>
+            </div>
+          ) : camerasWithLocation.length === 0 ? (
             <div className="empty-map">
               <h2>No Camera Locations</h2>
               <p>Add cameras with latitude/longitude coordinates to see them on the map.</p>
@@ -83,11 +100,10 @@ export default function Map() {
             </div>
           ) : (
             <div className="map-locations">
-              {cameras.map((camera, index) => {
-                // Generate positions based on index if no coordinates
-                const left = camera.lng ? ((camera.lng + 180) / 360 * 100) : (20 + (index * 15) % 60);
-                const top = camera.lat ? ((90 - camera.lat) / 180 * 100) : (20 + (index * 20) % 60);
-                
+              {camerasWithLocation.map((camera) => {
+                const left = ((camera.lng + 180) / 360 * 100);
+                const top = ((90 - camera.lat) / 180 * 100);
+
                 return (
                   <div 
                     key={camera.id}
@@ -107,6 +123,8 @@ export default function Map() {
             <div className="sidebar-title">Camera Locations</div>
             {loading ? (
               <p style={{ color: 'var(--text-secondary, #8ab0c9)' }}>Loading...</p>
+            ) : error ? (
+              <p style={{ color: 'var(--accent-danger, #ff5050)' }}>{error}</p>
             ) : cameras.length === 0 ? (
               <p style={{ color: 'var(--text-secondary, #8ab0c9)' }}>No cameras configured.</p>
             ) : (
@@ -119,6 +137,13 @@ export default function Map() {
                   >
                     <h3>{camera.name}</h3>
                     <p>{camera.location || 'No location set'}</p>
+                    {camera.lat == null || camera.lng == null ? (
+                      <p style={{ color: 'var(--text-muted, #6a8aaa)', fontSize: '0.75rem' }}>No coordinates</p>
+                    ) : (
+                      <p style={{ color: 'var(--text-muted, #6a8aaa)', fontSize: '0.75rem' }}>
+                        📍 {camera.lat.toFixed(4)}, {camera.lng.toFixed(4)}
+                      </p>
+                    )}
                     <div className="camera-status">
                       <span className={`status-dot ${camera.enabled !== false ? 'online' : 'offline'}`} />
                       <span style={{ color: camera.enabled !== false ? 'var(--accent-success, #00d450)' : 'var(--accent-danger, #ff5050)', fontSize: '.8rem' }}>

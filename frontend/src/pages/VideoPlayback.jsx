@@ -66,6 +66,14 @@ export default function VideoPlayback() {
     return h > 0 ? `${h}:${m.toString().padStart(2, '0')}:${s.toString().padStart(2, '0')}` : `${m}:${s.toString().padStart(2, '0')}`;
   };
 
+  const getProgressPercent = () => {
+    const duration = selectedRecording?.duration;
+    if (!duration || duration <= 0) return 0;
+    if (currentTime < 0) return 0;
+    if (currentTime > duration) return 100;
+    return (currentTime / duration) * 100;
+  };
+
   const formatDate = (dateStr) => {
     const date = new Date(dateStr);
     return date.toLocaleDateString() + ' ' + date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
@@ -156,7 +164,7 @@ export default function VideoPlayback() {
                 {isPlaying ? '⏸ Pause' : '▶ Play'}
               </button>
               <div className="timeline">
-                <div className="timeline-progress" style={{ width: `${(currentTime / (selectedRecording?.duration || 1)) * 100}%` }} />
+                <div className="timeline-progress" style={{ width: `${getProgressPercent()}%` }} />
               </div>
               <span className="time-display">
                 {formatDuration(currentTime)} / {formatDuration(selectedRecording?.duration || 0)}

@@ -3,17 +3,11 @@
 /**
  * Tests for lib/_media_nodes.js's pickMediaNodeForCamera().
  *
- * Regression coverage for a bug found right after the SSRF/org-scoping
- * hardening commit: claimNextTask() (workers/camera-setup-agent.js)
- * became strictly organization-scoped (a node only claims tasks from
- * its own org), but pickMediaNodeForCamera() was left as a *preference*
- * rather than a strict filter -- so an org with no online node of its
- * own could be handed a DIFFERENT org's node, get a false "node
- * available" response, and then have the resulting task silently sit
- * pending until it expired ~30 minutes later.
- *
- * These tests verify the query is now a strict organization filter
- * (WHERE n.organization_id = $1), not just an ORDER BY preference.
+ * Verifies that the query now allows platform-level nodes
+ * (organization_id IS NULL, e.g. Fly.io) to serve as a fallback
+ * for any organization, while still preferring org-specific nodes
+ * when available. The query remains parameterized and claimNextTask()
+ * remains strictly org-scoped as an independent SSRF protection.
  */
 
 const { test, describe, beforeEach } = require('node:test');
@@ -36,17 +30,25 @@ describe('pickMediaNodeForCamera', () => {
     fakeRows = [];
   });
 
-  test('filters strictly by organization_id in the SQL WHERE clause, not just ORDER BY', async () => {
+  test('query includes both org-scoped match and NULL platform-node fallback in the WHERE clause', async () => {
     await pickMediaNodeForCamera({ organizationId: 'org-a' });
     assert.match(lastQuery.text, /WHERE[\s\S]*n\.organization_id\s*=\s*\$1/,
       'organization_id must be a WHERE-clause filter');
+    assert.match(lastQuery.text, /WHERE[\s\S]*n\.organization_id\s+IS\s+NULL/,
+      'WHERE clause must also include OR organization_id IS NULL for platform node fallback');
     assert.equal(lastQuery.params[0], 'org-a');
   });
 
-  test('returns null when the calling org has no online node, even if fakeRows would represent another org\'s node', async () => {
-    // Simulates: org-b has no node of its own. The fake DB layer here
-    // stands in for Postgres -- in the real query, org-b's WHERE filter
-    // would itself produce zero rows, which is what we assert on.
+  test('prefers organization-specific node over platform node (ORDER BY prioritizes non-NULL org_id)', async () => {
+    await pickMediaNodeForCamera({ organizationId: 'org-a' });
+    const orderByMatch = lastQuery.text.match(/ORDER BY\s+(.+?)(?:\n\s+LIMIT|$)/s);
+    assert.ok(orderByMatch, 'should have an ORDER BY clause');
+    const orderByClause = orderByMatch[1];
+    assert.match(orderByClause, /n\.organization_id\s+IS\s+NOT\s+NULL/,
+      'ORDER BY must prioritize org-specific nodes first (platform node as fallback)');
+  });
+
+  test('returns null when no online node exists for the caller (org or platform)', async () => {
     fakeRows = [];
     const result = await pickMediaNodeForCamera({ organizationId: 'org-b' });
     assert.equal(result, null);
@@ -61,8 +63,6 @@ describe('pickMediaNodeForCamera', () => {
   test('passes preferredRegion as the second parameter for ORDER BY preference, not as a filter', async () => {
     await pickMediaNodeForCamera({ organizationId: 'org-a', preferredRegion: 'eu' });
     assert.equal(lastQuery.params[1], 'eu');
-    // Region is a preference (ORDER BY), never a WHERE-clause hard filter,
-    // so a node in a different region for the SAME org can still be picked.
     const whereClause = lastQuery.text.split(/GROUP BY/i)[0];
     assert.doesNotMatch(whereClause, /n\.region\s*=\s*\$2/);
   });

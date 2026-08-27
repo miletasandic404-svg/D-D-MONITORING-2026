@@ -24,6 +24,9 @@ let queryAsOrgCalls = [];
 let queryAsPlatformAdminCalls = [];
 
 function fakeRows(text) {
+  if (text.includes('JOIN media_nodes n ON n.id = c.media_node_id')) {
+    return { rows: [{ active: 2 }] };
+  }
   if (text.includes('FROM cameras')) {
     return { rows: [{ online: 3, offline: 1, degraded: 0, unknown: 2 }] };
   }
@@ -93,11 +96,11 @@ describe('GET /api/health/dashboard', () => {
     authResponse = { userId: 'user-1', organizationId: 'org-1', userType: 'org_admin' };
   });
 
-  test('org user: sva 3 query-ja idu kroz queryAsOrg sa organization filterom', async () => {
+  test('org user: sva 4 query-ja idu kroz queryAsOrg sa organization filterom', async () => {
     const res = makeRes();
     await handler(makeReq(), res);
 
-    assert.equal(queryAsOrgCalls.length, 3);
+    assert.equal(queryAsOrgCalls.length, 4);
     assert.equal(queryAsPlatformAdminCalls.length, 0);
 
     for (const call of queryAsOrgCalls) {
@@ -105,8 +108,12 @@ describe('GET /api/health/dashboard', () => {
       assert.deepEqual(call.params, ['org-1']);
     }
 
-    const [cameras, nodes, audit] = queryAsOrgCalls;
+    const [cameras, streams, nodes, audit] = queryAsOrgCalls;
     assert.match(cameras.text, /FROM cameras WHERE organization_id = \$1/);
+    assert.match(streams.text, /FROM cameras c\n\s+JOIN media_nodes n/);
+    assert.match(streams.text, /c\.enabled = TRUE/);
+    assert.match(streams.text, /n\.last_heartbeat_at > now\(\) - interval '90 seconds'/);
+    assert.match(streams.text, /AND c\.organization_id = \$1/);
     assert.match(nodes.text, /FROM media_nodes WHERE organization_id = \$1/);
     assert.match(audit.text, /AND organization_id = \$1/);
   });
@@ -116,23 +123,25 @@ describe('GET /api/health/dashboard', () => {
     await handler(makeReq(), res);
 
     assert.equal(queryAsPlatformAdminCalls.length, 0);
-    assert.equal(queryAsOrgCalls.length, 3);
+    assert.equal(queryAsOrgCalls.length, 4);
     assert.equal(res.statusCode, 200);
+    assert.equal(res.body.streams.active, 2);
   });
 
-  test('platform_admin: sva 3 query-ja idu kroz queryAsPlatformAdmin (globalno)', async () => {
+   test('platform_admin: sva 4 query-ja idu kroz queryAsPlatformAdmin (globalno)', async () => {
     authResponse = { userId: 'admin-1', organizationId: 'org-1', userType: 'platform_admin' };
 
     const res = makeRes();
     await handler(makeReq(), res);
 
-    assert.equal(queryAsPlatformAdminCalls.length, 3);
+    assert.equal(queryAsPlatformAdminCalls.length, 4);
     assert.equal(queryAsOrgCalls.length, 0);
 
     // Globalni SQL: nijedan query ne sme imati organization filter.
     for (const call of queryAsPlatformAdminCalls) {
       assert.doesNotMatch(call.text, /organization_id/);
     }
+    assert.equal(res.body.streams.active, 2);
   });
 
   test('missing/null organizationId: zeroed response + 0 DB query-ja', async () => {
@@ -175,6 +184,7 @@ describe('GET /api/health/dashboard', () => {
     assert.equal(res.body.cameras.offline, 1);
     assert.equal(res.body.cameras.unknown, 2);
     assert.equal(res.body.media_nodes.active, 4);
+    assert.equal(res.body.streams.active, 2);
     assert.deepEqual(res.body.recent_errors, [{ name: 'camera', error: 'boom' }]);
   });
 });

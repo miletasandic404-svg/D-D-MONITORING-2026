@@ -37,6 +37,13 @@ describe('lib/auth.js — createUser field mapping', () => {
       'signUpEmail body must NOT use organization_id (Better Auth has input: false)');
   });
 
+  test('createUser uses module-level context for organizationId', () => {
+    assert.match(authSource, /_createUserContext/,
+      'createUser should use _createUserContext for passing organizationId to databaseHooks');
+    assert.match(authSource, /_createUserContext\.organizationId = organizationId/,
+      'createUser should set organizationId in context');
+  });
+
   test('createUser signUpEmail body uses user_type as key', () => {
     const match = authSource.match(/auth\.api\.signUpEmail\([\s\S]*?body:\s*\{([\s\S]*?)\}\s*\)/);
     assert.ok(match, 'Should find signUpEmail body block');
@@ -94,7 +101,7 @@ describe('lib/auth.js — createUser field mapping', () => {
 
   test('Add Operator flow integrity: api/users.js calls createUser correctly', () => {
     // Verify that api/users.js calls createUser with org-scoped values
-    // organization_id is set by createUser internally via updateUser
+    // organization_id is set by createUser via databaseHooks context
     const usersPath = path.join(__dirname, '..', 'api', 'users.js');
     const usersSource = fs.readFileSync(usersPath, 'utf-8');
 
@@ -103,7 +110,7 @@ describe('lib/auth.js — createUser field mapping', () => {
     assert.match(usersSource, /userType: user_type/,
       'api/users.js should pass user_type as userType');
 
-    // No redundant UPDATE for organization_id should exist (set by createUser)
+    // No redundant UPDATE for organization_id should exist (set by databaseHooks)
     assert.doesNotMatch(usersSource, /UPDATE users[\s\S]*?organization_id[\s\S]*?user_type[\s\S]*?status[\s\S]*?WHERE id/,
       'api/users.js should NOT have redundant UPDATE for organization_id');
   });

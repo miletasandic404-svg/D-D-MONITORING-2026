@@ -24,16 +24,29 @@ const db = require('../db/index');
 let queryCalls = [];
 let platformAdminCalls = [];
 let dbScript = null; // (text, params) => { rows, rowCount }
+let mtxAddCalls = [];
+
+let orgStatusMock = { status: 'active', camera_limit: 5 };
+let cameraCountMock = 0;
 
 function resetFakes() {
   queryCalls = [];
   platformAdminCalls = [];
   dbScript = null;
+  mtxAddCalls = [];
   authResponse = { userId: 'user-1', organizationId: 'org-1', role: 'org_admin' };
+  orgStatusMock = { status: 'active', camera_limit: 5 };
+  cameraCountMock = 0;
 }
 
 db.queryAsOrg = async (orgId, text, params) => {
   queryCalls.push({ orgId, text, params });
+  if (text.includes('FROM organizations WHERE id = $1')) {
+    return { rows: [orgStatusMock], rowCount: 1 };
+  }
+  if (text.includes('AS total')) {
+    return { rows: [{ total: cameraCountMock }], rowCount: 1 };
+  }
   if (dbScript) return dbScript(text, params);
   return { rows: [], rowCount: 0 };
 };
@@ -65,7 +78,10 @@ mediaNodesModule.pickMediaNodeForCamera = async () => ({
 
 // ── fake MediaMTX client (no network) ────────────────────────────────────
 const mediamtxModule = require('../lib/_mediamtx_client');
-mediamtxModule.addOrUpdateCameraPath = async () => true;
+mediamtxModule.addOrUpdateCameraPath = async (cameraId, rtspUrl) => {
+  mtxAddCalls.push({ cameraId, rtspUrl });
+  return true;
+};
 mediamtxModule.deleteCameraPath = async () => true;
 
 // ── load module under test AFTER patching its dependencies ───────────────
@@ -327,7 +343,399 @@ describe('api/cameras — Phase 2: no direct camera creation', () => {
     assert.doesNotMatch(healthCall.text, /organization_id/);
     assert.deepEqual(healthCall.params, ['node-1']);
   });
+
+  test('POST /api/cameras with same URL+credentials as DB does NOT trigger MediaMTX reload', async () => {
+    const cleanDbUrl = 'rtsp://192.168.1.50:554/stream1';
+    dbScript = (text) => {
+      if (text.includes('SELECT 1 FROM cameras WHERE organization_id')) return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT organization_id, media_node_id, rtsp_url FROM cameras')) {
+        return { rows: [{ organization_id: 'org-1', media_node_id: 'node-1', rtsp_url: cleanDbUrl }] };
+      }
+      if (text.startsWith('INSERT INTO cameras')) return { rows: [], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    };
+    const urlWithCreds = 'rtsp://admin:secret@192.168.1.50:554/stream1';
+    const req = makeReq({
+      method: 'POST',
+      body: { id: 'CAM-01', name: 'Metadata only update', stream_url: urlWithCreds, location: 'yard' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.body.success, true);
+    assert.equal(mtxAddCalls.length, 0, 'addOrUpdateCameraPath must NOT be called when RTSP host/path is unchanged');
+  });
 });
+
+describe('api/cameras — organization status gate (Critical #3)', () => {
+  beforeEach(() => {
+    resetFakes();
+  });
+
+  test('POST /api/cameras?path=setup-create: active org allows setup task creation', async () => {
+    dbScript = (text) => {
+      if (text.includes('FROM organizations WHERE id = $1')) return { rows: [{ status: 'active' }], rowCount: 1 };
+      if (text.startsWith('INSERT INTO camera_setup_tasks')) return { rows: [{ id: 'task-active', status: 'pending' }] };
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Back Yard' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.taskId, 'task-active');
+  });
+
+  test('POST /api/cameras?path=setup-create: pending org is blocked (403)', async () => {
+    orgStatusMock = { status: 'pending' };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Back Yard' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /not active/i);
+    const inserts = queryCalls.filter((c) => c.text.includes('INSERT INTO camera_setup_tasks'));
+    assert.equal(inserts.length, 0, 'no setup task should be created for a pending org');
+  });
+
+  test('POST /api/cameras?path=setup-create: suspended org is blocked (403)', async () => {
+    orgStatusMock = { status: 'suspended' };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Back Yard' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /not active/i);
+    const inserts = queryCalls.filter((c) => c.text.includes('INSERT INTO camera_setup_tasks'));
+    assert.equal(inserts.length, 0, 'no setup task should be created for a suspended org');
+  });
+
+  test('POST /api/cameras?path=setup-create: unknown status (e.g. "trial") is blocked (403)', async () => {
+    orgStatusMock = { status: 'trial' };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Back Yard' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /not active/i);
+  });
+
+  test('POST /api/cameras (direct): active org allows metadata update on existing camera', async () => {
+    dbScript = (text) => {
+      if (text.includes('SELECT status FROM organizations WHERE id = $1')) return { rows: [{ status: 'active' }], rowCount: 1 };
+      if (text.includes('SELECT 1 FROM cameras WHERE organization_id')) return { rows: [], rowCount: 0 };
+      if (text.includes('SELECT organization_id, media_node_id, rtsp_url FROM cameras')) {
+        return { rows: [{ ...existingRow }] };
+      }
+      if (text.startsWith('INSERT INTO cameras')) return { rows: [], rowCount: 1 };
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      body: { id: 'CAM-01', name: 'Renamed', rtsp_url: 'rtsp://camera-ip/stream', location: 'yard' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 201);
+    assert.equal(res.body.success, true);
+  });
+
+  test('POST /api/cameras (direct): pending org is blocked (403)', async () => {
+    orgStatusMock = { status: 'pending' };
+    const req = makeReq({
+      method: 'POST',
+      body: { id: 'CAM-01', name: 'Renamed', rtsp_url: 'rtsp://camera-ip/stream' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /not active/i);
+  });
+
+  test('POST /api/cameras (direct): suspended org is blocked (403)', async () => {
+    orgStatusMock = { status: 'suspended' };
+    const req = makeReq({
+      method: 'POST',
+      body: { id: 'CAM-01', name: 'Renamed', rtsp_url: 'rtsp://camera-ip/stream' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /not active/i);
+  });
+
+  test('GET /api/cameras is NOT affected by org status gate (read-only route)', async () => {
+    orgStatusMock = { status: 'pending' };
+    dbScript = (text) => {
+      if (text.includes('FROM cameras c')) {
+        return { rows: [{ id: 'CAM-01', name: 'Back Yard', rtsp_url: 'rtsp://camera-ip/stream', enabled: true }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({ method: 'GET' });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.count, 1);
+  });
+});
+
+describe('api/cameras — organization camera limit gate (Critical #4)', () => {
+  beforeEach(() => {
+    resetFakes();
+  });
+
+  test('active org: camera_limit=5, current=0 -> setup-create dozvoljen (201)', async () => {
+    orgStatusMock = { status: 'active', camera_limit: 5 };
+    cameraCountMock = 0;
+    dbScript = (text) => {
+      if (text.startsWith('INSERT INTO camera_setup_tasks')) return { rows: [{ id: 'task-1', status: 'pending' }] };
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Cam 1' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+    assert.equal(res.body.taskId, 'task-1');
+  });
+
+  test('active org: camera_limit=5, current=4 -> dozvoljen još jedan (201)', async () => {
+    orgStatusMock = { status: 'active', camera_limit: 5 };
+    cameraCountMock = 4;
+    dbScript = (text) => {
+      if (text.startsWith('INSERT INTO camera_setup_tasks')) return { rows: [{ id: 'task-2', status: 'pending' }] };
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Cam 5' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+  });
+
+  test('active org: camera_limit=5, current=5 -> blokirano (403), nema task INSERT', async () => {
+    orgStatusMock = { status: 'active', camera_limit: 5 };
+    cameraCountMock = 5;
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Cam 6' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /camera limit reached/i);
+    assert.equal(res.body.camera_limit, 5);
+    assert.equal(res.body.current_camera_count, 5);
+    const inserts = queryCalls.filter((c) => c.text.startsWith('INSERT INTO camera_setup_tasks'));
+    assert.equal(inserts.length, 0, 'no setup task should be created when limit is reached');
+  });
+
+  test('active org: camera_limit=5, current=6 -> blokirano (403)', async () => {
+    orgStatusMock = { status: 'active', camera_limit: 5 };
+    cameraCountMock = 6;
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Cam 7' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /camera limit reached/i);
+    const inserts = queryCalls.filter((c) => c.text.startsWith('INSERT INTO camera_setup_tasks'));
+    assert.equal(inserts.length, 0);
+  });
+
+  test('pending org: i dalje blokiran preko Critical #3 (403, not camera limit)', async () => {
+    orgStatusMock = { status: 'pending', camera_limit: 5 };
+    cameraCountMock = 0;
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Cam' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /not active/i);
+  });
+
+  test('suspended org: i dalje blokiran preko Critical #3 (403, not camera limit)', async () => {
+    orgStatusMock = { status: 'suspended', camera_limit: 5 };
+    cameraCountMock = 0;
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Cam' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /not active/i);
+  });
+
+  test('falsifikovan organization_id u body ne menja tenant/limit', async () => {
+    orgStatusMock = { status: 'active', camera_limit: 1 };
+    cameraCountMock = 0;
+    authResponse = { userId: 'user-1', organizationId: 'org-target', role: 'org_admin' };
+    dbScript = (text) => {
+      if (text.startsWith('INSERT INTO camera_setup_tasks')) return { rows: [{ id: 'task-1', status: 'pending' }] };
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Cam' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+    const taskInsert = queryCalls.find((c) => c.text.startsWith('INSERT INTO camera_setup_tasks'));
+    assert.ok(taskInsert, 'task INSERT ran');
+    assert.equal(taskInsert.orgId, 'org-target', 'org_id from auth, not from request body');
+  });
+
+  test('paralelni setup requests: pending task broji kao rezervacija', async () => {
+    orgStatusMock = { status: 'active', camera_limit: 5 };
+    cameraCountMock = 4;
+    dbScript = (text, params) => {
+      if (text.startsWith('INSERT INTO camera_setup_tasks')) {
+        return { rows: [{ id: 'task-reserve', status: 'pending' }] };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Cam' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+
+    cameraCountMock = 5;
+    const req2 = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip-2/stream', camera_name: 'Cam 2' },
+    });
+    const res2 = makeRes();
+    await handler(req, res2);
+
+    assert.equal(res2.statusCode, 403, 'second request blocked because 4 cameras + 1 pending task = 5 = limit');
+    assert.match(res2.body.error, /camera limit reached/i);
+  });
+
+  test('camera_limit=0 (unlimited) ne blokira setup-create', async () => {
+    orgStatusMock = { status: 'active', camera_limit: 0 };
+    cameraCountMock = 99;
+    dbScript = (text) => {
+      if (text.startsWith('INSERT INTO camera_setup_tasks')) return { rows: [{ id: 'task-1', status: 'pending' }] };
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Cam' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+  });
+});
+
+describe('api/cameras — setup-create assigned_node_id (platform node support)', () => {
+  beforeEach(() => {
+    resetFakes();
+  });
+
+  test('setup-create INSERT includes assigned_node_id = node.id', async () => {
+    dbScript = (text) => {
+      if (text.startsWith('INSERT INTO camera_setup_tasks')) return { rows: [{ id: 'task-1', status: 'pending' }] };
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Back Yard' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.success, true);
+    const taskInsert = queryCalls.find((c) => c.text.startsWith('INSERT INTO camera_setup_tasks'));
+    assert.ok(taskInsert, 'a setup task was created');
+    assert.match(taskInsert.text, /assigned_node_id/,
+      'INSERT must include assigned_node_id column');
+    assert.equal(taskInsert.params[11], 'node-1',
+      'assigned_node_id param must be the node.id from pickMediaNodeForCamera');
+  });
+
+  test('setup-create task.organization_id is scoped to requesting org, not node org', async () => {
+    dbScript = (text) => {
+      if (text.startsWith('INSERT INTO camera_setup_tasks')) return { rows: [{ id: 'task-1', status: 'pending' }] };
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({
+      method: 'POST',
+      query: { path: 'setup-create' },
+      body: { mode: 'manual', rtsp_url: 'rtsp://camera-ip/stream', camera_name: 'Back Yard' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    const taskInsert = queryCalls.find((c) => c.text.startsWith('INSERT INTO camera_setup_tasks'));
+    assert.equal(taskInsert.params[0], 'org-1',
+      'organization_id param must be the requesting org, not the node org');
+  });
+});
+
 describe('api/cameras — camera location flow', () => {
   beforeEach(() => {
     resetFakes();

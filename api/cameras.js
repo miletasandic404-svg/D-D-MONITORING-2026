@@ -16,6 +16,21 @@ const logger = makeLogger('api-cameras');
 // Initialize Sentry for error tracking
 initSentry();
 
+async function requireOrgActive(auth, res) {
+  const orgResult = await db.queryAsOrg(
+    auth.organizationId,
+    'SELECT status FROM organizations WHERE id = $1',
+    [auth.organizationId],
+  );
+  if (orgResult.rows.length === 0) {
+    return sendError(res, 403, 'Organization not found');
+  }
+  if (orgResult.rows[0].status !== 'active') {
+    return sendError(res, 403, 'Organization is not active');
+  }
+  return null;
+}
+
 // ─── Zod schema ──────────────────────────────────────────────────────────
 const cameraSchema = z.object({
   id: z.string().min(1, "id is required").max(20).regex(/^[A-Za-z0-9_-]+$/, "id must be alphanumeric (underscore/dash allowed)"),
@@ -58,6 +73,34 @@ module.exports = async (req, res) => {
     if (req.method !== 'POST') return sendError(res, 405, 'Method Not Allowed');
     const auth = await requireAuth(req, res, { roles: ['platform_admin', 'org_admin'] });
     if (!auth) return;
+
+    const orgBlocked = await requireOrgActive(auth, res);
+    if (orgBlocked) return;
+
+    const orgInfo = await db.queryAsOrg(
+      auth.organizationId,
+      'SELECT camera_limit FROM organizations WHERE id = $1',
+      [auth.organizationId],
+    );
+    const cameraLimit = orgInfo.rows[0]?.camera_limit;
+    if (cameraLimit && cameraLimit > 0) {
+      const countResult = await db.queryAsOrg(
+        auth.organizationId,
+        `SELECT
+           (SELECT count(*) FROM cameras WHERE organization_id = $1) +
+           (SELECT count(*) FROM camera_setup_tasks WHERE organization_id = $1 AND status IN ('pending', 'working')) AS total`,
+        [auth.organizationId],
+      );
+      const currentCount = parseInt(countResult.rows[0]?.total || 0, 10);
+      if (currentCount >= cameraLimit) {
+        return res.status(403).json({
+          success: false,
+          error: 'Camera limit reached',
+          camera_limit: cameraLimit,
+          current_camera_count: currentCount,
+        });
+      }
+    }
 
     const setupSchema = z.object({
       mode: z.enum(['scan', 'onvif', 'manual', 'probe', 'preview', 'cleanup', 'start_tunnel', 'dvrip']),
@@ -419,6 +462,9 @@ module.exports = async (req, res) => {
     const auth = await requireAuth(req, res, { roles: ["platform_admin", "org_admin"] });
     if (!auth) return;
 
+    const orgBlocked = await requireOrgActive(auth, res);
+    if (orgBlocked) return;
+
     try {
       let data;
       try {
@@ -519,7 +565,7 @@ module.exports = async (req, res) => {
       // (Phase 2: direktno kreiranje je onemoguceno, pa je kamera ovde uvek
       // vec postojeca — nova kamera se upisuje tek posle verifikacije kroz
       // camera-setup-agent, koji sam sinhronizuje MediaMTX putanju.)
-      const rtspUrlChanged = existing.rows[0].rtsp_url !== cameraUrl;
+      const rtspUrlChanged = existing.rows[0].rtsp_url !== cleanUrl;
       let mediamtxSynced = true;
       if (cameraUrl && rtspUrlChanged) {
         try {

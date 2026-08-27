@@ -54,11 +54,23 @@ export default function EmergencyDispatch() {
   });
   const [sending, setSending] = useState(false);
   const [success, setSuccess] = useState(false);
-  const [dispatches] = useState([
-    { id: 1, type: 'Medical Emergency', location: 'Building A - Floor 3', status: 'sent', time: '10 mins ago' },
-    { id: 2, type: 'Fire Alarm', location: 'Parking Lot B', status: 'pending', time: '25 mins ago' },
-    { id: 3, type: 'Security Threat', location: 'Main Entrance', status: 'sent', time: '1 hour ago' }
-  ]);
+  const [dispatches, setDispatches] = useState([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    fetchDispatches();
+  }, []);
+
+  const fetchDispatches = async () => {
+    try {
+      const res = await api.get('/emergency/dispatch');
+      setDispatches(res.data.dispatches || []);
+    } catch (err) {
+      console.error('Failed to fetch dispatches:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
 
   const contacts = [
     { name: 'Police', phone: '911', icon: '👮' },
@@ -70,13 +82,25 @@ export default function EmergencyDispatch() {
   const handleSubmit = async (e) => {
     e.preventDefault();
     setSending(true);
-    
-    // Simulate dispatch
-    await new Promise(resolve => setTimeout(resolve, 2000));
-    
-    setSending(false);
-    setSuccess(true);
-    setTimeout(() => setSuccess(false), 3000);
+
+    try {
+      await api.post('/emergency/dispatch', {
+        incident_type: formData.incidentType,
+        location: formData.location,
+        description: formData.description,
+        priority: formData.priority
+      });
+
+      setSuccess(true);
+      setFormData({ incidentType: '', location: '', description: '', priority: 'high' });
+      fetchDispatches();
+      setTimeout(() => setSuccess(false), 3000);
+    } catch (err) {
+      console.error('Failed to create dispatch:', err);
+      alert(err?.response?.data?.error || 'Failed to send dispatch');
+    } finally {
+      setSending(false);
+    }
   };
 
   const callContact = (phone) => {
@@ -204,20 +228,32 @@ export default function EmergencyDispatch() {
             <div className="dispatch-list-header">
               <h3>Recent Dispatch Requests</h3>
             </div>
-            {dispatches.map(dispatch => (
-              <div key={dispatch.id} className="dispatch-row">
-                <div className="dispatch-info">
-                  <h4>{dispatch.type}</h4>
-                  <p>{dispatch.location}</p>
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
-                  <span className={`dispatch-status ${dispatch.status}`}>
-                    {dispatch.status === 'sent' ? '✓ Sent' : '⏳ Pending'}
-                  </span>
-                  <span className="dispatch-time">{dispatch.time}</span>
-                </div>
+            {loading ? (
+              <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary, #8ab0c9)' }}>
+                Loading dispatches...
               </div>
-            ))}
+            ) : dispatches.length === 0 ? (
+              <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary, #8ab0c9)' }}>
+                No dispatch requests yet.
+              </div>
+            ) : (
+              dispatches.map(dispatch => (
+                <div key={dispatch.id} className="dispatch-row">
+                  <div className="dispatch-info">
+                    <h4>{dispatch.incident_type}</h4>
+                    <p>{dispatch.location || 'No location'}</p>
+                  </div>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '1rem' }}>
+                    <span className={`dispatch-status ${dispatch.status === 'pending' ? 'pending' : 'sent'}`}>
+                      {dispatch.status === 'pending' ? '⏳ Pending' : '✓ ' + dispatch.status.charAt(0).toUpperCase() + dispatch.status.slice(1)}
+                    </span>
+                    <span className="dispatch-time">
+                      {dispatch.created_at ? new Date(dispatch.created_at).toLocaleString() : ''}
+                    </span>
+                  </div>
+                </div>
+              ))
+            )}
           </div>
         </div>
       </main>

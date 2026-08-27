@@ -345,6 +345,11 @@ export default function Onboarding() {
   const [camPort, setCamPort]     = useState('80');
   const [camUser, setCamUser]     = useState('');
   const [camPass, setCamPass]     = useState('');
+  const [camLocation, setCamLocation] = useState('');
+  const [camLat, setCamLat]       = useState('');
+  const [camLng, setCamLng]       = useState('');
+  const [camGeoLoading, setCamGeoLoading] = useState(false);
+  const [camGeoError, setCamGeoError]     = useState('');
   const [connecting, setConnecting] = useState(false);
   const [connectedCams, setConnectedCams] = useState([]);
   const [camProgress, setCamProgress] = useState(null); // null | 'discovering' | step code | 'error'
@@ -440,21 +445,69 @@ export default function Onboarding() {
 
   // ── Step 3: camera connection ────────────────────────────────────────────────
 
+  // Optional location: mirrors the manual Add Camera form in Cameras.jsx.
+  // Reuses the browser geolocation API (no polling, no background calls).
+  function handleCamGeoLocate() {
+    if (!navigator.geolocation) {
+      setCamGeoError('Geolocation is not supported by your browser. Enter coordinates manually.');
+      return;
+    }
+    setCamGeoLoading(true);
+    setCamGeoError('');
+    navigator.geolocation.getCurrentPosition(
+      (pos) => {
+        setCamLat(pos.coords.latitude.toFixed(6));
+        setCamLng(pos.coords.longitude.toFixed(6));
+        setCamGeoLoading(false);
+      },
+      () => {
+        setCamGeoError('Unable to retrieve your location.');
+        setCamGeoLoading(false);
+      },
+    );
+  }
+
   async function handleConnectCamera() {
     setCamError('');
     if (!camIp.trim()) { setCamError('Camera IP address is required.'); return; }
+
+    // Validate optional location coordinates using the same conventions as the
+    // manual Add Camera form in Cameras.jsx: empty => null, NaN/range rejected.
+    const latVal = camLat.trim();
+    const lngVal = camLng.trim();
+    let latNum = null;
+    let lngNum = null;
+    if (latVal !== '') {
+      latNum = parseFloat(latVal);
+      if (isNaN(latNum) || latNum < -90 || latNum > 90) {
+        setCamError('Latitude must be a number between -90 and 90.');
+        return;
+      }
+    }
+    if (lngVal !== '') {
+      lngNum = parseFloat(lngVal);
+      if (isNaN(lngNum) || lngNum < -180 || lngNum > 180) {
+        setCamError('Longitude must be a number between -180 and 180.');
+        return;
+      }
+    }
 
     setConnecting(true);
     setCamProgress('discovering');
 
     try {
-      // Create a setup task — the local media node will pick it up and run ONVIF discovery
+      // Create a setup task — the local media node will pick it up and run ONVIF discovery.
+      // location/lat/lng are forwarded into camera_setup_tasks.result JSONB by setup-create,
+      // then propagated into cameras.location/lat/lng by camera-setup-agent (commit e1465d0).
       const { data: createData } = await api.post('/cameras?path=setup-create', {
         mode: 'onvif',
         ip: camIp.trim(),
         onvif_port: camPort ? parseInt(camPort, 10) : 80,
         username: camUser || undefined,
         password: camPass || undefined,
+        location: camLocation?.trim() || null,
+        lat: latNum,
+        lng: lngNum,
       });
       const taskId = createData.taskId;
 
@@ -511,6 +564,11 @@ export default function Onboarding() {
       setCamPort('80');
       setCamUser('');
       setCamPass('');
+      setCamLocation('');
+      setCamLat('');
+      setCamLng('');
+      setCamGeoLoading(false);
+      setCamGeoError('');
       setCamProgress(step);
     } catch (err) {
       const msg = err?.response?.data?.error || err?.message || 'Camera connection failed.';
@@ -716,16 +774,53 @@ export default function Onboarding() {
                   </div>
                 </div>
 
-                <div className="ob-form-group">
-                  <label className="ob-label">ONVIF Port</label>
-                  <input className="ob-input" type="number"
-                    placeholder="80"
-                    value={camPort} onChange={(e) => setCamPort(e.target.value)}
-                    disabled={connecting}
-                    style={{ maxWidth: '140px' }} />
-                </div>
+                 <div className="ob-form-group">
+                   <label className="ob-label">ONVIF Port</label>
+                   <input className="ob-input" type="number"
+                     placeholder="80"
+                     value={camPort} onChange={(e) => setCamPort(e.target.value)}
+                     disabled={connecting}
+                     style={{ maxWidth: '140px' }} />
+                 </div>
 
-                {/* Connection progress */}
+                 {/* ── Optional camera location ── */}
+                 <div className="ob-form-group" style={{ marginTop: '1.5rem' }}>
+                   <label className="ob-label">Location (optional)</label>
+                   <input className="ob-input" type="text"
+                     placeholder="e.g. Front Yard"
+                     value={camLocation}
+                     onChange={(e) => { setCamLocation(e.target.value); setCamGeoError(''); }}
+                     disabled={connecting} />
+
+                   <div className="ob-row" style={{ marginTop: '.5rem' }}>
+                     <div className="ob-form-group" style={{ marginBottom: 0, flex: 1 }}>
+                       <label className="ob-label">Latitude</label>
+                       <input className="ob-input" type="number" step="any"
+                         placeholder="-90 to 90"
+                         value={camLat}
+                         onChange={(e) => setCamLat(e.target.value)}
+                         disabled={connecting} />
+                     </div>
+                     <div className="ob-form-group" style={{ marginBottom: 0, flex: 1 }}>
+                       <label className="ob-label">Longitude</label>
+                       <input className="ob-input" type="number" step="any"
+                         placeholder="-180 to 180"
+                         value={camLng}
+                         onChange={(e) => setCamLng(e.target.value)}
+                         disabled={connecting} />
+                     </div>
+                   </div>
+
+                   <button type="button" className="ob-btn ob-btn-secondary"
+                     onClick={handleCamGeoLocate}
+                     disabled={connecting || camGeoLoading}
+                     style={{ marginTop: '.75rem' }}>
+                     {camGeoLoading ? <><span className="ob-spinner" style={{ width: 14, height: 14, borderTopColor: '#022036' }} /> Locating…</> : '📍 Use my current location'}
+                   </button>
+                   {camGeoError && <span style={{ color: '#ffb432', fontSize: '.75rem', marginTop: '.5rem', display: 'block' }}>{camGeoError}</span>}
+                 </div>
+
+                 {/* Connection progress */}
                 {(camProgress !== null || connecting) && (
                   <div className="ob-cam-status">
                     <div className={`ob-cam-step ${camProgress && camProgress !== 'discovering' && camProgress !== 'error' ? 'done' : camProgress === 'discovering' ? 'active' : camProgress === 'error' ? 'error' : ''}`}>

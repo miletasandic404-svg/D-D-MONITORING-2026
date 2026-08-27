@@ -112,14 +112,38 @@
                          "source":  "/api/incidents/:eventId/status",
                          "destination":  "/api/incidents/:eventId?path=status"
                      },
-                     {
-                         "source":  "/api/incidents/:eventId/evidence",
-                         "destination":  "/api/incidents/:eventId?path=evidence"
-                     },
-                     {
-                         "source":  "/api/sites",
-                         "destination":  "/api/cameras?path=sites"
-                     },
+                      {
+                          "source":  "/api/incidents/:eventId/evidence",
+                          "destination":  "/api/incidents/:eventId?path=evidence"
+                      },
+                       {
+                           "source":  "/api/emergency/dispatch",
+                           "destination":  "/api/emergency?path=dispatch"
+                       },
+                       {
+                           "source":  "/api/face-recognition/enroll",
+                           "destination":  "/api/face-recognition"
+                       },
+                       {
+                           "source":  "/api/face-recognition/:id",
+                           "destination":  "/api/face-recognition?id=:id"
+                       },
+                       {
+                           "source":  "/api/license-plates/enroll",
+                           "destination":  "/api/license-plates"
+                       },
+                       {
+                           "source":  "/api/license-plates/:id",
+                           "destination":  "/api/license-plates?id=:id"
+                       },
+                       {
+                           "source":  "/api/reports/summary",
+                           "destination":  "/api/reports"
+                       },
+                       {
+                          "source":  "/api/sites",
+                          "destination":  "/api/cameras?path=sites"
+                      },
                      {
                          "source":  "/api/onboarding/register",
                          "destination":  "/api/onboarding?path=register"
@@ -233,8 +257,8 @@
                          "destination":  "/index.html"
                      },
                      {
-                         "source":  "/api/cameras/verify-stream-token",
-                         "destination":  "/api/meta"
+                          "source":  "/api/cameras/verify-stream-token",
+                          "destination":  "/api/meta?handler=verify-stream-token"
                      }
                  ]
 }

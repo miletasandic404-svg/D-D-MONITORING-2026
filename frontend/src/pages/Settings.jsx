@@ -1,3 +1,4 @@
+import api from '../services/api';
 import React, { useState, useEffect } from 'react';
 
 const PAGE_CSS = `
@@ -17,15 +18,52 @@ const PAGE_CSS = `
 `;
 
 export default function Settings() {
-  const [notifications, setNotifications] = useState(true);
-  const [autoReports, setAutoReports] = useState(false);
-  const [mapOverlay, setMapOverlay] = useState(true);
+  const [settings, setSettings] = useState({
+    email_alerts: true,
+    push_notifications: true,
+    auto_reports: false,
+    weekly_summary: false,
+    map_overlays: true,
+    dark_mode: true,
+  });
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
   const [apiStatus, setApiStatus] = useState('checking');
   const [dbStatus, setDbStatus] = useState('checking');
 
   useEffect(() => {
+    fetchSettings();
     checkSystemStatus();
   }, []);
+
+  const fetchSettings = async () => {
+    try {
+      const res = await api.get('/settings');
+      if (res.data?.settings) {
+        setSettings(prev => ({ ...prev, ...res.data.settings }));
+      }
+    } catch (err) {
+      console.error('Failed to fetch settings:', err);
+    } finally {
+      setLoading(false);
+    }
+  };
+
+  const updateSetting = async (key, value) => {
+    setSaving(true);
+    try {
+      const res = await api.put('/settings', { [key]: value });
+      if (res.data?.settings) {
+        setSettings(prev => ({ ...prev, ...res.data.settings }));
+      }
+    } catch (err) {
+      console.error('Failed to update setting:', err);
+      alert(err?.response?.data?.error || 'Failed to save setting');
+      fetchSettings();
+    } finally {
+      setSaving(false);
+    }
+  };
 
   const checkSystemStatus = async () => {
     try {
@@ -53,8 +91,8 @@ export default function Settings() {
               <div className="setting-desc">Receive email notifications for critical alerts</div>
             </div>
             <div 
-              className={`toggle ${notifications ? 'active' : ''}`} 
-              onClick={() => setNotifications(!notifications)}
+              className={`toggle ${settings.email_alerts ? 'active' : ''}`} 
+              onClick={() => updateSetting('email_alerts', !settings.email_alerts)}
             />
           </div>
           <div className="setting-row">
@@ -62,7 +100,10 @@ export default function Settings() {
               <div className="setting-label">Push Notifications</div>
               <div className="setting-desc">Browser push notifications for real-time alerts</div>
             </div>
-            <div className="toggle active" />
+            <div 
+              className={`toggle ${settings.push_notifications ? 'active' : ''}`}
+              onClick={() => updateSetting('push_notifications', !settings.push_notifications)}
+            />
           </div>
         </div>
 
@@ -74,8 +115,8 @@ export default function Settings() {
               <div className="setting-desc">Generate daily security summary reports</div>
             </div>
             <div 
-              className={`toggle ${autoReports ? 'active' : ''}`} 
-              onClick={() => setAutoReports(!autoReports)}
+              className={`toggle ${settings.auto_reports ? 'active' : ''}`} 
+              onClick={() => updateSetting('auto_reports', !settings.auto_reports)}
             />
           </div>
           <div className="setting-row">
@@ -83,7 +124,10 @@ export default function Settings() {
               <div className="setting-label">Weekly Summary</div>
               <div className="setting-desc">Send weekly incident summary to email</div>
             </div>
-            <div className="toggle" />
+            <div 
+              className={`toggle ${settings.weekly_summary ? 'active' : ''}`}
+              onClick={() => updateSetting('weekly_summary', !settings.weekly_summary)}
+            />
           </div>
         </div>
 
@@ -95,8 +139,8 @@ export default function Settings() {
               <div className="setting-desc">Show camera coverage zones on map</div>
             </div>
             <div 
-              className={`toggle ${mapOverlay ? 'active' : ''}`} 
-              onClick={() => setMapOverlay(!mapOverlay)}
+              className={`toggle ${settings.map_overlays ? 'active' : ''}`} 
+              onClick={() => updateSetting('map_overlays', !settings.map_overlays)}
             />
           </div>
           <div className="setting-row">
@@ -104,7 +148,10 @@ export default function Settings() {
               <div className="setting-label">Dark Mode</div>
               <div className="setting-desc">Always use dark theme</div>
             </div>
-            <div className="toggle active" />
+            <div 
+              className={`toggle ${settings.dark_mode ? 'active' : ''}`}
+              onClick={() => updateSetting('dark_mode', !settings.dark_mode)}
+            />
           </div>
         </div>
 
