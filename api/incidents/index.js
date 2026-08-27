@@ -15,6 +15,9 @@ initSentry();
 
 
 const ALLOWED_STATUSES = ['New', 'Acknowledged', 'In Progress', 'Resolved', 'False Alarm'];
+const EMERGENCY_PRIORITIES = ['critical', 'high', 'medium', 'low'];
+const EMERGENCY_STATUSES = ['pending', 'dispatched', 'resolved', 'cancelled'];
+const REPORT_TYPES = ['daily', 'weekly', 'monthly'];
 
 // ─── Zod schema for incident status update ─────────────────────
 const statusUpdateSchema = z.object({
@@ -25,14 +28,52 @@ const statusUpdateSchema = z.object({
   message: 'Provide status, assigned_operator_id, or assign_to_self',
 });
 
+// ─── Zod schema for emergency dispatch ─────────────────────────
+const dispatchSchema = z.object({
+  camera_id: z.string().max(50).optional().nullable(),
+  incident_type: z.string().min(1, 'incident_type is required').max(50),
+  location: z.string().max(255).optional().nullable(),
+  description: z.string().max(2000).optional().nullable(),
+  priority: z.enum(EMERGENCY_PRIORITIES).optional().default('high'),
+});
+
+// ─── Zod schema for reports query ──────────────────────────────
+const reportQuerySchema = z.object({
+  type: z.enum(REPORT_TYPES).optional().default('daily'),
+  from: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date format, expected YYYY-MM-DD').optional(),
+  to: z.string().regex(/^\d{4}-\d{2}-\d{2}$/, 'Invalid date format, expected YYYY-MM-DD').optional(),
+}).strict();
+
 // Combined handler for all /api/incidents routes:
 //   GET /api/incidents                           → list all incidents
 //   GET /api/incidents/:eventId/activity         → get activity log
 //   PATCH /api/incidents/:eventId/status         → update incident status
 //   GET /api/incidents/:eventId/evidence         → get evidence (recordings + snapshots)
+//   GET /api/incidents?path=emergency            → list emergency dispatches
+//   POST /api/incidents?path=emergency           → create emergency dispatch
+//   GET /api/incidents?path=reports              → get reports summary
 module.exports = async (req, res) => {
   if (!(await rateLimit(req, res))) return;
   const { eventId, path: pathInfo } = req.query;
+
+  // ── Emergency dispatch routes ─────────────────────────────────────
+  if (pathInfo === 'emergency') {
+    if (req.method === 'POST') {
+      return handleEmergencyCreate(req, res);
+    }
+    if (req.method === 'GET') {
+      return handleEmergencyList(req, res);
+    }
+    return sendError(res, 405, 'Method Not Allowed');
+  }
+
+  // ── Reports summary route ─────────────────────────────────────────
+  if (pathInfo === 'reports') {
+    if (req.method === 'GET') {
+      return handleReportsSummary(req, res);
+    }
+    return sendError(res, 405, 'Method Not Allowed');
+  }
 
   // ── Event-specific routes (merged from [eventId]/index.js) ─────────
   if (eventId && pathInfo === 'activity') {
@@ -317,6 +358,248 @@ async function handleEvidence(req, res, eventId) {
     });
   } catch (err) {
     logger.error('GET /api/incidents/:eventId/evidence error', { error: err.message });
+    Sentry.captureException(err);
+    return sendError(res, 500, err.message);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Emergency dispatch handlers
+// ═══════════════════════════════════════════════════════════════════
+
+async function handleEmergencyCreate(req, res) {
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+
+  let data;
+  try {
+    data = dispatchSchema.parse(req.body || {});
+  } catch (zodErr) {
+    if (zodErr instanceof z.ZodError) {
+      return sendError(res, 400, 'Validation failed',
+        zodErr.issues.map(e => ({ field: e.path.join('.'), message: e.message, received: e.received }))
+      );
+    }
+    throw zodErr;
+  }
+
+  try {
+    const { camera_id, incident_type, location, description, priority } = data;
+
+    const result = await db.queryAsOrg(
+      auth.organizationId,
+      `INSERT INTO emergency_dispatches
+         (organization_id, camera_id, incident_type, location, description, priority, status, dispatched_by)
+       VALUES ($1, $2, $3, $4, $5, $6, 'pending', $7)
+       RETURNING id, organization_id, camera_id, incident_type, location, description, priority, status, dispatched_by, created_at, updated_at`,
+      [auth.organizationId, camera_id || null, incident_type, location || null, description || null, priority, auth.userId],
+    );
+
+    const dispatch = result.rows[0];
+
+    await logAudit({
+      organizationId: auth.organizationId,
+      userId: auth.userId,
+      action: 'emergency.dispatch',
+      resourceType: 'emergency_dispatch',
+      resourceId: dispatch.id,
+      metadata: { incident_type, priority, camera_id: camera_id || null },
+      ipAddress: getIp(req),
+    });
+
+    return sendSuccess(res, { dispatch }, 201);
+  } catch (err) {
+    logger.error('POST /api/emergency/dispatch error', { error: err.message });
+    Sentry.captureException(err);
+    return sendError(res, 500, err.message);
+  }
+}
+
+async function handleEmergencyList(req, res) {
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+
+  try {
+    const { rows } = await db.queryAsOrg(
+      auth.organizationId,
+      `SELECT id, organization_id, camera_id, incident_type, location, description, priority, status, dispatched_by, created_at, updated_at
+       FROM emergency_dispatches
+       WHERE organization_id = $1
+       ORDER BY created_at DESC
+       LIMIT 100`,
+      [auth.organizationId],
+    );
+
+    return sendSuccess(res, { count: rows.length, dispatches: rows });
+  } catch (err) {
+    logger.error('GET /api/emergency/dispatch error', { error: err.message });
+    Sentry.captureException(err);
+    return sendError(res, 500, err.message);
+  }
+}
+
+// ═══════════════════════════════════════════════════════════════════
+//  Reports summary handler
+// ═══════════════════════════════════════════════════════════════════
+
+function computeDateRange(type, from, to) {
+  if (from && to) {
+    return { from, to };
+  }
+
+  const now = new Date();
+  let startDate;
+
+  switch (type) {
+    case 'weekly':
+      startDate = new Date(now);
+      startDate.setDate(now.getDate() - 7);
+      break;
+    case 'monthly':
+      startDate = new Date(now);
+      startDate.setDate(now.getDate() - 30);
+      break;
+    case 'daily':
+    default:
+      startDate = new Date(now);
+      startDate.setDate(now.getDate() - 1);
+      break;
+  }
+
+  return {
+    from: startDate.toISOString().split('T')[0],
+    to: now.toISOString().split('T')[0],
+  };
+}
+
+async function handleReportsSummary(req, res) {
+  const auth = await requireAuth(req, res);
+  if (!auth) return;
+
+  let query;
+  try {
+    const { path, ...queryParams } = req.query || {};
+    query = reportQuerySchema.parse(queryParams);
+  } catch (zodErr) {
+    if (zodErr instanceof z.ZodError) {
+      return sendError(res, 400, 'Validation failed',
+        zodErr.issues.map(e => ({ field: e.path.join('.'), message: e.message, received: e.received }))
+      );
+    }
+    throw zodErr;
+  }
+
+  const { from, to } = computeDateRange(query.type, query.from, query.to);
+
+  try {
+    const { rows: statusRows } = await db.queryAsOrg(
+      auth.organizationId,
+      `SELECT status, COUNT(*) as count
+       FROM incidents
+       WHERE organization_id = $1
+         AND created_at::date >= $2::date
+         AND created_at::date <= $3::date
+       GROUP BY status`,
+      [auth.organizationId, from, to],
+    );
+
+    const { rows: severityRows } = await db.queryAsOrg(
+      auth.organizationId,
+      `SELECT severity, COUNT(*) as count
+       FROM incidents
+       WHERE organization_id = $1
+         AND created_at::date >= $2::date
+         AND created_at::date <= $3::date
+       GROUP BY severity`,
+      [auth.organizationId, from, to],
+    );
+
+    const { rows: cameraRows } = await db.queryAsOrg(
+      auth.organizationId,
+      `SELECT c.name as camera_name, c.id as camera_id, COUNT(*) as count
+       FROM incidents i
+       JOIN cameras c ON c.id = i.camera_id
+       WHERE i.organization_id = $1
+         AND i.created_at::date >= $2::date
+         AND i.created_at::date <= $3::date
+       GROUP BY c.id, c.name
+       ORDER BY count DESC
+       LIMIT 10`,
+      [auth.organizationId, from, to],
+    );
+
+    const { rows: totalRow } = await db.queryAsOrg(
+      auth.organizationId,
+      `SELECT COUNT(*) as total,
+               AVG(EXTRACT(EPOCH FROM (resolved_at - created_at)) / 60) as avg_resolution_minutes
+       FROM incidents
+       WHERE organization_id = $1
+         AND created_at::date >= $2::date
+         AND created_at::date <= $3::date`,
+      [auth.organizationId, from, to],
+    );
+
+    const { rows: incidentRows } = await db.queryAsOrg(
+      auth.organizationId,
+      `SELECT i.id, i.status, i.severity, i.created_at, i.resolved_at,
+               e.description, c.name as camera_name
+       FROM incidents i
+       JOIN events e ON e.id = i.event_id
+       LEFT JOIN cameras c ON c.id = i.camera_id
+       WHERE i.organization_id = $1
+         AND i.created_at::date >= $2::date
+         AND i.created_at::date <= $3::date
+       ORDER BY i.created_at DESC
+       LIMIT 50`,
+      [auth.organizationId, from, to],
+    );
+
+    const byStatus = {};
+    for (const row of statusRows) {
+      byStatus[row.status] = parseInt(row.count, 10);
+    }
+
+    const bySeverity = {};
+    for (const row of severityRows) {
+      bySeverity[row.severity] = parseInt(row.count, 10);
+    }
+
+    const byCamera = cameraRows.map(r => ({
+      camera_id: r.camera_id,
+      camera_name: r.camera_name,
+      count: parseInt(r.count, 10),
+    }));
+
+    const total = totalRow[0]?.total ? parseInt(totalRow[0].total, 10) : 0;
+    const avgResolutionMinutes = totalRow[0]?.avg_resolution_minutes
+      ? Math.round(parseFloat(totalRow[0].avg_resolution_minutes))
+      : null;
+
+    await logAudit({
+      organizationId: auth.organizationId,
+      userId: auth.userId,
+      action: 'report.view',
+      resourceType: 'report',
+      resourceId: null,
+      metadata: { report_type: query.type, date_range: { from, to } },
+      ipAddress: getIp(req),
+    });
+
+    return sendSuccess(res, {
+      generated_at: new Date().toISOString(),
+      report_type: query.type,
+      date_range: { from, to },
+      summary: {
+        total_incidents: total,
+        by_status: byStatus,
+        by_severity: bySeverity,
+        by_camera: byCamera,
+        avg_resolution_time_minutes: avgResolutionMinutes,
+      },
+      incidents: incidentRows,
+    });
+  } catch (err) {
+    logger.error('GET /api/reports/summary error', { error: err.message });
     Sentry.captureException(err);
     return sendError(res, 500, err.message);
   }

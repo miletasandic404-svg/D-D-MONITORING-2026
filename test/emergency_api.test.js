@@ -52,11 +52,11 @@ auditModule.logAudit = async (entry) => { auditCalls.push(entry); };
 auditModule.getIp = () => '127.0.0.1';
 
 // ── load module under test AFTER patching its dependencies ───────────────
-const handler = require('../api/emergency');
+const handler = require('../api/incidents');
 
 // ── req/res test helpers ──────────────────────────────────────────────────
 function makeReq({ method = 'GET', query = {}, body = {} } = {}) {
-  return { method, query, body, headers: {}, socket: { remoteAddress: '127.0.0.1' } };
+  return { method, query: { path: 'emergency', ...query }, body, headers: {}, socket: { remoteAddress: '127.0.0.1' } };
 }
 
 function makeRes() {

@@ -116,29 +116,41 @@
                           "source":  "/api/incidents/:eventId/evidence",
                           "destination":  "/api/incidents/:eventId?path=evidence"
                       },
-                       {
-                           "source":  "/api/emergency/dispatch",
-                           "destination":  "/api/emergency?path=dispatch"
+{
+                           "source":  "/api/face-recognition",
+                           "destination":  "/api/known-entities?entity=face"
                        },
                        {
                            "source":  "/api/face-recognition/enroll",
-                           "destination":  "/api/face-recognition"
+                           "destination":  "/api/known-entities?entity=face"
                        },
                        {
                            "source":  "/api/face-recognition/:id",
-                           "destination":  "/api/face-recognition?id=:id"
+                           "destination":  "/api/known-entities?entity=face&id=:id"
+                       },
+                       {
+                           "source":  "/api/license-plates",
+                           "destination":  "/api/known-entities?entity=plate"
                        },
                        {
                            "source":  "/api/license-plates/enroll",
-                           "destination":  "/api/license-plates"
+                           "destination":  "/api/known-entities?entity=plate"
                        },
                        {
                            "source":  "/api/license-plates/:id",
-                           "destination":  "/api/license-plates?id=:id"
+                           "destination":  "/api/known-entities?entity=plate&id=:id"
+                       },
+                       {
+                           "source":  "/api/emergency/dispatch",
+                           "destination":  "/api/incidents?path=emergency"
                        },
                        {
                            "source":  "/api/reports/summary",
-                           "destination":  "/api/reports"
+                           "destination":  "/api/incidents?path=reports"
+                       },
+                       {
+                           "source":  "/api/settings",
+                           "destination":  "/api/users?path=settings"
                        },
                        {
                           "source":  "/api/sites",
