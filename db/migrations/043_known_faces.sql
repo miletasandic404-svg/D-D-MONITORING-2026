@@ -20,7 +20,7 @@ CREATE TABLE IF NOT EXISTS known_faces (
   name            TEXT NOT NULL,
   image_url       TEXT,
   status          TEXT NOT NULL DEFAULT 'active' CHECK (status IN ('active', 'suspicious', 'blocked')),
-  created_by      UUID REFERENCES users(id),
+  created_by      TEXT,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ
 );

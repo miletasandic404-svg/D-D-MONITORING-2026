@@ -22,7 +22,7 @@ CREATE TABLE IF NOT EXISTS known_plates (
   vehicle_color   TEXT,
   status          TEXT NOT NULL DEFAULT 'unknown' CHECK (status IN ('allowed', 'blocked', 'unknown')),
   notes           TEXT,
-  created_by      UUID REFERENCES users(id),
+  created_by      TEXT,
   created_at      TIMESTAMPTZ NOT NULL DEFAULT now(),
   updated_at      TIMESTAMPTZ
 );
