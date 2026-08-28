@@ -22,26 +22,43 @@
 
 const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const db = require('../db/index');
-const { keyFromPublicUrl } = require('../lib/_storage');
+const storage = require('../lib/_storage');
+const { keyFromPublicUrl } = storage;
 const { makeLogger } = require('../lib/_logger');
 const Sentry = require('@sentry/node');
 const { initSentry } = require('../lib/_sentry');
 
 const logger = makeLogger('worker-retention-job');
 
-initSentry();
+initS3Client();
+
+let s3Client = null;
+
+function initS3Client() {
+  if (storage.getBackend() === 's3') {
+    s3Client = new S3Client({
+      endpoint: process.env.STORAGE_ENDPOINT || undefined,
+      region: process.env.STORAGE_REGION || 'us-east-1',
+      forcePathStyle: Boolean(process.env.STORAGE_ENDPOINT),
+      credentials: {
+        accessKeyId: process.env.STORAGE_ACCESS_KEY_ID,
+        secretAccessKey: process.env.STORAGE_SECRET_ACCESS_KEY,
+      },
+    });
+  }
+}
 
 async function deleteFromStorage(key) {
-  const client = new S3Client({
-    endpoint: process.env.STORAGE_ENDPOINT || undefined,
-    region: process.env.STORAGE_REGION || 'us-east-1',
-    forcePathStyle: Boolean(process.env.STORAGE_ENDPOINT),
-    credentials: {
-      accessKeyId: process.env.STORAGE_ACCESS_KEY_ID,
-      secretAccessKey: process.env.STORAGE_SECRET_ACCESS_KEY,
-    },
-  });
-  await client.send(new DeleteObjectCommand({ Bucket: process.env.STORAGE_BUCKET, Key: key }));
+  if (storage.getBackend() === 'local') {
+    return storage.deleteObject(key);
+  }
+
+  // S3 deletion
+  if (!s3Client) {
+    throw new Error('S3 client not initialized');
+  }
+  await s3Client.send(new DeleteObjectCommand({ Bucket: process.env.STORAGE_BUCKET, Key: key }));
+  return true;
 }
 
 async function run() {

@@ -32,6 +32,14 @@ const L = require('../lib/_logger');
 const Sentry = require('@sentry/node');
 const { initSentry } = require('../lib/_sentry');
 
+// Person detection worker (optional - only if available)
+let personDetection = null;
+try {
+  personDetection = require('./person-detection-worker');
+} catch (err) {
+  // Person detection not available - continue without it
+}
+
 const logger = L.makeLogger('xiongmai-stream');
 
 initSentry();
@@ -325,28 +333,36 @@ async function startStreamForCamera(cameraId) {
       authResult.SessionId,
       { channel: 0, streamType: 'Main', transMode: 'TCP' },
        (frame) => {
-        if (frame.kind === 'video' && frame.data) {
-          ctx.lastFrameAt = Date.now();
-          resetFrameTimer(cameraId, ctx);
+         if (frame.kind === 'video' && frame.data) {
+           ctx.lastFrameAt = Date.now();
+           resetFrameTimer(cameraId, ctx);
 
-          if (frame.codec && frame.codec !== ctx.detectedCodec) {
-            if (ctx.ffmpegProcess) {
-              if (!ctx.ffmpegProcess.killed) {
-                ctx.ffmpegProcess.stdin.destroy();
-                ctx.ffmpegProcess.kill('SIGTERM');
-              }
-              ctx.ffmpegProcess = null;
-            }
-            ctx.detectedCodec = frame.codec;
-            ctx.ffmpegProcess = startFfmpeg(cameraId, ctx.detectedCodec);
-            logger.info('stream.ffmpeg_started', { camera_id: cameraId, codec: ctx.detectedCodec });
-          }
+           if (frame.codec && frame.codec !== ctx.detectedCodec) {
+             if (ctx.ffmpegProcess) {
+               if (!ctx.ffmpegProcess.killed) {
+                 ctx.ffmpegProcess.stdin.destroy();
+                 ctx.ffmpegProcess.kill('SIGTERM');
+               }
+               ctx.ffmpegProcess = null;
+             }
+             ctx.detectedCodec = frame.codec;
+             ctx.ffmpegProcess = startFfmpeg(cameraId, ctx.detectedCodec);
+             logger.info('stream.ffmpeg_started', { camera_id: cameraId, codec: ctx.detectedCodec });
+           }
 
-          if (ctx.ffmpegProcess && !ctx.ffmpegProcess.killed && ctx.ffmpegProcess.stdin.writable) {
-            ctx.ffmpegProcess.stdin.write(frame.data);
-          }
-        }
-      },
+           if (ctx.ffmpegProcess && !ctx.ffmpegProcess.killed && ctx.ffmpegProcess.stdin.writable) {
+             ctx.ffmpegProcess.stdin.write(frame.data);
+           }
+         } else if (frame.kind === 'jpeg' && frame.data && personDetection) {
+           // Pass JPEG frames to person detection worker (non-blocking)
+           try {
+             personDetection.submitFrame(cameraId, frame.data);
+           } catch (err) {
+             // Detection is best-effort, don't break the stream
+             logger.debug('person_detection_submit_failed', { camera_id: cameraId, error: err.message });
+           }
+         }
+       },
       (err) => {
         logger.error('stream.video_error', { camera_id: cameraId, error: err.message });
         scheduleReconnect(cameraId, ctx, err.message);

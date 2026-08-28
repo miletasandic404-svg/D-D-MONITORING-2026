@@ -44,3 +44,4 @@ scripts/test_xiongmai_video_poc.js
 scripts/update-hls-url.js
 scripts/xiongmai-bridge-poc.js
 .env*
+models/*.onnx
