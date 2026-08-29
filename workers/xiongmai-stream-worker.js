@@ -194,6 +194,7 @@ function cleanupStream(cameraId, reason) {
      ctx.detectedCodec = null;
    }
 
+   ctx.starting = false;
    activeStreams.delete(cameraId);
  }
 
@@ -226,7 +227,10 @@ function scheduleReconnect(cameraId, ctx, reason) {
       ctx.ffmpegProcess.kill('SIGTERM');
     }
     ctx.ffmpegProcess = null;
+    ctx.detectedCodec = null;
   }
+
+  ctx.starting = false;
 
   const attempts = ctx.reconnectAttempts + 1;
   ctx.reconnectAttempts = attempts;
@@ -273,8 +277,13 @@ async function startStreamForCamera(cameraId) {
   if (shuttingDown) return;
 
   let ctx = activeStreams.get(cameraId);
+  // Stream is already running: just reset reconnect attempts
   if (ctx && ctx.adapter && ctx.videoStream) {
     ctx.reconnectAttempts = 0;
+    return;
+  }
+  // Stream start is already in progress: don't start another one
+  if (ctx && ctx.starting) {
     return;
   }
 
@@ -287,6 +296,7 @@ async function startStreamForCamera(cameraId) {
     reconnectTimer: null,
     frameTimer: null,
     lastFrameAt: 0,
+    starting: true,
   };
   activeStreams.set(cameraId, ctx);
 
@@ -296,6 +306,7 @@ async function startStreamForCamera(cameraId) {
     cam = cameras.find((c) => c.id === cameraId);
   } catch (err) {
     logger.error('stream.discovery_failed', { camera_id: cameraId, error: err.message });
+    ctx.starting = false;
     scheduleReconnect(cameraId, ctx, err.message);
     return;
   }
@@ -317,6 +328,7 @@ async function startStreamForCamera(cameraId) {
     authResult = await ctx.adapter.authenticate(cam.rtsp_username || '', password);
   } catch (err) {
     logger.error('stream.auth_failed', { camera_id: cameraId, error: err.message });
+    ctx.starting = false;
     scheduleReconnect(cameraId, ctx, err.message);
     return;
   }
@@ -335,6 +347,8 @@ async function startStreamForCamera(cameraId) {
        (frame) => {
          if (frame.kind === 'video' && frame.data) {
            ctx.lastFrameAt = Date.now();
+           // Stream is now active: clear starting flag
+           ctx.starting = false;
            resetFrameTimer(cameraId, ctx);
 
            if (frame.codec && frame.codec !== ctx.detectedCodec) {
@@ -365,6 +379,7 @@ async function startStreamForCamera(cameraId) {
        },
       (err) => {
         logger.error('stream.video_error', { camera_id: cameraId, error: err.message });
+        ctx.starting = false;
         scheduleReconnect(cameraId, ctx, err.message);
       },
     );
@@ -373,6 +388,7 @@ async function startStreamForCamera(cameraId) {
     resetFrameTimer(cameraId, ctx);
   } catch (err) {
     logger.error('stream.video_start_failed', { camera_id: cameraId, error: err.message });
+    ctx.starting = false;
     scheduleReconnect(cameraId, ctx, err.message);
   }
 }
@@ -394,9 +410,16 @@ async function discoverAndSync() {
 
   for (const cam of cameras) {
     const existing = activeStreams.get(cam.id);
-    if (existing) {
+    // Stream is running normally: reset reconnect attempts
+    if (existing && existing.adapter && existing.videoStream && existing.ffmpegProcess) {
       existing.reconnectAttempts = 0;
-    } else {
+    }
+    // Stream exists but is being cleaned up / reconnect is pending: don't interfere
+    else if (existing && existing.reconnectTimer) {
+      // reconnect is scheduled, discovery should not reset state
+    }
+    // Stream not running and no reconnect scheduled: start fresh
+    else {
       startStreamForCamera(cam.id).catch((err) => {
         logger.error('stream.start_error', { camera_id: cam.id, error: err.message });
       });

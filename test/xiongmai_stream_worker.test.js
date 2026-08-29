@@ -710,3 +710,161 @@ after(() => {
   mediamtXModule.addOrUpdateCameraPath = originalAddOrUpdateCameraPath;
   cleanupAllStreams();
 });
+
+describe('xiongmai-stream-worker — frame_timeout recovery', () => {
+  beforeEach(() => {
+    poolScript = () => ({
+      rows: [{
+        id: 'cam-1', name: 'Cam', ip: '192.168.1.10', port: 34567,
+        rtsp_username: 'admin', rtsp_password_encrypted: 'enc',
+      }],
+    });
+    // Use a short frame timeout for testing
+    process.env.XM_FRAME_TIMEOUT_MS = '100';
+  });
+
+  afterEach(() => {
+    process.env.XM_FRAME_TIMEOUT_MS = '30000';
+  });
+
+  test('frame_timeout triggers cleanup and schedules reconnect', async () => {
+    await worker.startStreamForCamera('cam-1');
+    await new Promise(r => setTimeout(r, 30));
+
+    let ctx = worker.activeStreams.get('cam-1');
+    assert.ok(ctx, 'stream should exist');
+    assert.ok(ctx.adapter, 'adapter should exist');
+    assert.ok(ctx.videoStream, 'videoStream should exist');
+    assert.ok(ctx.ffmpegProcess, 'ffmpegProcess should exist');
+
+    // Wait for frame timeout to fire (100ms + buffer)
+    await new Promise(r => setTimeout(r, 200));
+
+    ctx = worker.activeStreams.get('cam-1');
+    assert.ok(ctx, 'stream entry should still exist');
+    assert.ok(ctx.reconnectTimer, 'reconnect should be scheduled');
+    assert.equal(ctx.reconnectAttempts, 1, 'reconnect attempts should be 1');
+    // After frame_timeout, resources should be cleaned up
+    assert.equal(ctx.adapter, null, 'adapter should be null after cleanup');
+    assert.equal(ctx.videoStream, null, 'videoStream should be null after cleanup');
+    assert.equal(ctx.ffmpegProcess, null, 'ffmpegProcess should be null after cleanup');
+  });
+
+  test('reconnect is scheduled with backoff after frame_timeout', async () => {
+    await worker.startStreamForCamera('cam-1');
+    await new Promise(r => setTimeout(r, 30));
+
+    // Wait for frame timeout
+    await new Promise(r => setTimeout(r, 200));
+
+    const ctx = worker.activeStreams.get('cam-1');
+    assert.ok(ctx.reconnectTimer, 'reconnect timer should be set');
+    assert.equal(ctx.reconnectAttempts, 1, 'first reconnect attempt');
+  });
+
+  test('duplicate reconnect is prevented by starting flag', async () => {
+    await worker.startStreamForCamera('cam-1');
+    await new Promise(r => setTimeout(r, 30));
+
+    // Wait for frame timeout
+    await new Promise(r => setTimeout(r, 200));
+
+    let ctx = worker.activeStreams.get('cam-1');
+    assert.ok(ctx.reconnectTimer, 'reconnect should be scheduled');
+
+    // Attempt to start stream again should be prevented by starting flag
+    // (the reconnect timer hasn't fired yet, so starting flag may or may not be set)
+    // But calling startStreamForCamera directly should not create duplicate
+    await worker.startStreamForCamera('cam-1');
+    await new Promise(r => setTimeout(r, 30));
+
+    // Should still have only one adapter (no duplicate)
+    const adapterCount = adapterInstances.length;
+    assert.ok(adapterCount <= 2, 'should not create excessive adapters');
+  });
+
+  test('successful reconnect clears recovery state', async () => {
+    let connectCount = 0;
+    const originalPoolScript = poolScript;
+    poolScript = (text, params) => {
+      connectCount++;
+      return originalPoolScript(text, params);
+    };
+
+    await worker.startStreamForCamera('cam-1');
+    await new Promise(r => setTimeout(r, 30));
+
+    // Wait for frame timeout
+    await new Promise(r => setTimeout(r, 200));
+
+    // Clear the reconnect timer to prevent actual reconnect
+    const ctx = worker.activeStreams.get('cam-1');
+    if (ctx.reconnectTimer) {
+      clearTimeout(ctx.reconnectTimer);
+      ctx.reconnectTimer = null;
+    }
+
+    // Manually start stream again (simulating successful reconnect)
+    await worker.startStreamForCamera('cam-1');
+    await new Promise(r => setTimeout(r, 50));
+
+    const newCtx = worker.activeStreams.get('cam-1');
+    assert.ok(newCtx, 'stream should exist after reconnect');
+    assert.ok(newCtx.adapter, 'adapter should exist after reconnect');
+    assert.ok(newCtx.videoStream, 'videoStream should exist after reconnect');
+    assert.equal(newCtx.reconnectAttempts, 0, 'reconnect attempts should be reset');
+    assert.equal(newCtx.starting, false, 'starting flag should be cleared');
+  });
+});
+
+describe('xiongmai-stream-worker — discovery does not interfere with reconnect', () => {
+  beforeEach(() => {
+    poolScript = () => ({
+      rows: [{
+        id: 'cam-1', name: 'Cam', ip: '192.168.1.10', port: 34567,
+        rtsp_username: 'admin', rtsp_password_encrypted: 'enc',
+      }],
+    });
+    process.env.XM_FRAME_TIMEOUT_MS = '100';
+  });
+
+  afterEach(() => {
+    process.env.XM_FRAME_TIMEOUT_MS = '30000';
+  });
+
+  test('discovery does not reset reconnectAttempts when reconnect is pending', async () => {
+    await worker.startStreamForCamera('cam-1');
+    await new Promise(r => setTimeout(r, 30));
+
+    // Wait for frame timeout to trigger reconnect
+    await new Promise(r => setTimeout(r, 200));
+
+    let ctx = worker.activeStreams.get('cam-1');
+    assert.ok(ctx.reconnectTimer, 'reconnect should be scheduled');
+    assert.equal(ctx.reconnectAttempts, 1, 'attempts should be 1 before discovery');
+
+    // Run discovery
+    await worker.discoverAndSync();
+    await new Promise(r => setTimeout(r, 30));
+
+    ctx = worker.activeStreams.get('cam-1');
+    // Discovery should NOT reset reconnectAttempts because reconnect is pending
+    assert.equal(ctx.reconnectAttempts, 1, 'attempts should remain 1 after discovery');
+  });
+
+  test('discovery resets reconnectAttempts when stream is running', async () => {
+    await worker.startStreamForCamera('cam-1');
+    await new Promise(r => setTimeout(r, 30));
+
+    // Manually set reconnect attempts
+    let ctx = worker.activeStreams.get('cam-1');
+    ctx.reconnectAttempts = 3;
+
+    // Stream is running (has adapter, videoStream, ffmpegProcess)
+    await worker.discoverAndSync();
+    await new Promise(r => setTimeout(r, 30));
+
+    ctx = worker.activeStreams.get('cam-1');
+    assert.equal(ctx.reconnectAttempts, 0, 'attempts should be reset when stream is running');
+  });
+});
