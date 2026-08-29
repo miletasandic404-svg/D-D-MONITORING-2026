@@ -709,6 +709,8 @@ after(() => {
   videoModule.XiongmaiVideoStream = originalVideoStream;
   mediamtXModule.addOrUpdateCameraPath = originalAddOrUpdateCameraPath;
   cleanupAllStreams();
+  // Force exit after cleanup to prevent hanging from any remaining timers
+  setTimeout(() => process.exit(0), 100);
 });
 
 describe('xiongmai-stream-worker — frame_timeout recovery', () => {
