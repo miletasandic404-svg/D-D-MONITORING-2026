@@ -30,9 +30,9 @@ const { initSentry } = require('../lib/_sentry');
 
 const logger = makeLogger('worker-retention-job');
 
-initS3Client();
-
 let s3Client = null;
+
+initS3Client();
 
 function initS3Client() {
   if (storage.getBackend() === 's3') {
