@@ -27,11 +27,11 @@ function fakeRows(text) {
   if (text.includes('JOIN media_nodes n ON n.id = c.media_node_id')) {
     return { rows: [{ active: 2 }] };
   }
-  if (text.includes('FROM cameras')) {
-    return { rows: [{ online: 3, offline: 1, degraded: 0, unknown: 2 }] };
-  }
   if (text.includes('FROM media_nodes')) {
     return { rows: [{ active: 4, offline: 1, unknown: 0 }] };
+  }
+  if (text.includes('FROM cameras')) {
+    return { rows: [{ online: 3, offline: 1, degraded: 0, unknown: 2 }] };
   }
   if (text.includes('audit_logs')) {
     return { rows: [{ name: 'camera', error: 'boom' }] };
@@ -114,7 +114,7 @@ describe('GET /api/health/dashboard', () => {
     assert.match(streams.text, /c\.enabled = TRUE/);
     assert.match(streams.text, /n\.last_heartbeat_at > now\(\) - interval '90 seconds'/);
     assert.match(streams.text, /AND c\.organization_id = \$1/);
-    assert.match(nodes.text, /FROM media_nodes WHERE organization_id = \$1/);
+    assert.match(nodes.text, /FROM media_nodes WHERE id IN \(SELECT media_node_id FROM cameras WHERE organization_id = \$1/);
     assert.match(audit.text, /AND organization_id = \$1/);
   });
 
