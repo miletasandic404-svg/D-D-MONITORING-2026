@@ -10,7 +10,7 @@
  * remains strictly org-scoped as an independent SSRF protection.
  */
 
-const { test, describe, beforeEach } = require('node:test');
+const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 
 const db = require('../db/index');
@@ -192,5 +192,69 @@ describe('media-nodes API heartbeat organization scoping', () => {
     assert.ok(lastPlatformAdminQuery, 'queryAsPlatformAdmin should be called for unbound nodes (RLS bypass)');
     assert.match(lastPlatformAdminQuery.text, /media_nodes/,
       'queryAsPlatformAdmin should access media_nodes table');
+  });
+});
+
+describe('media-nodes API heartbeat secret comparison', () => {
+  let mockReq, mockRes, originalDbQuery, originalDbQueryAsOrg, originalDbQueryAsPlatformAdmin;
+
+  beforeEach(() => {
+    mockReq = {
+      method: 'POST',
+      query: { nodeId: 'node-1' },
+      body: {},
+      headers: { 'x-forwarded-for': '127.0.0.1' },
+    };
+    mockRes = {
+      statusCode: 200,
+      status: (code) => { mockRes.statusCode = code; return { json: (data) => ({ status: code, data }) }; },
+      setHeader: () => mockRes,
+    };
+
+    originalDbQuery = db.query;
+    originalDbQueryAsOrg = db.queryAsOrg;
+    originalDbQueryAsPlatformAdmin = db.queryAsPlatformAdmin;
+
+    db.query = async () => ({ rows: [] });
+    db.queryAsOrg = async () => ({ rows: [] });
+    db.queryAsPlatformAdmin = async (text, params) => {
+      if (text.includes('heartbeat_secret')) {
+        return { rows: [{ id: 'node-1', heartbeat_secret: 'secret123', organization_id: 'org-a' }] };
+      }
+      return { rows: [] };
+    };
+  });
+
+  afterEach(() => {
+    db.query = originalDbQuery;
+    db.queryAsOrg = originalDbQueryAsOrg;
+    db.queryAsPlatformAdmin = originalDbQueryAsPlatformAdmin;
+  });
+
+  test('valid secret returns 200', async () => {
+    const handler = require('../api/media-nodes');
+    mockReq.body = { heartbeat_secret: 'secret123', status: 'online' };
+    await handler(mockReq, mockRes);
+    assert.equal(mockRes.statusCode, 200);
+  });
+
+  test('invalid secret returns 401', async () => {
+    const handler = require('../api/media-nodes');
+    mockReq.body = { heartbeat_secret: 'wrong-secret', status: 'online' };
+    await handler(mockReq, mockRes);
+    assert.equal(mockRes.statusCode, 401);
+  });
+
+  test('different length secrets do not throw', async () => {
+    const handler = require('../api/media-nodes');
+    mockReq.body = { heartbeat_secret: 'short', status: 'online' };
+    let threw = false;
+    try {
+      await handler(mockReq, mockRes);
+    } catch (err) {
+      threw = true;
+    }
+    assert.ok(!threw, 'handler must not throw on length mismatch');
+    assert.equal(mockRes.statusCode, 401);
   });
 });
