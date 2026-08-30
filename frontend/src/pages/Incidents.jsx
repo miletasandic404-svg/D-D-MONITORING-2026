@@ -133,7 +133,7 @@ export default function Incidents() {
                   <td>
                     <div className={`severity-indicator ${getSeverityClass(incident.severity)}`} />
                   </td>
-                  <td className="incident-id">#{incident.id?.slice(0, 8) || '00000000'}</td>
+                   <td className="incident-id">#{String(incident.id || '').slice(0, 8) || '00000000'}</td>
                   <td>
                     <div className="incident-title">{incident.source || 'Untitled Incident'}</div>
                     <div className="incident-desc">{incident.subtitle || incident.camera_id || 'No description'}</div>

@@ -36,6 +36,9 @@ const { initSentry } = require('../lib/_sentry');
 let personDetection = null;
 try {
   personDetection = require('./person-detection-worker');
+  if (personDetection.startProcessing) {
+    personDetection.startProcessing();
+  }
 } catch (err) {
   // Person detection not available - continue without it
 }

@@ -49,8 +49,7 @@ const CloudRecording = ({ cameraId, cameraName }) => {
   ];
 
   const toggleRecording = () => {
-    setSettings({ ...settings, enabled: !settings.enabled });
-    setIsRecording(!settings.enabled);
+    alert('Cloud recording settings are managed server-side. This UI is read-only until backend integration is complete.');
   };
 
   return (

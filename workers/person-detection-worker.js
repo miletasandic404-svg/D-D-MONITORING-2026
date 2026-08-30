@@ -196,12 +196,21 @@ async function createDetectionEvent(cameraId, confidence, boundingBoxes) {
  */
 async function sendNotifications(cameraId, eventId, confidence) {
   try {
-    const rules = await db.queryAsPlatformAdmin(
-      `SELECT id, channel, recipient, event_type
-       FROM notification_rules
-       WHERE active = true
-         AND (event_type IS NULL OR event_type = 'person_detected')`,
-    );
+  // Get the camera's organization to scope notification rules
+  const camera = await db.queryAsPlatformAdmin(
+    'SELECT organization_id FROM cameras WHERE id = $1',
+    [cameraId],
+  );
+  const orgId = camera.rows[0]?.organization_id;
+
+  const rules = await db.queryAsPlatformAdmin(
+    `SELECT id, channel, recipient, event_type
+     FROM notification_rules
+     WHERE active = true
+       AND (event_type IS NULL OR event_type = 'person_detected')
+       AND ($1::uuid IS NULL OR organization_id = $1)`,
+    [orgId],
+  );
 
     if (rules.rows.length === 0) {
       logger.debug('No active notification rules for person_detected');
@@ -360,11 +369,16 @@ async function main() {
     modelPath: process.env.PERSON_MODEL_PATH || 'models/yolov8n.onnx',
   });
 
-  // Process frames every second
-  const processInterval = setInterval(processLoop, 1000);
+  startProcessing();
+}
 
-  // Periodic status check and model reload
-  const statusInterval = setInterval(async () => {
+function startProcessing() {
+  if (started) return;
+  started = true;
+
+  processInterval = setInterval(processLoop, 1000);
+
+  statusInterval = setInterval(async () => {
     const status = detection.getStatus();
     if (!status.modelLoaded && status.modelExists) {
       logger.info('Attempting model reload...');
@@ -372,29 +386,28 @@ async function main() {
     }
   }, DB_CHECK_INTERVAL_MS);
 
-  // Graceful shutdown
-  const shutdown = () => {
-    clearInterval(processInterval);
-    clearInterval(statusInterval);
-    logger.info('Person detection worker shutting down');
-    process.exit(0);
-  };
-
-  process.on('SIGTERM', shutdown);
-  process.on('SIGINT', shutdown);
+  logger.info('Person detection processing started');
 }
+
+let started = false;
+let processInterval = null;
+let statusInterval = null;
 
 if (require.main === module) {
   main().catch((err) => {
     logger.error('Fatal error', { error: err.message });
     process.exit(1);
   });
+} else {
+  // When required as a module (e.g., by xiongmai-stream-worker),
+  // expose a start function so the parent can begin processing.
 }
 
 // Export for use by stream workers
 module.exports = {
   submitFrame,
   frameBus,
+  startProcessing,
   getStatus: () => ({
     ...detection.getStatus(),
     camerasMonitored: frameQueues.size,

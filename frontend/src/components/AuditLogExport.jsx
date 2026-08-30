@@ -27,83 +27,7 @@ const AuditLogExport = ({ logs = [], title = 'Audit Log' }) => {
   // Export logs (server-side generation)
   const handleExport = async () => {
     setExporting(true);
-    
-    try {
-      if (format === 'csv') {
-        // Server-side CSV generation
-        const response = await api.get('/api/audit/export', {
-          params: {
-            format: 'csv',
-            start: dateRange.start,
-            end: dateRange.end,
-            type: filters.type,
-            user: filters.user,
-            severity: filters.severity
-          },
-          responseType: 'blob'
-        });
-        
-        // Download file
-        const url = window.URL.createObjectURL(new Blob([response.data]));
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', `audit-log-${dateRange.start}-${dateRange.end}.csv`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
-        
-      } else if (format === 'pdf') {
-        // Server-side PDF generation
-        const response = await api.get('/api/audit/export', {
-          params: {
-            format: 'pdf',
-            start: dateRange.start,
-            end: dateRange.end,
-            type: filters.type,
-            user: filters.user,
-            severity: filters.severity
-          },
-          responseType: 'blob'
-        });
-        
-        const url = window.URL.createObjectURL(new Blob([response.data], { type: 'application/pdf' }));
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', `audit-log-${dateRange.start}-${dateRange.end}.pdf`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
-        
-      } else if (format === 'json') {
-        // JSON export (also server-side)
-        const response = await api.get('/api/audit/export', {
-          params: {
-            format: 'json',
-            start: dateRange.start,
-            end: dateRange.end,
-            type: filters.type,
-            user: filters.user,
-            severity: filters.severity
-          }
-        });
-        
-        const blob = new Blob([JSON.stringify(response.data, null, 2)], { type: 'application/json' });
-        const url = window.URL.createObjectURL(blob);
-        const link = document.createElement('a');
-        link.href = url;
-        link.setAttribute('download', `audit-log-${dateRange.start}-${dateRange.end}.json`);
-        document.body.appendChild(link);
-        link.click();
-        link.remove();
-        window.URL.revokeObjectURL(url);
-      }
-    } catch (err) {
-      console.error('Export failed:', err);
-      alert('Export failed. Please check your connection and try again.');
-    }
-    
+    alert('Audit log export is not yet available. Please contact your administrator.');
     setExporting(false);
   };
 
@@ -296,7 +220,8 @@ const AuditLogExport = ({ logs = [], title = 'Audit Log' }) => {
           display: 'flex',
           alignItems: 'center',
           justifyContent: 'center',
-          gap: '.75rem'
+          gap: '.75rem',
+          opacity: 0.7
         }}
       >
         {exporting ? (

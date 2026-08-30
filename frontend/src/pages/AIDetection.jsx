@@ -66,6 +66,7 @@ export default function AIDetection() {
   const stats = {
     total: detections.length,
     today: detections.filter(d => {
+      if (!d.created_at) return false;
       const today = new Date().toDateString();
       return new Date(d.created_at).toDateString() === today;
     }).length,

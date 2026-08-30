@@ -71,25 +71,7 @@ const PushNotifications = () => {
   // Update push subscription
   const updateSubscription = async (newSettings) => {
     if (permission !== 'granted') return;
-    
-    try {
-      const registration = await navigator.serviceWorker.ready;
-      const subscription = await registration.pushManager.getSubscription();
-      
-      if (subscription) {
-        // Update server with new settings
-        await fetch('/api/push/subscribe', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({
-            subscription: subscription.toJSON(),
-            settings: newSettings
-          })
-        });
-      }
-    } catch (err) {
-      console.error('Subscription update failed:', err);
-    }
+    // Push notifications backend is not yet available.
   };
 
   // Clear notification history

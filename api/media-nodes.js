@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const db = require('../db/index');
 const { requireAuth } = require('../lib/_auth');
 const { generateHeartbeatSecret, HEARTBEAT_FRESHNESS_SECONDS } = require('../lib/_media_nodes');
@@ -109,11 +110,18 @@ async function handlePostHeartbeat(req, res) {
       [nodeId],
     );
 
-    if (node.rows.length === 0 || node.rows[0].heartbeat_secret !== providedSecret) {
+    if (node.rows.length === 0) {
       return sendError(res, 401, 'Invalid node ID or heartbeat secret');
     }
 
     const nodeData = node.rows[0];
+    const secretBuf = Buffer.from(nodeData.heartbeat_secret || '');
+    const providedBuf = Buffer.from(providedSecret || '');
+    const match = secretBuf.length === providedBuf.length &&
+      crypto.timingSafeEqual(secretBuf, providedBuf);
+    if (!match) {
+      return sendError(res, 401, 'Invalid node ID or heartbeat secret');
+    }
     const { mediamtx_online, tunnel_online, health } = req.body || {};
     const healthJson = health ? (typeof health === 'string' ? health : JSON.stringify(health)) : null;
 

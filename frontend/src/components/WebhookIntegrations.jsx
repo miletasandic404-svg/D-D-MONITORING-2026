@@ -71,31 +71,17 @@ const WebhookIntegrations = () => {
   ];
 
   const toggleWebhook = (id) => {
-    setWebhooks(webhooks.map(w => 
-      w.id === id ? { ...w, enabled: !w.enabled } : w
-    ));
+    alert('Webhook management is not yet available. This feature requires backend integration.');
   };
 
   const testWebhook = async (webhook) => {
     setTesting(webhook.id);
-    try {
-      // Test webhook - server sends test POST
-      await api.post('/api/webhooks/test', {
-        webhookId: webhook.id,
-        testType: 'ping'
-      });
-      alert('✅ Test message sent successfully!');
-    } catch (err) {
-      console.error('Test failed:', err);
-      alert('❌ Failed to send test message. Please check the webhook URL and try again.');
-    }
+    alert('Webhook testing is not yet available. This feature requires backend integration.');
     setTesting(null);
   };
 
   const deleteWebhook = (id) => {
-    if (confirm('Delete this webhook?')) {
-      setWebhooks(webhooks.filter(w => w.id !== id));
-    }
+    alert('Webhook deletion is not yet available. This feature requires backend integration.');
   };
 
   return (
@@ -115,7 +101,7 @@ const WebhookIntegrations = () => {
           🔗 Webhook Integrations
         </h3>
         <button
-          onClick={() => setShowAdd(!showAdd)}
+          onClick={() => alert('Webhook management is not yet available. This feature requires backend integration.')}
           style={{
             padding: '.5rem 1rem',
             background: 'rgba(0,212,255,.1)',
@@ -126,7 +112,7 @@ const WebhookIntegrations = () => {
             fontSize: '.85rem'
           }}
         >
-          {showAdd ? 'Cancel' : '+ Add Webhook'}
+          + Add Webhook
         </button>
       </div>
 
@@ -138,43 +124,10 @@ const WebhookIntegrations = () => {
           borderRadius: '12px',
           marginBottom: '1rem'
         }}>
-          <h4 style={{ color: '#8ee8ff', marginBottom: '1rem' }}>Choose Integration</h4>
-          <div style={{ 
-            display: 'grid', 
-            gridTemplateColumns: 'repeat(auto-fill, minmax(140px, 1fr))', 
-            gap: '.75rem',
-            marginBottom: '1.5rem'
-          }}>
-            {integrationTemplates.map(template => (
-              <button
-                key={template.name}
-                style={{
-                  padding: '1rem',
-                  background: 'rgba(10,18,38,.8)',
-                  border: '1px solid rgba(87,125,196,.3)',
-                  borderRadius: '10px',
-                  color: '#dff7ff',
-                  cursor: 'pointer',
-                  textAlign: 'center'
-                }}
-                onClick={() => {
-                  const newId = Math.max(...webhooks.map(w => w.id)) + 1;
-                  setWebhooks([...webhooks, {
-                    id: newId,
-                    name: template.name,
-                    url: template.url,
-                    events: ['alert'],
-                    enabled: true,
-                    icon: template.icon
-                  }]);
-                  setShowAdd(false);
-                }}
-              >
-                <div style={{ fontSize: '2rem', marginBottom: '.5rem' }}>{template.icon}</div>
-                <div style={{ fontWeight: 'bold', fontSize: '.9rem' }}>{template.name}</div>
-              </button>
-            ))}
-          </div>
+          <h4 style={{ color: '#8ee8ff', marginBottom: '1rem' }}>Webhook integration is not yet available</h4>
+          <p style={{ color: '#8ab0c9', fontSize: '.85rem' }}>
+            Backend webhook CRUD endpoints are required before adding integrations.
+          </p>
         </div>
       )}
 
