@@ -261,7 +261,7 @@ async function sendNotifications(cameraId, eventId, confidence) {
      FROM notification_rules
      WHERE active = true
        AND (event_type IS NULL OR event_type = 'person_detected')
-       AND ($1::uuid IS NULL OR organization_id = $1)`,
+       AND organization_id = $1`,
     [orgId],
   );
 
@@ -475,6 +475,7 @@ module.exports = {
   frameBus,
   startProcessing,
   cleanupStaleState,
+  sendNotifications,
   getStatus: () => ({
     ...detection.getStatus(),
     camerasMonitored: frameQueues.size,
