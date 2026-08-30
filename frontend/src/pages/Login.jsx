@@ -90,31 +90,6 @@ const PAGE_CSS = `
 const paypalClientId = import.meta.env.VITE_PAYPAL_CLIENT_ID || '';
 const stripePublishableKey = import.meta.env.VITE_STRIPE_PUBLISHABLE_KEY || '';
 
-const PLANS = [
-  {
-    id: 'starter',
-    name: 'Standard Global',
-    price: '$500 / month',
-    amount: '500',
-    features: ['Up to 5 cameras / locations', 'Automated incident reports', 'Standard support'],
-  },
-  {
-    id: 'growth',
-    name: 'Business Global',
-    price: '$950 / month',
-    amount: '950',
-    features: ['Up to 15 cameras / locations', 'AI-accelerated reporting', 'Priority support'],
-    recommended: true,
-  },
-  {
-    id: 'enterprise',
-    name: 'Enterprise Global',
-    price: '$1,500 / month',
-    amount: '1500',
-    features: ['Unlimited cameras', 'Dedicated AI analytics', '24/7 premium SLA support'],
-  },
-];
-
 export default function Login() {
   const navigate = useNavigate();
   const [email, setEmail] = useState(() => localStorage.getItem('rememberedEmail') || '');
@@ -125,6 +100,9 @@ export default function Login() {
   const stripeRef = useRef(null);
   const stripeElementsRef = useRef(null);
   const [planId, setPlanId] = useState('growth');
+  const [plans, setPlans] = useState([]);
+  const [plansLoading, setPlansLoading] = useState(true);
+  const [plansError, setPlansError] = useState('');
   const [step, setStep] = useState('plans');
   const [paymentMethod, setPaymentMethod] = useState('paypal');
   const [ppStatus, setPpStatus] = useState('');
@@ -136,7 +114,7 @@ export default function Login() {
   const [contacts, setContacts] = useState({ police: '', fire: '', ambulance: '', command: '' });
   const [legalModal, setLegalModal] = useState(null);
 
-  const plan = PLANS.find((p) => p.id === planId) || PLANS[1];
+  const plan = plans.find((p) => p.id === planId) || plans[1] || null;
   const checkoutContacts = {
     policeStation: contacts.police,
     fireService: contacts.fire,
@@ -146,6 +124,42 @@ export default function Login() {
   const contactsFilled = [district, contacts.police, contacts.fire, contacts.ambulance, contacts.command].every(
     (v) => String(v || '').trim().length > 0
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    setPlansLoading(true);
+    setPlansError('');
+    api.get('/payments/catalog')
+      .then((res) => {
+        if (cancelled) return;
+        const backendPlans = (res.data?.plans || []).map((p) => ({
+          id: p.id,
+          name: p.name,
+          price: Number.parseFloat(p.amount).toLocaleString() + ' / month',
+          amount: String(Number.parseFloat(p.amount)),
+          features: [
+            `${p.limits?.camera_limit > 0 ? `Up to ${p.limits.camera_limit}` : 'Unlimited'} cameras / locations`,
+            p.features?.aiDetection ? 'AI detection included' : 'AI detection unavailable',
+            p.features?.reports ? 'Reports included' : 'No reports included',
+            p.features?.apiAccess ? 'API access included' : 'No API access',
+          ],
+          recommended: p.id === 'growth',
+        }));
+        setPlans(backendPlans);
+        if (!backendPlans.find((p) => p.id === planId) && backendPlans.length > 0) {
+          setPlanId(backendPlans[0].id);
+        }
+      })
+      .catch((err) => {
+        if (!cancelled) {
+          setPlansError(err?.response?.data?.error || err?.message || 'Failed to load plans.');
+        }
+      })
+      .finally(() => {
+        if (!cancelled) setPlansLoading(false);
+      });
+    return () => { cancelled = true; };
+  }, []);
 
   useEffect(() => {
     if (step !== 'checkout' || !contactsFilled || paymentMethod !== 'paypal') return;
@@ -335,37 +349,45 @@ export default function Login() {
               <p className="pr-sub">Activate your subscription via secure PayPal checkout &#x2014; no hidden fees, cancel anytime.</p>
             </div>
 
-            {step !== 'complete' ? (
-              <>
-                <div className="pr-cards">
-                  {PLANS.map((p) => (
-                    <button
-                      key={p.id}
-                      type="button"
-                      className={`pr-card${planId === p.id ? ' pr-card-sel' : ''}${p.recommended ? ' pr-card-rec' : ''}`}
-                      onClick={() => {
-                        setPlanId(p.id);
-                        setStep('contacts');
-                        setPpStatus('');
-                        setPpError('');
-                        setCardStatus('');
-                        setCardError('');
-                      }}
-                    >
-                      {p.recommended && <span className="pr-badge">Most popular</span>}
-                      <strong className="pr-name">{p.name}</strong>
-                      <span className="pr-price">{p.price}</span>
-                      <ul className="pr-features" aria-label={`${p.name} features`}>
-                        {p.features.map((f) => <li key={f}>{f}</li>)}
-                      </ul>
-                      <span className="pr-sel-label">{planId === p.id ? 'Selected' : 'Select plan'}</span>
-                    </button>
-                  ))}
-                </div>
+             {step !== 'complete' ? (
+               <>
+                 {plansLoading && (
+                   <p style={{ color: 'var(--text-secondary, #8ab0c9)' }}>Loading plans...</p>
+                 )}
+                 {plansError && (
+                   <p className="pr-error" role="alert">{plansError}</p>
+                 )}
+                  {!plansLoading && !plansError && (
+                  <div className="pr-cards">
+                    {plans.map((p) => (
+                     <button
+                       key={p.id}
+                       type="button"
+                       className={`pr-card${planId === p.id ? ' pr-card-sel' : ''}${p.recommended ? ' pr-card-rec' : ''}`}
+                       onClick={() => {
+                         setPlanId(p.id);
+                         setStep('contacts');
+                         setPpStatus('');
+                         setPpError('');
+                         setCardStatus('');
+                         setCardError('');
+                       }}
+                     >
+                       {p.recommended && <span className="pr-badge">Most popular</span>}
+                       <strong className="pr-name">{p.name}</strong>
+                       <span className="pr-price">{p.price}</span>
+                       <ul className="pr-features" aria-label={`${p.name} features`}>
+                         {p.features.map((f) => <li key={f}>{f}</li>)}
+                       </ul>
+                       <span className="pr-sel-label">{planId === p.id ? 'Selected' : 'Select plan'}</span>
+                     </button>
+                   ))}
+                 </div>
+                 )}
 
-                {step !== 'plans' && (
-                  <div className="pr-checkout">
-                    <h3>Emergency contacts &#x2014; <strong>{plan.name}</strong></h3>
+                 {step !== 'plans' && plan && (
+                   <div className="pr-checkout">
+                     <h3>Emergency contacts &#x2014; <strong>{plan.name}</strong></h3>
                     <p className="pr-checkout-note">Required for emergency dispatch integration. Stored securely with your subscription order.</p>
                     <div className="pr-contact-grid">
                       <label className="pr-cfield">
