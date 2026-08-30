@@ -23,7 +23,6 @@
 const { S3Client, DeleteObjectCommand } = require('@aws-sdk/client-s3');
 const db = require('../db/index');
 const storage = require('../lib/_storage');
-const { keyFromPublicUrl } = storage;
 const { makeLogger } = require('../lib/_logger');
 const Sentry = require('@sentry/node');
 const { initSentry } = require('../lib/_sentry');
@@ -79,12 +78,16 @@ async function run() {
 
   for (const row of expired.rows) {
     try {
-      const key = row.storage_url ? keyFromPublicUrl(row.storage_url) : null;
-      if (key) {
-        await deleteFromStorage(key);
-      } else {
-        logger.warn('Could not derive storage key from URL', { recording_id: row.id, storage_url: row.storage_url });
+      const key = row.storage_url ? storage.keyFromPublicUrl(row.storage_url) : null;
+      if (!key) {
+        logger.warn('Skipping retention for recording with unrecognized storage URL', {
+          recording_id: row.id,
+          storage_url: row.storage_url,
+        });
+        continue;
       }
+
+      await deleteFromStorage(key);
       await db.queryAsPlatformAdmin('DELETE FROM recordings WHERE id = $1', [row.id]);
       deleted += 1;
     } catch (err) {
