@@ -100,7 +100,7 @@ export function useBilling({ addAuditEntry } = {}) {
   const selectedPlanAmount = selectedPlan.paypalAmount;
   const selectedPlanSupportsPaypal = Boolean(selectedPlanAmount);
 
-  const requiredEmergencyFields = [
+  const emergencyFieldsComplete = [
     emergencyDistrict,
     emergencyContacts.policeStation,
     emergencyContacts.fireService,
@@ -134,7 +134,7 @@ export function useBilling({ addAuditEntry } = {}) {
   };
 
   const startCheckout = () => {
-    if (!requiredEmergencyFields) {
+    if (!emergencyFieldsComplete) {
       setCheckoutStatus('Fill emergency contacts before checkout.');
       return;
     }
@@ -168,7 +168,7 @@ export function useBilling({ addAuditEntry } = {}) {
     let cancelled = false;
 
     const mountButtons = async () => {
-      if (!requiredEmergencyFields) {
+      if (!emergencyFieldsComplete) {
         setCheckoutStatus('Fill emergency contacts before checkout.');
         return;
       }
@@ -265,7 +265,7 @@ export function useBilling({ addAuditEntry } = {}) {
         paypalButtonsRef.current.innerHTML = '';
       }
     };
-  }, [paymentMethod, paymentStep, requiredEmergencyFields, selectedPlan.id, selectedPlan.name, selectedPlanAmount, selectedPlanSupportsPaypal, emergencyDistrict, emergencyContacts.policeStation, emergencyContacts.fireService, emergencyContacts.ambulance, emergencyContacts.localCommand]);
+  }, [paymentMethod, paymentStep, emergencyFieldsComplete, selectedPlan.id, selectedPlan.name, selectedPlanAmount, selectedPlanSupportsPaypal, emergencyDistrict, emergencyContacts.policeStation, emergencyContacts.fireService, emergencyContacts.ambulance, emergencyContacts.localCommand]);
 
   // Mount Stripe Payment Element when checkout step is active and method is 'card'.
   useEffect(() => {
@@ -277,7 +277,7 @@ export function useBilling({ addAuditEntry } = {}) {
     let paymentElement = null;
 
     const mountCard = async () => {
-      if (!requiredEmergencyFields) {
+      if (!emergencyFieldsComplete) {
         setCheckoutStatus('Fill emergency contacts before checkout.');
         return;
       }
@@ -335,7 +335,7 @@ export function useBilling({ addAuditEntry } = {}) {
         cardElementRef.current.innerHTML = '';
       }
     };
-  }, [paymentMethod, paymentStep, requiredEmergencyFields, selectedPlan.id, selectedPlan.name, emergencyDistrict, emergencyContacts.policeStation, emergencyContacts.fireService, emergencyContacts.ambulance, emergencyContacts.localCommand]);
+  }, [paymentMethod, paymentStep, emergencyFieldsComplete, selectedPlan.id, selectedPlan.name, emergencyDistrict, emergencyContacts.policeStation, emergencyContacts.fireService, emergencyContacts.ambulance, emergencyContacts.localCommand]);
 
   const handleCardCheckout = async () => {
     if (!stripeRef.current || !stripeElementsRef.current) {
@@ -392,7 +392,7 @@ export function useBilling({ addAuditEntry } = {}) {
     // derived
     selectedPlan,
     selectedPlanSupportsPaypal,
-    requiredEmergencyFields,
+    emergencyFieldsComplete,
     // config flags (so the panel can show "missing env var" warnings)
     paypalClientId,
     stripePublishableKey,

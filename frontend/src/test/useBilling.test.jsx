@@ -33,9 +33,9 @@ describe('useBilling', () => {
     expect(result.current.paymentStep).toBe('details');
   });
 
-  it('requiredEmergencyFields is false until all contact fields are filled', () => {
+  it('emergencyFieldsComplete is false until all contact fields are filled', () => {
     const { result } = renderHook(() => useBilling());
-    expect(result.current.requiredEmergencyFields).toBe(false);
+    expect(result.current.emergencyFieldsComplete).toBe(false);
 
     act(() => {
       result.current.setEmergencyDistrict('Downtown');
@@ -47,7 +47,7 @@ describe('useBilling', () => {
       });
     });
 
-    expect(result.current.requiredEmergencyFields).toBe(true);
+    expect(result.current.emergencyFieldsComplete).toBe(true);
   });
 
   it('startCheckout blocks with a message when emergency contacts are incomplete', () => {
