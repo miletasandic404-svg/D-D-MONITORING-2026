@@ -1,5 +1,5 @@
 import api from '../services/api';
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 
 const PAGE_CSS = `
   .emergency-page { padding: 2rem; color: var(--text-primary, #e5eef7); }
@@ -56,9 +56,12 @@ export default function EmergencyDispatch() {
   const [success, setSuccess] = useState(false);
   const [dispatches, setDispatches] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [contacts, setContacts] = useState([]);
+  const [contactsLoading, setContactsLoading] = useState(true);
 
   useEffect(() => {
     fetchDispatches();
+    fetchContacts();
   }, []);
 
   const fetchDispatches = async () => {
@@ -72,12 +75,26 @@ export default function EmergencyDispatch() {
     }
   };
 
-  const contacts = [
-    { name: 'Police', phone: '911', icon: '👮' },
-    { name: 'Fire Department', phone: '911', icon: '🚒' },
-    { name: 'Ambulance', phone: '911', icon: '🚑' },
-    { name: 'Security Command', phone: '555-1234', icon: '🛡️' }
-  ];
+  const fetchContacts = async () => {
+    try {
+      const res = await api.get('/settings');
+      const raw = res.data?.settings?.emergency_contacts || {};
+      const iconMap = { police: '👮', fire: '🚒', ambulance: '🚑', security: '🛡️' };
+      const enabledContacts = Object.entries(raw)
+        .filter(([, v]) => v && v.enabled && v.phone)
+        .map(([key, v]) => ({
+          key,
+          name: v.name || key,
+          phone: v.phone,
+          icon: iconMap[key] || '📞',
+        }));
+      setContacts(enabledContacts);
+    } catch (err) {
+      console.error('Failed to fetch emergency contacts:', err);
+    } finally {
+      setContactsLoading(false);
+    }
+  };
 
   const handleSubmit = async (e) => {
     e.preventDefault();
@@ -119,25 +136,35 @@ export default function EmergencyDispatch() {
           <span className="emergency-alert-icon">⚠️</span>
           <div className="emergency-alert-text">
             <h2>In Case of Emergency</h2>
-            <p>Use this panel to quickly dispatch emergency services. For immediate threats, call 911 directly.</p>
+            <p>Use this panel to quickly dispatch emergency services. For immediate threats, call your configured emergency contacts directly.</p>
           </div>
         </div>
 
         <div className="contacts-grid">
-          {contacts.map((contact, i) => (
-            <div key={i} className="contact-card">
-              <h2>{contact.icon} {contact.name}</h2>
-              <div className="contact-row">
-                <div>
-                  <div className="contact-name">{contact.name}</div>
-                  <div className="contact-phone">{contact.phone}</div>
-                </div>
-                <button className="contact-btn" onClick={() => callContact(contact.phone)}>
-                  📞 Call
-                </button>
-              </div>
+          {contactsLoading ? (
+            <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary, #8ab0c9)' }}>
+              Loading emergency contacts...
             </div>
-          ))}
+          ) : contacts.length === 0 ? (
+            <div style={{ padding: '2rem', textAlign: 'center', color: 'var(--text-secondary, #8ab0c9)' }}>
+              Emergency contacts are not configured. Please configure them in Settings.
+            </div>
+          ) : (
+            contacts.map((contact) => (
+              <div key={contact.key} className="contact-card">
+                <h2>{contact.icon} {contact.name}</h2>
+                <div className="contact-row">
+                  <div>
+                    <div className="contact-name">{contact.name}</div>
+                    <div className="contact-phone">{contact.phone}</div>
+                  </div>
+                  <button className="contact-btn" onClick={() => callContact(contact.phone)}>
+                    📞 Call
+                  </button>
+                </div>
+              </div>
+            ))
+          )}
         </div>
 
         <div className="dispatch-form">

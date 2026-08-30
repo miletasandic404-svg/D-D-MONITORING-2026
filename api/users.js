@@ -35,6 +35,7 @@ const ALLOWED_SETTINGS = [
   'weekly_summary',
   'map_overlays',
   'dark_mode',
+  'emergency_contacts',
 ];
 
 const settingsSchema = z.object({
@@ -44,6 +45,7 @@ const settingsSchema = z.object({
   weekly_summary: z.boolean().optional(),
   map_overlays: z.boolean().optional(),
   dark_mode: z.boolean().optional(),
+  emergency_contacts: z.record(z.string(), z.any()).optional(),
 }).strict();
 
 const DEFAULT_SETTINGS = {
@@ -53,6 +55,7 @@ const DEFAULT_SETTINGS = {
   weekly_summary: false,
   map_overlays: true,
   dark_mode: true,
+  emergency_contacts: {},
 };
 
 module.exports = async (req, res) => {
@@ -366,9 +369,9 @@ async function handleSettingsGet(req, res) {
   try {
     const { rows } = await db.queryAsOrg(
       auth.organizationId,
-      `SELECT email_alerts, push_notifications, auto_reports, weekly_summary, map_overlays, dark_mode, updated_at, updated_by
-       FROM organization_settings
-       WHERE organization_id = $1`,
+      `SELECT email_alerts, push_notifications, auto_reports, weekly_summary, map_overlays, dark_mode, emergency_contacts, updated_at, updated_by
+        FROM organization_settings
+        WHERE organization_id = $1`,
       [auth.organizationId],
     );
 
@@ -424,11 +427,11 @@ async function handleSettingsPut(req, res) {
 
     const result = await db.queryAsOrg(
       auth.organizationId,
-      `INSERT INTO organization_settings (organization_id, ${fields.join(', ')}, updated_at, updated_by)
-       VALUES ($1, ${fields.map((_, i) => `$${i + 3}`).join(', ')}, now(), $${fields.length + 3})
-       ON CONFLICT (organization_id)
-       DO UPDATE SET ${setClauses.join(', ')}
-       RETURNING email_alerts, push_notifications, auto_reports, weekly_summary, map_overlays, dark_mode, updated_at, updated_by`,
+       `INSERT INTO organization_settings (organization_id, ${fields.join(', ')}, updated_at, updated_by)
+        VALUES ($1, ${fields.map((_, i) => `$${i + 3}`).join(', ')}, now(), $${fields.length + 3})
+        ON CONFLICT (organization_id)
+        DO UPDATE SET ${setClauses.join(', ')}
+        RETURNING email_alerts, push_notifications, auto_reports, weekly_summary, map_overlays, dark_mode, emergency_contacts, updated_at, updated_by`,
       values,
     );
 

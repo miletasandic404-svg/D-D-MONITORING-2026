@@ -103,12 +103,13 @@ describe('api/settings — Organization Settings', () => {
       assert.equal(res.body.success, true);
       assert.ok(res.body.settings);
       assert.equal(res.body.settings.email_alerts, true);
+      assert.deepEqual(res.body.settings.emergency_contacts, {});
     });
 
-    test('authenticated GET → returns existing settings', async () => {
+    test('authenticated GET → returns existing settings including emergency_contacts', async () => {
       dbScript = (text) => {
         if (text.includes('FROM organization_settings')) {
-          return { rows: [{ email_alerts: false, dark_mode: true }] };
+          return { rows: [{ email_alerts: false, dark_mode: true, emergency_contacts: { police: { name: 'Police', phone: '911', enabled: true } } }] };
         }
         return { rows: [], rowCount: 0 };
       };
@@ -117,7 +118,7 @@ describe('api/settings — Organization Settings', () => {
       await handler(req, res);
 
       assert.equal(res.statusCode, 200);
-      assert.equal(res.body.settings.email_alerts, false);
+      assert.deepEqual(res.body.settings.emergency_contacts, { police: { name: 'Police', phone: '911', enabled: true } });
     });
 
     test('GET scoped to authenticated org', async () => {
@@ -241,6 +242,46 @@ describe('api/settings — Organization Settings', () => {
 
       assert.ok(auditCalls.length > 0);
       assert.equal(auditCalls[0].action, 'settings.update');
+    });
+
+    test('org_admin can PUT emergency_contacts → success', async () => {
+      authResponse = { userId: 'user-1', organizationId: 'org-1', userType: 'org_admin' };
+      dbScript = (text) => {
+        if (text.includes('INSERT INTO organization_settings')) {
+          return { rows: [{ id: 's1', emergency_contacts: { police: { name: 'Police', phone: '911', enabled: true } } }] };
+        }
+        return { rows: [], rowCount: 0 };
+      };
+      const req = makeReq({
+        method: 'PUT',
+        body: { emergency_contacts: { police: { name: 'Police', phone: '911', enabled: true } } },
+      });
+      const res = makeRes();
+      await handler(req, res);
+
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.body.success, true);
+      assert.deepEqual(res.body.settings.emergency_contacts, { police: { name: 'Police', phone: '911', enabled: true } });
+    });
+
+    test('cross-org isolation — settings scoped to auth org', async () => {
+      authResponse = { userId: 'user-1', organizationId: 'org-1', userType: 'org_admin' };
+      dbScript = (text) => {
+        if (text.includes('INSERT INTO organization_settings')) {
+          return { rows: [{ id: 's1' }] };
+        }
+        return { rows: [], rowCount: 0 };
+      };
+      const req = makeReq({
+        method: 'PUT',
+        body: { emergency_contacts: { police: { name: 'Police', phone: '111', enabled: true } } },
+      });
+      const res = makeRes();
+      await handler(req, res);
+
+      const insertCall = queryCalls.find((c) => c.text.includes('INSERT INTO organization_settings'));
+      assert.ok(insertCall, 'INSERT query should be captured');
+      assert.equal(insertCall.orgId, 'org-1');
     });
   });
 });

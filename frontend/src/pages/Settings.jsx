@@ -12,9 +12,19 @@ const PAGE_CSS = `
   .setting-desc { color: var(--text-secondary, #8ab0c9); font-size: .85rem; margin-top: .25rem; }
   .toggle { width: 50px; height: 26px; background: rgba(87,125,196,.3); border-radius: 13px; position: relative; cursor: pointer; transition: background .2s; }
   .toggle.active { background: linear-gradient(135deg,var(--accent-primary, #00d4ff),var(--accent-secondary, #8c4dff)); }
-  .toggle::after { content: ''; position: absolute; width: 20px; height: 20px; background: white; border-radius: 50%; top: 3px; left: 3px; transition: transform .2s; }
-  .toggle.active::after { transform: translateX(24px); }
-  .version { color: var(--text-muted, #6a8aaa); font-size: .8rem; margin-top: 2rem; text-align: center; }
+   .toggle::after { content: ''; position: absolute; width: 20px; height: 20px; background: white; border-radius: 50%; top: 3px; left: 3px; transition: transform .2s; }
+   .toggle.active::after { transform: translateX(24px); }
+   .version { color: var(--text-muted, #6a8aaa); font-size: .8rem; margin-top: 2rem; text-align: center; }
+   .emergency-contact-row { display: flex; gap: 1rem; align-items: flex-start; padding: 1rem 0; border-bottom: 1px solid rgba(87,125,196,.12); }
+   .emergency-contact-row:last-child { border-bottom: none; }
+   .emergency-contact-fields { flex: 1; display: flex; flex-direction: column; gap: .5rem; }
+   .emergency-contact-fields input { width: 100%; padding: .6rem .8rem; background: rgba(87,125,196,.1); border: 1px solid rgba(87,125,196,.3); border-radius: 8px; color: var(--text-primary, #dff7ff); font-size: .9rem; }
+   .emergency-contact-fields input:focus { outline: none; border-color: rgba(0,212,255,.6); }
+   .emergency-contact-name { color: var(--text-primary, #dff7ff); font-weight: 600; margin-bottom: .25rem; }
+   .emergency-save-btn { margin-top: 1rem; padding: .8rem 1.5rem; border: 0; border-radius: 10px; cursor: pointer; font-family: 'Orbitron', sans-serif; font-weight: 700; font-size: .8rem; text-transform: uppercase; letter-spacing: .12em; color: #03101c; background: linear-gradient(135deg,var(--accent-primary, #00d4ff),var(--accent-secondary, #8c4dff)); box-shadow: 0 0 16px rgba(0,212,255,.22); transition: transform 160ms,filter 160ms; }
+   .emergency-save-btn:hover { transform: translateY(-2px); filter: brightness(1.1); }
+   .emergency-save-btn:disabled { opacity: .5; cursor: not-allowed; transform: none; }
+   .emergency-status { margin-top: .75rem; font-size: .85rem; }
 `;
 
 export default function Settings() {
@@ -26,6 +36,14 @@ export default function Settings() {
     map_overlays: true,
     dark_mode: true,
   });
+  const [emergencyContacts, setEmergencyContacts] = useState({
+    police: { name: 'Police', phone: '', enabled: false },
+    fire: { name: 'Fire Department', phone: '', enabled: false },
+    ambulance: { name: 'Ambulance', phone: '', enabled: false },
+    security: { name: 'Security', phone: '', enabled: false },
+  });
+  const [savingContacts, setSavingContacts] = useState(false);
+  const [contactStatus, setContactStatus] = useState('');
   const [loading, setLoading] = useState(true);
   const [saving, setSaving] = useState(false);
   const [apiStatus, setApiStatus] = useState('checking');
@@ -41,11 +59,30 @@ export default function Settings() {
       const res = await api.get('/settings');
       if (res.data?.settings) {
         setSettings(prev => ({ ...prev, ...res.data.settings }));
+        if (res.data.settings.emergency_contacts) {
+          setEmergencyContacts(res.data.settings.emergency_contacts);
+        }
       }
     } catch (err) {
       console.error('Failed to fetch settings:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const saveContacts = async () => {
+    setSavingContacts(true);
+    setContactStatus('');
+    try {
+      const res = await api.put('/settings', { emergency_contacts: emergencyContacts });
+      if (res.data?.settings) {
+        setSettings(prev => ({ ...prev, ...res.data.settings }));
+        setContactStatus('Emergency contacts saved successfully.');
+      }
+    } catch (err) {
+      setContactStatus(err?.response?.data?.error || 'Failed to save emergency contacts');
+    } finally {
+      setSavingContacts(false);
     }
   };
 
@@ -153,6 +190,48 @@ export default function Settings() {
               onClick={() => updateSetting('dark_mode', !settings.dark_mode)}
             />
           </div>
+        </div>
+
+        <div className="settings-section">
+          <h2>Emergency Contacts</h2>
+          {['police', 'fire', 'ambulance', 'security'].map((key) => {
+            const contact = emergencyContacts[key] || { name: key, phone: '', enabled: false };
+            return (
+              <div className="emergency-contact-row" key={key}>
+                <div className="emergency-contact-fields">
+                  <div className="emergency-contact-name">{contact.name || key}</div>
+                  <input
+                    type="text"
+                    value={contact.phone || ''}
+                    onChange={(e) => setEmergencyContacts((prev) => ({
+                      ...prev,
+                      [key]: { ...(prev[key] || { name: key, enabled: false }), phone: e.target.value.trim() },
+                    }))}
+                    placeholder="+1 555 000 0000"
+                  />
+                </div>
+                <div
+                  className={`toggle ${contact.enabled ? 'active' : ''}`}
+                  onClick={() => setEmergencyContacts((prev) => ({
+                    ...prev,
+                    [key]: { ...(prev[key] || { name: key, phone: '' }), enabled: !prev[key]?.enabled },
+                  }))}
+                />
+              </div>
+            );
+          })}
+          <button
+            className="emergency-save-btn"
+            onClick={saveContacts}
+            disabled={savingContacts}
+          >
+            {savingContacts ? 'Saving...' : 'Save Changes'}
+          </button>
+          {contactStatus && (
+            <div className="emergency-status" style={{ color: contactStatus.includes('Failed') ? '#ff5050' : '#00d450' }}>
+              {contactStatus}
+            </div>
+          )}
         </div>
 
         <div className="settings-section">
