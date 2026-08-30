@@ -74,12 +74,12 @@ export default function Alerts() {
 
   const acknowledgeAlert = async (id) => {
     try {
-      const alert = alerts.find(a => a.id === id);
-      if (!alert || !alert.event_id) {
+      if (!id) {
+        alert('Cannot acknowledge alert: missing incident ID.');
         return;
       }
 
-      await api.patch(`/incidents/${alert.event_id}/status`, { status: 'Acknowledged' });
+      await api.patch(`/incidents/${id}/status`, { status: 'Acknowledged' });
       
       setAlerts(alerts.map(a => a.id === id ? { ...a, acknowledged: true } : a));
     } catch (err) {
@@ -89,12 +89,12 @@ export default function Alerts() {
 
   const dismissAlert = async (id) => {
     try {
-      const alert = alerts.find(a => a.id === id);
-      if (!alert || !alert.event_id) {
+      if (!id) {
+        alert('Cannot dismiss alert: missing incident ID.');
         return;
       }
 
-      await api.patch(`/incidents/${alert.event_id}/status`, { status: 'Resolved' });
+      await api.patch(`/incidents/${id}/status`, { status: 'Resolved' });
       
       setAlerts(alerts.filter(a => a.id !== id));
     } catch (err) {
