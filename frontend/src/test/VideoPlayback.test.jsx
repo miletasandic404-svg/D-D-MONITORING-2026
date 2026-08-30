@@ -39,7 +39,7 @@ describe('VideoPlayback', () => {
       expect(screen.getByText('No recordings found')).toBeInTheDocument();
     });
     const progress = document.querySelector('.timeline-progress');
-    expect(progress).toHaveStyle({ width: '0%' });
+    expect(progress).toBeNull();
   });
 
   it('shows correct progress for normal playback position', async () => {
@@ -89,6 +89,6 @@ describe('VideoPlayback', () => {
       expect(screen.getByText(/Cam 1/)).toBeInTheDocument();
     });
     fireEvent.click(screen.getByText(/Cam 1/));
-    expect(screen.getByText('Duration: 2:05')).toBeInTheDocument();
+    expect(screen.getByText('0:00 / 2:05')).toBeInTheDocument();
   });
 });
