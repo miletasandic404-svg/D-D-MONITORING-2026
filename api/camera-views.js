@@ -12,6 +12,26 @@ const logger = makeLogger('api-camera-views');
 
 initSentry();
 
+function getClientIp(req) {
+  const vercelIp = req.headers['x-vercel-forwarded-for'];
+  if (typeof vercelIp === 'string' && vercelIp.trim().length > 0) {
+    return vercelIp.trim();
+  }
+
+  const xff = req.headers['x-forwarded-for'];
+  if (typeof xff === 'string' && xff.trim().length > 0) {
+    const first = xff.split(',')[0].trim();
+    if (first.length > 0) return first;
+  }
+
+  const remote = req.connection?.remoteAddress;
+  if (typeof remote === 'string' && remote.trim().length > 0) {
+    return remote.trim();
+  }
+
+  return null;
+}
+
 
 // ─── Zod schema for camera view creation ────────────────────────
 const createViewSchema = z.object({
@@ -66,7 +86,7 @@ module.exports = async (req, res) => {
         `INSERT INTO camera_view_logs (camera_id, user_id, organization_id, ip_address)
          VALUES ($1, $2, $3, $4)
          RETURNING id`,
-        [camera_id, auth.userId, auth.organizationId, req.headers['x-forwarded-for'] || req.connection?.remoteAddress],
+        [camera_id, auth.userId, auth.organizationId, getClientIp(req)],
       );
 
       return sendSuccess(res, {
@@ -93,8 +113,8 @@ module.exports = async (req, res) => {
 
       await db.queryAsOrg(
         auth.organizationId,
-        `UPDATE camera_view_logs SET ended_at = now() WHERE id = $1 AND user_id = $2`,
-        [viewLogId, auth.userId],
+        `UPDATE camera_view_logs SET ended_at = now() WHERE id = $1 AND user_id = $2 AND organization_id = $3`,
+        [viewLogId, auth.userId, auth.organizationId],
       );
 
       return sendSuccess(res);
@@ -107,3 +127,6 @@ module.exports = async (req, res) => {
 
   return sendError(res, 405, 'Method Not Allowed');
 };
+
+module.exports.handler = module.exports;
+module.exports.getClientIp = getClientIp;
