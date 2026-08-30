@@ -81,8 +81,8 @@ const JFIF_BYTES = Buffer.from(
   'base64',
 );
 
-function makeReq(body) {
-  return { method: 'POST', url: '/api/snapshots', headers: {}, body };
+function makeReq(body, query = {}) {
+  return { method: 'POST', url: '/api/snapshots', headers: {}, body, query };
 }
 function makeRes() {
   return {
@@ -184,5 +184,49 @@ describe('POST /api/snapshots', () => {
     const res = makeRes();
     await handler({ method: 'GET', url: '/api/snapshots', headers: {}, body: {} }, res);
     assert.equal(res.statusCode, 405);
+  });
+
+  // ── Debug mode tests ───────────────────────────────────────────────────
+
+  test('unauthenticated + debug=true → 401, no internal details', async () => {
+    authResponse = null;
+    storageConfigured = false;
+    const res = makeRes({ camera_id: 'cam-1', image_base64: JFIF_BYTES.toString('base64') }, { debug: 'true' });
+    await handler(makeReq({ camera_id: 'cam-1', image_base64: JFIF_BYTES.toString('base64') }, { debug: 'true' }), res);
+    assert.equal(res.statusCode, 401);
+    assert.ok(!res.body.details, 'unauthenticated debug request must not expose debug details');
+  });
+
+  test('authenticated non-platform-admin + debug=true → no internal details', async () => {
+    authResponse = { userId: 'user-1', organizationId: 'org-1', userType: 'org_admin' };
+    storageConfigured = false;
+    const res = makeRes();
+    await handler(makeReq({ camera_id: 'cam-1', image_base64: JFIF_BYTES.toString('base64') }, { debug: 'true' }), res);
+    assert.equal(res.statusCode, 503);
+    assert.ok(!res.body.details, 'non-platform-admin debug request must not expose debug details');
+  });
+
+  test('platform_admin + debug=true → debug details allowed', async () => {
+    authResponse = { userId: 'user-1', organizationId: 'org-1', userType: 'platform_admin' };
+    db.queryAsOrg = async (orgId, text, params) => {
+      queryCalls.push({ orgId, text, params });
+      if (/INSERT INTO snapshots/.test(text)) {
+        const err = new Error('Storage service unreachable');
+        err.code = 'ECONNREFUSED';
+        throw err;
+      }
+      if (/SELECT id FROM cameras WHERE id = \$1 AND organization_id = \$2/.test(text)) {
+        return { rows: [{ id: params[0] }] };
+      }
+      return { rows: [] };
+    };
+    const res = makeRes();
+    await handler(makeReq({ camera_id: 'cam-1', image_base64: JFIF_BYTES.toString('base64') }, { debug: 'true' }), res);
+    assert.equal(res.statusCode, 500);
+    assert.ok(res.body.details, 'platform_admin debug request must expose debug details');
+    assert.ok(res.body.details[0]?.debug, 'debug object must be present in details');
+    assert.ok('error' in res.body.details[0].debug, 'debug object must contain error');
+    assert.ok('code' in res.body.details[0].debug, 'debug object must contain code');
+    assert.ok('name' in res.body.details[0].debug, 'debug object must contain name');
   });
 });
