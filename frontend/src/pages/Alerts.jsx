@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
+import BackToDashboard from '../components/BackToDashboard';
 
 const PAGE_CSS = `
   .alerts-page { padding: 2rem; color: var(--text-primary, #e5eef7); }
@@ -117,6 +118,7 @@ export default function Alerts() {
     <>
       <style>{PAGE_CSS}</style>
       <main className="alerts-page">
+        <BackToDashboard />
         <div className="alerts-header">
           <h1 className="alerts-title">🚨 Alerts & Notifications</h1>
           <div className="alert-stats">

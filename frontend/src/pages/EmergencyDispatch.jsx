@@ -1,5 +1,6 @@
 import api from '../services/api';
 import React, { useState, useEffect } from 'react';
+import BackToDashboard from '../components/BackToDashboard';
 
 const PAGE_CSS = `
   .emergency-page { padding: 2rem; color: var(--text-primary, #e5eef7); }
@@ -128,6 +129,7 @@ export default function EmergencyDispatch() {
     <>
       <style>{PAGE_CSS}</style>
       <main className="emergency-page">
+        <BackToDashboard />
         <div className="emergency-header">
           <h1 className="emergency-title">🚨 Emergency Dispatch Center</h1>
         </div>

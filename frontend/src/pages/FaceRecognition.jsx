@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
+import BackToDashboard from '../components/BackToDashboard';
 
 const PAGE_CSS = `
   .face-page { padding: 2rem; color: var(--text-primary, #e5eef7); }
@@ -170,6 +171,7 @@ export default function FaceRecognition() {
     <>
       <style>{PAGE_CSS}</style>
       <main className="face-page">
+        <BackToDashboard />
         <div className="face-header">
           <h1 className="face-title">👤 Face Recognition</h1>
           <div className="face-status">

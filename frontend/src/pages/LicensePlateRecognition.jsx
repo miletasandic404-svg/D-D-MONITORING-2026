@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
+import BackToDashboard from '../components/BackToDashboard';
 
 const PAGE_CSS = `
   .lpr-page { padding: 2rem; color: var(--text-primary, #e5eef7); }
@@ -192,6 +193,7 @@ export default function LicensePlateRecognition() {
     <>
       <style>{PAGE_CSS}</style>
       <main className="lpr-page">
+        <BackToDashboard />
         <div className="lpr-header">
           <h1 className="lpr-title">🚗 License Plate Recognition (LPR)</h1>
         </div>

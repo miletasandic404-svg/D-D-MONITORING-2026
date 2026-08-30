@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
+import BackToDashboard from '../components/BackToDashboard';
 
 const PAGE_CSS = `
   .ai-page { padding: 2rem; color: var(--text-primary, #e5eef7); }
@@ -92,6 +93,7 @@ export default function AIDetection() {
     <>
       <style>{PAGE_CSS}</style>
       <main className="ai-page">
+        <BackToDashboard />
         <div className="ai-header">
           <h1 className="ai-title">🤖 AI Detection Engine</h1>
           <div className="ai-status">

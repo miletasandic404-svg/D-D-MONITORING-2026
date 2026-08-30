@@ -2,6 +2,7 @@ import React, { useState, useEffect } from 'react';
 import api from '../services/api';
 import Hls from 'hls.js';
 import { captureSnapshot } from '../services/snapshot';
+import BackToDashboard from '../components/BackToDashboard';
 
 const hlsBaseUrl = (import.meta.env.VITE_HLS_BASE_URL || '/hls').replace(/\/$/, '');
 
@@ -154,6 +155,7 @@ export default function LiveStreams() {
     <>
       <style>{PAGE_CSS}</style>
       <main className="streams-page">
+        <BackToDashboard />
         <div className="streams-header">
           <h1 className="streams-title">📹 Live Camera Streams</h1>
           <span style={{ color: 'var(--accent-success, #00d450)', fontSize: '.9rem' }}>

@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
+import BackToDashboard from '../components/BackToDashboard';
 
 const PAGE_CSS = `
   .map-page { height: calc(100vh - 60px); display: flex; flex-direction: column; }
@@ -64,6 +65,7 @@ export default function Map() {
     <>
       <style>{PAGE_CSS}</style>
       <main className="map-page">
+        <BackToDashboard />
         <div className="map-header">
           <h1 className="map-title">📍 Live Camera Map</h1>
           <div className="map-controls">

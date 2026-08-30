@@ -1,5 +1,6 @@
 import api from '../services/api';
 import React, { useState, useEffect } from 'react';
+import BackToDashboard from '../components/BackToDashboard';
 
 const PAGE_CSS = `
   .settings-page { padding: 2rem; color: var(--text-primary, #e5eef7); max-width: 800px; }
@@ -118,6 +119,7 @@ export default function Settings() {
     <>
       <style>{PAGE_CSS}</style>
       <main className="settings-page">
+        <BackToDashboard />
         <h1 className="settings-title">Settings</h1>
 
         <div className="settings-section">

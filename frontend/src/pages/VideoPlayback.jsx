@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import api from '../services/api';
+import BackToDashboard from '../components/BackToDashboard';
 
 const PAGE_CSS = `
   .playback-page { padding: 2rem; color: var(--text-primary, #e5eef7); }
@@ -159,6 +160,7 @@ export default function VideoPlayback() {
     <>
       <style>{PAGE_CSS}</style>
       <main className="playback-page">
+        <BackToDashboard />
         <div className="playback-header">
           <h1 className="playback-title">🎬 Video Playback & Recordings</h1>
         </div>

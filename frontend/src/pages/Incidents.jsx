@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
+import BackToDashboard from '../components/BackToDashboard';
 
 const PAGE_CSS = `
   .incidents-page { padding: 2rem; color: var(--text-primary, #e5eef7); }
@@ -89,6 +90,7 @@ export default function Incidents() {
     <>
       <style>{PAGE_CSS}</style>
       <main className="incidents-page">
+        <BackToDashboard />
         <div className="incidents-header">
           <h1 className="incidents-title">📋 Incident Management</h1>
           <span style={{ color: 'var(--text-secondary, #8ab0c9)', fontSize: '.9rem' }}>

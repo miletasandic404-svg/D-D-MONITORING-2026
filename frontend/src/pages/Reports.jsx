@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
+import BackToDashboard from '../components/BackToDashboard';
 
 const PAGE_CSS = `
   .reports-page { padding: 2rem; color: var(--text-primary, #e5eef7); }
@@ -102,6 +103,7 @@ export default function Reports() {
     <>
       <style>{PAGE_CSS}</style>
       <main className="reports-page">
+        <BackToDashboard />
         <div className="reports-header">
           <h1 className="reports-title">Security Reports</h1>
           <button className="generate-btn" onClick={generateReport} disabled={!reportData}>

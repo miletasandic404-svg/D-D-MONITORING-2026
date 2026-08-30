@@ -1,5 +1,6 @@
 import React, { useState, useEffect } from 'react';
 import api from '../services/api';
+import BackToDashboard from '../components/BackToDashboard';
 
 // Converts any error value into a safe, renderable string (never an object).
 function toErrorMessage(err) {
@@ -217,6 +218,7 @@ export default function Users() {
     <>
       <style>{PAGE_CSS}</style>
       <main className="users-page">
+        <BackToDashboard />
         <div className="users-header">
           <h1 className="users-title">User Management</h1>
           <button className="add-btn" onClick={() => setShowModal(true)}>

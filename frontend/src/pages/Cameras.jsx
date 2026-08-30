@@ -3,6 +3,7 @@ import api from '../services/api';
 import { useNavigate } from 'react-router-dom';
 import Hls from 'hls.js';
 import TwoWayAudio from '../components/TwoWayAudio';
+import BackToDashboard from '../components/BackToDashboard';
 
 const hlsBaseUrl = (import.meta.env.VITE_HLS_BASE_URL || '/hls').replace(/\/$/, '');
 
@@ -474,6 +475,7 @@ export default function Cameras() {
     <>
       <style>{PAGE_CSS}</style>
       <main className="cameras-page">
+        <BackToDashboard />
         <div className="cameras-header">
           <h1 className="cameras-title">📷 Camera Management</h1>
           <div style={{ display: 'flex', gap: '1rem', alignItems: 'center' }}>
