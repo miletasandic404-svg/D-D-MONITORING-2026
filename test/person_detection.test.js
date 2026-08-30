@@ -194,6 +194,90 @@ describe('workers/person-detection-worker', () => {
   });
 });
 
+// ── Test worker state cleanup ──────────────────────────────────────
+
+describe('worker state cleanup', () => {
+  let worker;
+  let mockDb;
+
+  beforeEach(() => {
+    mockDb = {
+      queryAsPlatformAdmin: async () => ({ rows: [{ id: 'cam-active' }] }),
+    };
+
+    require.cache[require.resolve('../db/index')] = {
+      id: require.resolve('../db/index'),
+      filename: require.resolve('../db/index'),
+      loaded: true,
+      exports: mockDb,
+    };
+
+    delete require.cache[require.resolve('../workers/person-detection-worker')];
+    worker = require('../workers/person-detection-worker');
+  });
+
+  afterEach(() => {
+    const state = worker.__test;
+    state.frameQueues.clear();
+    state.lastDetectionTime.clear();
+    state.lastEventTime.clear();
+    state.alertsThisHour.clear();
+  });
+
+  test('cleanup removes state for deleted cameras', async () => {
+    const state = worker.__test;
+
+    state.frameQueues.set('cam-deleted', [{ timestamp: Date.now() }]);
+    state.lastDetectionTime.set('cam-deleted', Date.now());
+    state.lastEventTime.set('cam-deleted', Date.now());
+    state.alertsThisHour.set('cam-deleted', 5);
+
+    state.frameQueues.set('cam-active', [{ timestamp: Date.now() }]);
+    state.lastDetectionTime.set('cam-active', Date.now());
+    state.lastEventTime.set('cam-active', Date.now());
+    state.alertsThisHour.set('cam-active', 3);
+
+    await worker.cleanupStaleState();
+
+    assert.ok(!state.frameQueues.has('cam-deleted'), 'frameQueues should remove deleted camera');
+    assert.ok(!state.lastDetectionTime.has('cam-deleted'), 'lastDetectionTime should remove deleted camera');
+    assert.ok(!state.lastEventTime.has('cam-deleted'), 'lastEventTime should remove deleted camera');
+    assert.ok(!state.alertsThisHour.has('cam-deleted'), 'alertsThisHour should remove deleted camera');
+
+    assert.ok(state.frameQueues.has('cam-active'), 'frameQueues should keep active camera');
+    assert.ok(state.lastDetectionTime.has('cam-active'), 'lastDetectionTime should keep active camera');
+    assert.ok(state.lastEventTime.has('cam-active'), 'lastEventTime should keep active camera');
+    assert.ok(state.alertsThisHour.has('cam-active'), 'alertsThisHour should keep active camera');
+  });
+
+  test('cleanup resets hourly counter on hour change', async () => {
+    const state = worker.__test;
+    state.currentHour = (new Date().getHours() + 1) % 24;
+    state.alertsThisHour.set('cam-active', 10);
+
+    await worker.cleanupStaleState();
+
+    assert.equal(state.alertsThisHour.size, 0, 'alertsThisHour should be cleared on hour change');
+    assert.equal(state.currentHour, new Date().getHours(), 'currentHour should be updated');
+  });
+
+  test('cleanup handles DB errors gracefully', async () => {
+    const state = worker.__test;
+    state.frameQueues.set('cam-test', [{ timestamp: Date.now() }]);
+
+    // Simulate DB error by changing mock to throw
+    mockDb.queryAsPlatformAdmin = async () => {
+      throw new Error('DB connection failed');
+    };
+
+    // cleanupStaleState catches errors internally, should not throw
+    await worker.cleanupStaleState();
+
+    // State should be preserved since cleanup failed before modifying it
+    assert.ok(state.frameQueues.has('cam-test'), 'state should be preserved when cleanup fails');
+  });
+});
+
 // ── Test debounce/cooldown logic ─────────────────────────────────────
 
 describe('debounce/cooldown logic', () => {

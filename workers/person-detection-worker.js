@@ -53,6 +53,7 @@ const lastDetectionTime = new Map(); // cameraId -> timestamp (debounce)
 const lastEventTime = new Map(); // cameraId -> timestamp (cooldown)
 const alertsThisHour = new Map(); // cameraId -> count
 let currentHour = new Date().getHours();
+let cleanupInterval = null;
 
 // Shared EventEmitter for receiving frames from stream workers
 const frameBus = new EventEmitter();
@@ -134,6 +135,58 @@ function recordEvent(cameraId) {
   lastEventTime.set(cameraId, Date.now());
   const count = alertsThisHour.get(cameraId) || 0;
   alertsThisHour.set(cameraId, count + 1);
+}
+
+// ── State cleanup ───────────────────────────────────────────────────
+
+async function cleanupStaleState() {
+  try {
+    const now = new Date();
+    const currentHourVal = now.getHours();
+
+    if (currentHourVal !== currentHour) {
+      alertsThisHour.clear();
+      currentHour = currentHourVal;
+    }
+
+    const { rows } = await db.queryAsPlatformAdmin(
+      'SELECT id FROM cameras WHERE enabled = true',
+    );
+    const activeCameraIds = new Set(rows.map((r) => r.id));
+
+    const staleIds = new Set();
+
+    for (const cameraId of frameQueues.keys()) {
+      if (!activeCameraIds.has(cameraId)) {
+        frameQueues.delete(cameraId);
+        staleIds.add(cameraId);
+      }
+    }
+    for (const cameraId of lastDetectionTime.keys()) {
+      if (!activeCameraIds.has(cameraId)) {
+        lastDetectionTime.delete(cameraId);
+        staleIds.add(cameraId);
+      }
+    }
+    for (const cameraId of lastEventTime.keys()) {
+      if (!activeCameraIds.has(cameraId)) {
+        lastEventTime.delete(cameraId);
+        staleIds.add(cameraId);
+      }
+    }
+    for (const cameraId of alertsThisHour.keys()) {
+      if (!activeCameraIds.has(cameraId)) {
+        alertsThisHour.delete(cameraId);
+        staleIds.add(cameraId);
+      }
+    }
+
+    if (staleIds.size > 0) {
+      logger.info('Cleaned stale detection state', { staleCameraIds: [...staleIds] });
+    }
+  } catch (err) {
+    logger.error('Failed to cleanup stale state', { error: err.message });
+  }
 }
 
 // ── Database operations ─────────────────────────────────────────────
@@ -370,6 +423,17 @@ async function main() {
   });
 
   startProcessing();
+
+  const shutdown = () => {
+    if (processInterval) clearInterval(processInterval);
+    if (cleanupInterval) clearInterval(cleanupInterval);
+    if (statusInterval) clearInterval(statusInterval);
+    logger.info('Person detection worker shutting down');
+    process.exit(0);
+  };
+
+  process.on('SIGTERM', shutdown);
+  process.on('SIGINT', shutdown);
 }
 
 function startProcessing() {
@@ -377,6 +441,8 @@ function startProcessing() {
   started = true;
 
   processInterval = setInterval(processLoop, 1000);
+
+  cleanupInterval = setInterval(cleanupStaleState, 5 * 60 * 1000);
 
   statusInterval = setInterval(async () => {
     const status = detection.getStatus();
@@ -408,9 +474,18 @@ module.exports = {
   submitFrame,
   frameBus,
   startProcessing,
+  cleanupStaleState,
   getStatus: () => ({
     ...detection.getStatus(),
     camerasMonitored: frameQueues.size,
     queueSizes: Object.fromEntries([...frameQueues].map(([k, v]) => [k, v.length])),
   }),
+  __test: {
+    frameQueues,
+    lastDetectionTime,
+    lastEventTime,
+    alertsThisHour,
+    get currentHour() { return currentHour; },
+    set currentHour(val) { currentHour = val; },
+  },
 };
