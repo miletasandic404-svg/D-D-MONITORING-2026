@@ -163,6 +163,7 @@ export default function Login() {
 
   useEffect(() => {
     if (step !== 'checkout' || !contactsFilled || paymentMethod !== 'paypal') return;
+    if (!plan) return;
     let cancelled = false;
     setPpError('');
 
@@ -215,12 +216,13 @@ export default function Login() {
       cancelled = true;
       if (ppRef.current) ppRef.current.innerHTML = '';
     };
-  }, [step, paymentMethod, plan.id, plan.name, plan.amount, district,
+  }, [step, paymentMethod, plan?.id, plan?.name, plan?.amount, district,
     checkoutContacts.policeStation, checkoutContacts.fireService, checkoutContacts.ambulance,
     checkoutContacts.localCommand, contactsFilled, navigate]);
 
   useEffect(() => {
     if (step !== 'checkout' || !contactsFilled || paymentMethod !== 'card') return;
+    if (!plan) return;
     let cancelled = false;
     let paymentElement = null;
     setCardError('');
@@ -261,7 +263,7 @@ export default function Login() {
       stripeRef.current = null;
       if (cardRef.current) cardRef.current.innerHTML = '';
     };
-  }, [step, paymentMethod, plan.id, plan.name, district,
+  }, [step, paymentMethod, plan?.id, plan?.name, district,
     checkoutContacts.policeStation, checkoutContacts.fireService, checkoutContacts.ambulance,
     checkoutContacts.localCommand, contactsFilled]);
 

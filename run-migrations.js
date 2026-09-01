@@ -22,6 +22,7 @@ async function main() {
   const migrations = [
     './db/migrations/043_known_faces.sql',
     './db/migrations/044_known_plates.sql',
+    './db/migrations/045_emergency_contacts.sql',
   ];
   
   console.log('Starting migrations...');
