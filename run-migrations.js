@@ -20,6 +20,7 @@ async function runMigration(filePath) {
 
 async function main() {
   const migrations = [
+    './db/migrations/042_organization_settings.sql',
     './db/migrations/043_known_faces.sql',
     './db/migrations/044_known_plates.sql',
     './db/migrations/045_emergency_contacts.sql',
