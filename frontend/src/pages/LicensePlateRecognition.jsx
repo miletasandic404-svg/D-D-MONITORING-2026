@@ -146,10 +146,12 @@ export default function LicensePlateRecognition() {
 
   const handleDelete = async (id) => {
     if (!confirm('Delete this plate from the database?')) return;
+    const previous = knownPlates;
+    setKnownPlates(previous.filter(p => p.id !== id));
     try {
       await api.delete(`/license-plates/${id}`);
-      await fetchPlateData();
     } catch (err) {
+      setKnownPlates(previous);
       console.error('Failed to delete plate:', err);
       alert(err?.response?.data?.error || 'Failed to delete plate');
     }

@@ -24,6 +24,9 @@ async function main() {
     './db/migrations/043_known_faces.sql',
     './db/migrations/044_known_plates.sql',
     './db/migrations/045_emergency_contacts.sql',
+    './db/migrations/046_add_known_plates_columns.sql',
+    './db/migrations/047_add_known_plates_notes.sql',
+    './db/migrations/048_fix_known_plates_status.sql',
   ];
   
   console.log('Starting migrations...');
