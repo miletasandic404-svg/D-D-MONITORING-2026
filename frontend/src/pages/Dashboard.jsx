@@ -14,6 +14,7 @@ import {
 import { useBilling } from '../hooks/useBilling';
 import { captureSnapshot } from '../services/snapshot';
 import BillingPanel from '../components/dashboard/BillingPanel';
+import MapPanel from '../components/dashboard/MapPanel';
 import { fetchAuditLogs } from '../services/audit-logs';
 import {
   AUDIO_API_BASE_URL,
@@ -39,9 +40,21 @@ function buildHlsManifestUrl(cameraId, cameraHlsBaseUrl) {
 }
 
 function buildCameraGeo(camera) {
+  // Preserve null vs 0: a camera at Null Island (0, 0) is a valid
+  // coordinate, so we must NOT coerce null/undefined to 0. The
+  // incident-report and the alarm-map both check for `=== null` to
+  // decide whether to render "Coordinates not set".
+  const latRaw = camera?.lat;
+  const lngRaw = camera?.lng;
+  const lat = (latRaw === null || latRaw === undefined || !Number.isFinite(Number(latRaw)))
+    ? null
+    : Number(latRaw);
+  const lng = (lngRaw === null || lngRaw === undefined || !Number.isFinite(Number(lngRaw)))
+    ? null
+    : Number(lngRaw);
   return {
-    lat: Number(camera?.lat ?? 0),
-    lng: Number(camera?.lng ?? 0),
+    lat,
+    lng,
     label: camera?.name || camera?.id || 'Unknown location',
     note: camera?.location || 'Security perimeter point',
   };
@@ -117,6 +130,10 @@ export default function Dashboard() {
   const [cameras, setCameras] = useState(null);
   const [camerasError, setCamerasError] = useState(null);
   const [healthData, setHealthData] = useState(null);
+  // Storage Usage tile — fed by GET /health-storage (60s poll).
+  // null = never loaded (skeleton), {configured:false} = unconfigured
+  // or errored, {configured:true, used_bytes, ...} = real usage.
+  const [storageData, setStorageData] = useState(null);
   const [streamErrors, setStreamErrors] = useState({});
   // Per-camera HLS playback state machine result:
   //   { state: 'loading' | 'buffering' | 'live' | 'error',
@@ -753,6 +770,11 @@ export default function Dashboard() {
   const { selectedPlan, showBilling, setShowBilling } = billing;
 
   const [selectedAlarmId, setSelectedAlarmId] = useState(null);
+  // Camera id currently focused on the map (independent from
+  // selectedAlarmId which is an event id). Marker click on MapPanel
+  // sets this; the highlighted pin re-derives selectedAlarmEvent by
+  // looking up the most recent incident for that camera.
+  const [selectedMapCameraId, setSelectedMapCameraId] = useState(null);
   const [reportNotes, setReportNotes] = useState('');
 
   // Capture the current frame from a camera's <video> element via Canvas
@@ -776,6 +798,22 @@ export default function Dashboard() {
   const openAlarmMap = (event) => {
     setSelectedAlarmId(event.eventId);
     addAuditEntry(`Opened alarm map for Event #${event.eventId}`);
+  };
+
+  // MapPanel marker click: focus the map on a specific camera. We
+  // also pick the most recent incident for that camera so the
+  // surrounding "Active alarm" / "Exact location" / "Explanation"
+  // panel stays in sync with the pin.
+  const handleMapSelectCamera = (camera) => {
+    if (!camera) return;
+    setSelectedMapCameraId(camera.id);
+    addAuditEntry(`Selected camera on map: ${camera.name || camera.id}`);
+    const recentForCamera = (recentEvents || []).find(
+      (e) => e.cameraId === camera.id || e.camera_id === camera.id,
+    );
+    if (recentForCamera && recentForCamera.eventId != null) {
+      setSelectedAlarmId(recentForCamera.eventId);
+    }
   };
 
   const downloadReport = () => {
@@ -923,7 +961,17 @@ export default function Dashboard() {
   })), [filteredIncidents]);
 
   const selectedAlarmEvent = recentEvents.find((event) => event.eventId === selectedAlarmId) || recentEvents[0] || null;
-  const selectedAlarmCamera = cameras?.find((camera) => camera.id === selectedAlarmEvent?.camera_id) || cameras?.[0] || null;
+  // If the user clicked a pin on the map, that takes priority over
+  // the alarm-event-derived camera. This keeps the surrounding
+  // "Active alarm" / "Exact location" / "Explanation" panel in sync
+  // with whichever camera the operator is currently focused on.
+  const selectedAlarmCamera = (() => {
+    if (selectedMapCameraId && Array.isArray(cameras)) {
+      const fromMap = cameras.find((c) => c.id === selectedMapCameraId);
+      if (fromMap) return fromMap;
+    }
+    return cameras?.find((camera) => camera.id === selectedAlarmEvent?.camera_id) || cameras?.[0] || null;
+  })();
   const selectedAlarmGeo = buildCameraGeo(selectedAlarmCamera);
   const generatedReport = buildIncidentReport(selectedAlarmEvent, selectedAlarmCamera, { district: billing.emergencyDistrict, ...billing.emergencyContacts }, selectedPlan);
   const reportSummary = selectedAlarmEvent
@@ -1010,31 +1058,68 @@ export default function Dashboard() {
    //     to "Checking…" on a transient network blip. Only the very
    //     first failure (before any successful response) clears.
    //   - Cleans up the interval on unmount.
-   useEffect(() => {
-     if (!authChecked) return undefined;
-     const POLL_INTERVAL_MS = 20000;
-     const inFlight = { current: false };
-     let cancelled = false;
+    useEffect(() => {
+      if (!authChecked) return undefined;
+      const POLL_INTERVAL_MS = 20000;
+      const inFlight = { current: false };
+      let cancelled = false;
 
-     const poll = async () => {
-       if (cancelled || inFlight.current) return;
-       inFlight.current = true;
-       try {
-         const res = await api.get('/health/dashboard');
-         if (cancelled) return;
-         setHealthData(res.data);
-       } catch {
-         if (cancelled) return;
-         setHealthData((prev) => (prev === null ? null : prev));
-       } finally {
-         inFlight.current = false;
-       }
-     };
+      const poll = async () => {
+        if (cancelled || inFlight.current) return;
+        inFlight.current = true;
+        try {
+          const res = await api.get('/health/dashboard');
+          if (cancelled) return;
+          setHealthData(res.data);
+        } catch {
+          if (cancelled) return;
+          setHealthData((prev) => (prev === null ? null : prev));
+        } finally {
+          inFlight.current = false;
+        }
+      };
 
-     poll();
-     const id = setInterval(poll, POLL_INTERVAL_MS);
-     return () => { cancelled = true; clearInterval(id); };
-   }, [authChecked]);
+      poll();
+      const id = setInterval(poll, POLL_INTERVAL_MS);
+      return () => { cancelled = true; clearInterval(id); };
+    }, [authChecked]);
+
+    // Storage Usage tile — polls /health/storage on its own cadence
+    // (60 s) so it does not piggyback on the more frequent health
+    // poll and does not blast the backend with a JOIN/SUM query every
+    // 20 s. Same shape as the health poll: skip if in flight, leave
+    // last good value on transient failure, do not break the
+    // Dashboard if the endpoint is missing.
+    useEffect(() => {
+      if (!authChecked) return undefined;
+      const POLL_INTERVAL_MS = 60000;
+      const inFlight = { current: false };
+      let cancelled = false;
+
+      const poll = async () => {
+        if (cancelled || inFlight.current) return;
+        inFlight.current = true;
+        try {
+          const res = await api.get('/health-storage');
+          if (cancelled) return;
+          setStorageData(res.data);
+        } catch {
+          if (cancelled) return;
+          // Mark as errored (only the first time) without wiping a
+          // previous good value, so the tile does not flicker to
+          // "Not configured" on a transient network blip.
+          setStorageData((prev) => (prev === null
+            ? { configured: false, error: 'request failed' }
+            : { ...prev, error: 'request failed' }));
+        } finally {
+          inFlight.current = false;
+        }
+      };
+
+      poll();
+      const id = setInterval(poll, POLL_INTERVAL_MS);
+      return () => { cancelled = true; clearInterval(id); };
+    }, [authChecked]);
 
    // Operator Audit Trail — backend is the source of truth.
    //   - Fetches the first page once auth is confirmed.
@@ -1400,10 +1485,22 @@ export default function Dashboard() {
     }
   };
 
+  // Human-readable byte formatter for the Storage Usage tile.
+  // Uses 1024-based units (KiB/MiB/GiB/TiB) so the displayed value
+  // matches what an operator sees in `du -h` and most cloud consoles.
+  const formatBytes = (bytes) => {
+    const n = Number(bytes);
+    if (!Number.isFinite(n) || n <= 0) return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB', 'PB'];
+    const i = Math.min(Math.floor(Math.log(n) / Math.log(1024)), units.length - 1);
+    const val = n / Math.pow(1024, i);
+    const decimals = val >= 100 || i === 0 ? 0 : val >= 10 ? 1 : 2;
+    return `${val.toFixed(decimals)} ${units[i]}`;
+  };
+
   const statusClassName = (status) => {
     if (status === 'False Alarm') return 'neutral';
-    if (status === 'Resolved') return 'good';
-    if (status === 'In Progress' || status === 'Acknowledged') return 'warning';
+    if (status === 'Resolved') return 'good';    if (status === 'In Progress' || status === 'Acknowledged') return 'warning';
     return 'warning';
   };
 
@@ -1963,8 +2060,24 @@ export default function Dashboard() {
           </article>
           <article className="metric-card">
             <p className="metric-label">Storage Usage</p>
-            <strong>-</strong>
-            <span>Storage monitoring not configured</span>
+            {(() => {
+              if (storageData === null) {
+                return <div className="skeleton skeleton-number" />;
+              }
+              if (!storageData.configured) {
+                return <strong>—</strong>;
+              }
+              return <strong>{formatBytes(storageData.used_bytes || 0)}</strong>;
+            })()}
+            <span>
+              {storageData === null ? (
+                <div className="skeleton skeleton-text short" />
+              ) : !storageData.configured ? (
+                storageData.error ? 'Storage query failed' : 'Not configured'
+              ) : (
+                `${storageData.snapshot_count || 0} snapshots · ${storageData.recording_count || 0} recordings`
+              )}
+            </span>
           </article>
           <article className="metric-card">
             <p className="metric-label">API Status</p>
@@ -2030,7 +2143,11 @@ export default function Dashboard() {
                 </div>
                 <div>
                   <span className="alarm-label">Coordinates</span>
-                  <strong>{selectedAlarmGeo.lat.toFixed(4)}, {selectedAlarmGeo.lng.toFixed(4)}</strong>
+                  <strong>
+                    {selectedAlarmGeo.lat !== null && selectedAlarmGeo.lng !== null
+                      ? `${selectedAlarmGeo.lat.toFixed(4)}, ${selectedAlarmGeo.lng.toFixed(4)}`
+                      : 'Coordinates not set'}
+                  </strong>
                 </div>
                 <div>
                   <span className="alarm-label">Explanation</span>

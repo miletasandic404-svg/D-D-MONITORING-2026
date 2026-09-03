@@ -242,12 +242,15 @@ describe('api/cameras — Phase 2: no direct camera creation', () => {
 
     assert.equal(res.statusCode, 200);
     const listQuery = queryCalls.find((c) => c.text.includes('FROM cameras c'))?.text || '';
-    // c.status and c.last_seen_at are required for the
-    // Dashboard's "Offline Cameras" tile to derive an honest
-    // offline count from heartbeat data.
+    // c.status is required for the Dashboard's "Offline Cameras"
+    // tile to derive an honest offline count from heartbeat data.
+    // Regression guard: c.last_seen_at is NOT a real column on the
+    // cameras table (verified against db/migrations/*.sql — no
+    // migration defines it). Referencing it in the SELECT crashes
+    // production with "column c.last_seen_at does not exist".
     assert.match(listQuery, /\bc\.status\b/, 'cameras list SELECT must include c.status');
-    assert.match(listQuery, /\bc\.last_seen_at\b/, 'cameras list SELECT must include c.last_seen_at');
-    // Verify the response carries them through to the client.
+    assert.doesNotMatch(listQuery, /\bc\.last_seen_at\b/, 'cameras list SELECT must NOT reference c.last_seen_at (column does not exist on cameras)');
+    // Verify the response carries status through to the client.
     assert.equal(res.body.cameras[0].status, 'online');
     assert.equal(res.body.cameras[1].status, 'offline');
     assert.equal(res.body.cameras[2].status, null);

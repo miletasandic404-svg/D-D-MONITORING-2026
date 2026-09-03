@@ -437,7 +437,7 @@ module.exports = async (req, res) => {
 
       const baseSelect = `
         SELECT c.id, c.name, c.rtsp_url, c.location, c.lat, c.lng, c.enabled,
-               c.status, c.last_seen_at,
+               c.status,
                c.resolution, c.fps, c.codec, c.connection_type, c.ip, c.port,
                n.public_hls_url AS hls_base_url
         FROM cameras c
