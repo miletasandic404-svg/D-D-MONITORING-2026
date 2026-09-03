@@ -2068,3 +2068,64 @@ textarea {
   0%, 100% { box-shadow: 0 0 0 0 rgba(34, 197, 94, 0.0); }
   50%      { box-shadow: 0 0 0 4px rgba(34, 197, 94, 0.15); }
 }
+
+/* Real global map (Leaflet + OpenFreeMap). Replaces the prior
+   CSS/DIV hand-rolled map that hard-coded a 0.06°×0.03° box. */
+.map-panel-container {
+  width: 100%;
+  height: 320px;
+  min-height: 320px;
+  border-radius: 12px;
+  overflow: hidden;
+  background: rgba(255, 255, 255, 0.02);
+  border: 1px solid rgba(255, 255, 255, 0.06);
+}
+.map-panel-container .leaflet-container {
+  width: 100%;
+  height: 100%;
+  background: #0b1220;
+  font: inherit;
+}
+.map-panel-container .leaflet-popup-content-wrapper,
+.map-panel-container .leaflet-popup-tip {
+  background: var(--color-panel, #0f1626);
+  color: var(--color-text, #e5e7eb);
+}
+.map-panel-container .leaflet-control-attribution {
+  background: rgba(15, 22, 38, 0.7);
+  color: var(--color-text-muted, #8ea3b8);
+  font-size: 10px;
+}
+.map-panel-container .leaflet-control-attribution a {
+  color: var(--color-accent, #38bdf8);
+}
+/* Alarm marker: red glow + slightly larger so it stands out from
+   regular camera markers. The class is applied by MapPanel.jsx to
+   the .leaflet-marker-icon element when a camera matches the
+   alarmCameraId prop. */
+.map-panel-container .leaflet-marker-icon.map-marker-alarm {
+  filter: hue-rotate(310deg) saturate(2.4) brightness(1.1) drop-shadow(0 0 6px rgba(239, 68, 68, 0.85));
+  transform-origin: 50% 100%;
+}
+.map-panel-container .leaflet-marker-icon.map-marker-selected {
+  filter: hue-rotate(170deg) saturate(2.0) brightness(1.05) drop-shadow(0 0 6px rgba(56, 189, 248, 0.85));
+}
+/* Popup text styling */
+.map-panel-container .map-popup {
+  font-size: 12px;
+  line-height: 1.4;
+}
+.map-panel-container .map-popup .map-popup-name {
+  font-size: 13px;
+  display: inline-block;
+  margin-bottom: 2px;
+}
+.map-panel-container .map-popup .map-popup-id {
+  font-family: ui-monospace, monospace;
+  font-size: 11px;
+  opacity: 0.7;
+}
+.map-panel-container .map-popup .map-popup-location {
+  font-size: 11px;
+  opacity: 0.85;
+}

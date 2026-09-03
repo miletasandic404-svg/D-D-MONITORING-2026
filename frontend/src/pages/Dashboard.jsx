@@ -14,6 +14,7 @@ import {
 import { useBilling } from '../hooks/useBilling';
 import { captureSnapshot } from '../services/snapshot';
 import BillingPanel from '../components/dashboard/BillingPanel';
+import MapPanel from '../components/dashboard/MapPanel';
 import { fetchAuditLogs } from '../services/audit-logs';
 import {
   AUDIO_API_BASE_URL,
@@ -776,6 +777,22 @@ export default function Dashboard() {
   const openAlarmMap = (event) => {
     setSelectedAlarmId(event.eventId);
     addAuditEntry(`Opened alarm map for Event #${event.eventId}`);
+  };
+
+  // MapPanel marker click: re-use the existing camera-selection
+  // behavior (pick the most recent incident for that camera and set
+  // selectedAlarmId). This keeps the surrounding "Active alarm" /
+  // "Exact location" / "Explanation" panel in sync with whichever
+  // camera the operator clicked on the map.
+  const handleMapSelectCamera = (camera) => {
+    if (!camera || !Array.isArray(recentEvents)) return;
+    const recent = recentEvents.find(
+      (e) => e && (e.cameraId === camera.id || e.camera_id === camera.id),
+    );
+    if (recent && recent.eventId != null) {
+      setSelectedAlarmId(recent.eventId);
+    }
+    addAuditEntry(`Selected camera on map: ${camera.name || camera.id}`);
   };
 
   const downloadReport = () => {
@@ -1998,31 +2015,12 @@ export default function Dashboard() {
                 <span className="status-pill warning">Active alarm</span>
                 <span className="subtle-chip">{selectedAlarmEvent ? `Event #${selectedAlarmEvent.eventId}` : 'No active event'}</span>
               </div>
-              {selectedAlarmCamera && (selectedAlarmGeo.lat !== 0 || selectedAlarmGeo.lng !== 0) ? (
-                <div className="alarm-map">
-                  <div className="map-grid-line map-grid-x" />
-                  <div className="map-grid-line map-grid-y" />
-                  <div
-                    className="map-pin"
-                    style={{ left: `${Math.min(Math.max(((selectedAlarmGeo.lng - 15.94) / 0.06) * 100, 8), 92)}%`, top: `${Math.min(Math.max((1 - ((selectedAlarmGeo.lat - 45.80) / 0.03)) * 100, 10), 90)}%` }}
-                  />
-                  <div className="map-callout">
-                    <strong>{selectedAlarmGeo.label}</strong>
-                    <p>{selectedAlarmGeo.note}</p>
-                  </div>
-                </div>
-              ) : (
-                <div className="alarm-map alarm-map-empty">
-                  <div className="empty-state-content">
-                    <svg width="48" height="48" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="1.5" style={{ color: '#8ea3b8', marginBottom: '1rem' }}>
-                      <path d="M21 10c0 7-9 13-9 13s-9-6-9-13a9 9 0 0 1 18 0z" />
-                      <circle cx="12" cy="10" r="3" />
-                    </svg>
-                    <p style={{ color: '#8ea3b8', fontSize: '0.95rem', margin: 0 }}>No camera locations configured</p>
-                    <p style={{ color: '#6a7a8a', fontSize: '0.85rem', margin: '0.5rem 0 0' }}>Add cameras with latitude/longitude coordinates to enable map view</p>
-                  </div>
-                </div>
-              )}
+              <MapPanel
+                cameras={cameras}
+                selectedCameraId={selectedAlarmCamera?.id || null}
+                alarmCameraId={selectedAlarmCamera?.id || null}
+                onSelectCamera={handleMapSelectCamera}
+              />
               <div className="alarm-location-list">
                 <div>
                   <span className="alarm-label">Exact location</span>
