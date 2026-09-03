@@ -28,7 +28,7 @@
                                         },
                                         {
                                             "key":  "Permissions-Policy",
-                                            "value":  "camera=(), microphone=(), geolocation=()"
+                                            "value":  "camera=(), geolocation=(), microphone=(self)"
                                         },
                                         {
                                             "key":  "Content-Security-Policy",
@@ -215,6 +215,10 @@
                      {
                          "source":  "/api/operators",
                          "destination":  "/api/users?path=operators"
+                     },
+                     {
+                         "source":  "/api/audit-logs",
+                         "destination":  "/api/users?path=audit-logs"
                      },
                      {
                          "source":  "/api/camera-views/:viewId",

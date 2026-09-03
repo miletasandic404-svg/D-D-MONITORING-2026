@@ -3,9 +3,27 @@ import { useNavigate } from 'react-router-dom';
 import api from '../services/api';
 import Hls from 'hls.js';
 import { getSession, signOut, getCurrentUser } from '../services/auth-client';
+import {
+  HLS_STATE,
+  HLS_EVENT,
+  initialHlsState,
+  reduceHlsEvent,
+  humanErrorMessage,
+  fatalError,
+} from '../services/hls-state';
 import { useBilling } from '../hooks/useBilling';
 import { captureSnapshot } from '../services/snapshot';
 import BillingPanel from '../components/dashboard/BillingPanel';
+import { fetchAuditLogs } from '../services/audit-logs';
+import {
+  AUDIO_API_BASE_URL,
+  TALKDOWN_DEFAULT_DURATION_MS,
+  isTalkdownConfigured,
+  capabilityCheck,
+  startSession,
+  stopSession,
+  createMicPipeline,
+} from '../services/talkdown';
 
 const hlsBaseUrl = (import.meta.env.VITE_HLS_BASE_URL || '/hls').replace(/\/$/, '');
 
@@ -90,10 +108,21 @@ export default function Dashboard() {
   const [currentUser, setCurrentUser] = useState(null);
   const [incidents, setIncidents] = useState([]);
   const [incidentsLoaded, setIncidentsLoaded] = useState(false);
+  // Server-reported exact count of incidents created today
+  // (incidents.created_at >= CURRENT_DATE). Independent of the
+  // 100-row UI cap on the list endpoint, so the "Incidents Today"
+  // tile stays honest on high-volume days. Falls back to the array
+  // length if the server didn't send a total (older API versions).
+  const [incidentsTodayTotal, setIncidentsTodayTotal] = useState(null);
   const [cameras, setCameras] = useState(null);
   const [camerasError, setCamerasError] = useState(null);
   const [healthData, setHealthData] = useState(null);
   const [streamErrors, setStreamErrors] = useState({});
+  // Per-camera HLS playback state machine result:
+  //   { state: 'loading' | 'buffering' | 'live' | 'error',
+  //     errorMessage: string | null,
+  //     errorDetails: string | null }
+  const [streamStates, setStreamStates] = useState({});
   const [snapshotStatus, setSnapshotStatus] = useState({});
   const [updatingIncidentId, setUpdatingIncidentId] = useState(null);
   const [error, setError] = useState(null);
@@ -539,11 +568,171 @@ export default function Dashboard() {
   }, [wizardOpen]);
 
   // Phase 3 - Voice Talkdown
+  // Real talkdown flow (uses workers/two-way-audio-api.js on the
+  // media node). The Dashboard "Trigger Talkdown" button now:
+  //   1. checks the camera is DVRIP (the only protocol with a working
+  //      speaker path today);
+  //   2. requests a fresh stream token (POST /api/camera-views) —
+  //      same authorization model as HLS;
+  //   3. POSTs /api/audio/:id/start on the worker; only enters the
+  //      "Broadcasting…" state after the server returns success;
+  //   4. opens the microphone, resamples to 8 kHz mono PCM, and POSTs
+  //      40 ms frames to /api/audio/:id/send;
+  //   5. after TALKDOWN_DEFAULT_DURATION_MS, POSTs /stop, stops mic
+  //      tracks, closes AudioContext;
+  //   6. records a local pending audit entry — the server-side
+  //      talkdown.start / talkdown.stop entries become the persisted
+  //      record (Fix #2 backend).
+  // All errors are surfaced as a string; the UI shows "Failed: …".
+  // A component-unmount cleanup hook stops any active session.
   const [talkdownActive, setTalkdownActive] = useState(null);
+  const [talkdownStatus, setTalkdownStatus] = useState({}); // camId -> { phase, error }
+  const talkdownPipelineRef = useRef(null);
+  const talkdownTokenRef = useRef(null);
+  const talkdownStopTimerRef = useRef(null);
+  // Mirror of talkdownActive as a ref so the unmount cleanup
+  // closure can read the CURRENT value, not the value at effect
+  // setup time (which is always null).
+  const talkdownActiveRef = useRef(null);
+  useEffect(() => { talkdownActiveRef.current = talkdownActive; }, [talkdownActive]);
+  const AUDIO_NOT_CONFIGURED = !isTalkdownConfigured();
 
-  // Phase 4 - Audit Log
-  const [auditLog, setAuditLog] = useState([]);
-  const addAuditEntry = (action) => setAuditLog((prev) => [{ id: Date.now(), ts: new Date().toLocaleTimeString(), user: currentUser?.email || 'operator', action }, ...prev].slice(0, 50));
+  const isCameraTalkdownSupported = (cam) => {
+    if (!cam) return false;
+    if (AUDIO_NOT_CONFIGURED) return false;
+    if (cam.enabled === false) return false;
+    return cam.connection_type === 'dvrip';
+  };
+
+  const triggerTalkdown = async (camId) => {
+    const cam = cameras.find((c) => c.id === camId);
+    if (!isCameraTalkdownSupported(cam)) return;
+    if (talkdownActive === camId) return; // already in flight
+
+    const camName = cam.name || camId;
+    setTalkdownStatus((prev) => ({ ...prev, [camId]: { phase: 'starting' } }));
+    setTalkdownActive(camId);
+
+    let token = null;
+    let pipeline = null;
+    const finishWith = (phase, error) => {
+      if (talkdownStopTimerRef.current) {
+        clearTimeout(talkdownStopTimerRef.current);
+        talkdownStopTimerRef.current = null;
+      }
+      if (pipeline) {
+        try { pipeline.stop(); } catch { /* noop */ }
+        talkdownPipelineRef.current = null;
+      }
+      const t = talkdownTokenRef.current;
+      talkdownTokenRef.current = null;
+      if (t) {
+        stopSession({ id: camId }, t).catch(() => { /* best-effort */ });
+      }
+      setTalkdownStatus((prev) => ({ ...prev, [camId]: { phase, error } }));
+      setTalkdownActive((cur) => (cur === camId ? null : cur));
+    };
+
+    try {
+      // Mint a stream token (same RBAC path as HLS viewing).
+      const viewRes = await api.post('/camera-views', { camera_id: camId });
+      token = viewRes.data?.streamToken;
+      if (!token) throw new Error('No stream token returned for this camera');
+      talkdownTokenRef.current = token;
+
+      // Server-side capability check.
+      const caps = await capabilityCheck({ id: camId }, token);
+      if (!caps?.supported) {
+        throw new Error(caps?.reason || 'Two-way audio not supported for this camera');
+      }
+
+      // Start the OPTalk session on the media node. /start has a
+      // 5s server-side timeout; failures here are user-visible.
+      await startSession({ id: camId }, token);
+      // Only after the media node confirms the session is live do
+      // we surface the local audit overlay. A failed /start (504,
+      // network error, capability rejected) must NOT create a
+      // "Triggered" audit entry.
+      addAuditEntry(`Triggered voice talkdown on ${camName}`);
+      setTalkdownStatus((prev) => ({ ...prev, [camId]: { phase: 'broadcasting' } }));
+
+      // Open mic and stream 40 ms frames. The worker drops frames
+      // if a previous send is in flight (HTTP 202), so the browser
+      // does not need to buffer.
+      pipeline = createMicPipeline({
+        onError: (err) => {
+          // Don't tear down on a single bad frame; log and keep going.
+          console.warn('[talkdown] frame error', err);
+        },
+      });
+      talkdownPipelineRef.current = pipeline;
+      await pipeline.start();
+
+      // Auto-stop after the configured window.
+      talkdownStopTimerRef.current = setTimeout(() => {
+        finishWith('complete', null);
+      }, TALKDOWN_DEFAULT_DURATION_MS);
+    } catch (err) {
+      console.error('[talkdown] failed', err);
+      finishWith('error', err.message || 'Talkdown failed');
+    }
+  };
+
+  // Cleanup on unmount: stop any in-flight session so the media node
+  // and the browser mic do not leak.
+  useEffect(() => {
+    return () => {
+      const camId = talkdownActiveRef.current; // current, not stale
+      if (camId) {
+        if (talkdownStopTimerRef.current) {
+          clearTimeout(talkdownStopTimerRef.current);
+          talkdownStopTimerRef.current = null;
+        }
+        const pipeline = talkdownPipelineRef.current;
+        if (pipeline) { try { pipeline.stop(); } catch { /* noop */ } talkdownPipelineRef.current = null; }
+        const token = talkdownTokenRef.current;
+        talkdownTokenRef.current = null;
+        if (token) {
+          // Fire-and-forget; component is unmounting.
+          stopSession({ id: camId }, token).catch(() => {});
+        }
+      }
+    };
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, []);
+
+  // Operator Audit Trail — backend is the source of truth.
+  //   - auditEntries: page from GET /api/audit-logs (server records,
+  //     tenant-scoped, never optimistic).
+  //   - auditTotal:   server's `total` for pagination ("N of M").
+  //   - auditLoading / auditError: network state.
+  //   - auditOffset:  pagination cursor.
+  //   - localOverlayEntries: short-lived in-memory rows for actions
+  //     the UI took in this session that have NOT yet been confirmed
+  //     by the server. They are shown so the operator gets immediate
+  //     feedback but are clearly tagged `local: true` and never
+  //     counted in `auditTotal` — the backend is always the
+  //     source of truth and persistence is only claimed once a row
+  //     arrives from /api/audit-logs with a matching id.
+  const [auditEntries, setAuditEntries] = useState([]);
+  const [auditTotal, setAuditTotal] = useState(0);
+  const [auditLoading, setAuditLoading] = useState(false);
+  const [auditError, setAuditError] = useState(null);
+  const [auditOffset, setAuditOffset] = useState(0);
+  const AUDIT_PAGE_SIZE = 50;
+  const [localOverlayEntries, setLocalOverlayEntries] = useState([]);
+  const addAuditEntry = (action) => {
+    setLocalOverlayEntries((prev) => [
+      {
+        id: `local-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`,
+        ts: new Date().toISOString(),
+        user_email: currentUser?.email || 'operator',
+        action,
+        local: true,
+      },
+      ...prev,
+    ].slice(0, 25));
+  };
 
   // Phase 4 - White-Label Branding
   const [brandMode, setBrandMode] = useState('default'); // 'default' | 'corporate'
@@ -565,13 +754,6 @@ export default function Dashboard() {
 
   const [selectedAlarmId, setSelectedAlarmId] = useState(null);
   const [reportNotes, setReportNotes] = useState('');
-
-  const triggerTalkdown = (camId) => {
-    setTalkdownActive(camId);
-    const camName = cameras.find((c) => c.id === camId)?.name || camId;
-    addAuditEntry(`Triggered voice talkdown on ${camName}`);
-    setTimeout(() => setTalkdownActive(null), 5000);
-  };
 
   // Capture the current frame from a camera's <video> element via Canvas
   // and upload it through POST /api/snapshots (Phase 3). This only works
@@ -640,10 +822,44 @@ export default function Dashboard() {
     })();
   }, [navigate]);
 
-  const systemStatus = {
-    label: 'Operational',
-    tone: 'good',
-  };
+  // System Health + API Status come from the same /api/health/dashboard
+  // round-trip that drives Active Streams — no extra HTTP call. The
+  // server already runs the same probe as GET /api/health (DB ping +
+  // required env vars) and reports api_reachable / api_status /
+  // api_degraded on the response. The Dashboard never hard-codes a
+  // value: while healthData is null we render a skeleton; once the
+  // response arrives we derive the visible label/tone honestly.
+  const apiStatus = healthData?.api_status || null;
+  const apiReachable = healthData?.api_reachable === true;
+  const apiDegraded = healthData?.api_degraded === true;
+  const systemStatus = (() => {
+    if (apiStatus === null) return { label: 'Checking…', tone: 'neutral' };
+    if (apiReachable && !apiDegraded) return { label: 'Operational', tone: 'good' };
+    if (apiReachable && apiDegraded) return { label: 'Degraded', tone: 'warning' };
+    return { label: 'Offline', tone: 'danger' };
+  })();
+  const apiStatusTile = (() => {
+    if (apiStatus === null) return { label: 'Checking…', tone: 'neutral' };
+    if (apiReachable && !apiDegraded) return { label: 'Online', tone: 'good' };
+    if (apiReachable && apiDegraded) return { label: 'Degraded', tone: 'warning' };
+    return { label: 'Offline', tone: 'danger' };
+  })();
+
+  // Active Streams: explain "0" when a camera is Live but no media
+  // node is fresh, or no node is assigned at all. The same /health
+  // call already returns streams_diagnostics with the underlying
+  // counts; we surface the first failing condition as a one-liner.
+  const streamsDiag = healthData?.streams_diagnostics || null;
+  const activeStreamsHint = (() => {
+    if (!streamsDiag) return 'Enabled cameras on online media nodes';
+    if (healthData?.streams?.active > 0) return 'Enabled cameras on online media nodes';
+    if (streamsDiag.enabled_total === 0) return 'No enabled cameras in this organization';
+    if (streamsDiag.enabled_with_node === 0) return `${streamsDiag.enabled_total} enabled camera(s) have no media node assigned`;
+    if (streamsDiag.fresh_nodes === 0) {
+      return `${streamsDiag.enabled_with_node} enabled camera(s) on nodes with no heartbeat in the last ${streamsDiag.fresh_threshold_seconds}s`;
+    }
+    return 'Media node assigned but heartbeat stale';
+  })();
 
   // Client-side filter + false-alarm suppression applied to incidents list.
   // Memoized so the filter only re-runs when data or filter state actually
@@ -667,6 +883,16 @@ export default function Dashboard() {
 
   const activeCameras = useMemo(
     () => (cameras ? cameras.filter((camera) => camera.enabled !== false).length : 0),
+    [cameras],
+  );
+  // "Offline" follows the camera's heartbeat-reported status. Cameras
+  // are flipped to status='offline' by the camera-sync worker when no
+  // media-node heartbeat / RTSP probe has been seen in the freshness
+  // window. Cameras whose status is NULL (e.g. brand new, never probed)
+  // are NOT counted as offline here -- the user has not been told they
+  // are broken yet.
+  const offlineCameras = useMemo(
+    () => (cameras ? cameras.filter((camera) => camera.status === 'offline').length : 0),
     [cameras],
   );
 
@@ -714,6 +940,14 @@ export default function Dashboard() {
       .then((res) => {
         console.log("[STARTUP] /incidents completed in", performance.now() - incidentsTimer, "ms");
         setIncidents(res.data.incidents || []);
+        // Server returns an exact `total` for today's incidents.
+        // If it is absent (older API), fall back to the page length,
+        // which is correct only for low-volume days.
+        if (typeof res.data.total === 'number') {
+          setIncidentsTodayTotal(res.data.total);
+        } else {
+          setIncidentsTodayTotal((res.data.incidents || []).length);
+        }
         setIncidentsLoaded(true);
       })
       .catch((err) => {
@@ -757,23 +991,123 @@ export default function Dashboard() {
        });
    }, [authChecked]);
 
-   // Fetch dashboard health metrics once auth is confirmed
+   // Fetch dashboard health metrics while the Dashboard is open.
+   //
+   // Replaces the previous one-shot fetch: Active Streams, System
+   // Health, API Status, and the streams_diagnostics hint tile all
+   // come from the same /api/health/dashboard response, so a single
+   // poll refreshes them all. The SQL definition of streams.active
+   // is unchanged — this is purely a client-side liveness fix.
+   //
+   //   - Starts only after authChecked (preserves tenant/RBAC: no
+   //     request is made before we have a session).
+   //   - Polls every POLL_INTERVAL_MS (20s) while the component is
+   //     mounted.
+   //   - Skips a tick if a previous request is still in flight, so a
+   //     slow API cannot pile up duplicate calls.
+   //   - On request failure, leaves the previous healthData in place
+   //     (does NOT setHealthData(null)) so the tile does not flicker
+   //     to "Checking…" on a transient network blip. Only the very
+   //     first failure (before any successful response) clears.
+   //   - Cleans up the interval on unmount.
    useEffect(() => {
-     if (!authChecked) return;
-     api
-       .get('/health/dashboard')
-       .then((res) => {
+     if (!authChecked) return undefined;
+     const POLL_INTERVAL_MS = 20000;
+     const inFlight = { current: false };
+     let cancelled = false;
+
+     const poll = async () => {
+       if (cancelled || inFlight.current) return;
+       inFlight.current = true;
+       try {
+         const res = await api.get('/health/dashboard');
+         if (cancelled) return;
          setHealthData(res.data);
-       })
-       .catch(() => {
-         setHealthData(null);
-       });
+       } catch {
+         if (cancelled) return;
+         setHealthData((prev) => (prev === null ? null : prev));
+       } finally {
+         inFlight.current = false;
+       }
+     };
+
+     poll();
+     const id = setInterval(poll, POLL_INTERVAL_MS);
+     return () => { cancelled = true; clearInterval(id); };
    }, [authChecked]);
+
+   // Operator Audit Trail — backend is the source of truth.
+   //   - Fetches the first page once auth is confirmed.
+   //   - Polls every 30s to surface new persisted entries. The poll
+   //     re-reads the current page (offset stays put); use the
+   //     "Load more" button to paginate forward.
+   //   - Skips a tick if a previous request is still in flight.
+   //   - On failure: sets auditError, leaves the last good page in
+   //     place (no flicker), and clears auditLoading.
+   //   - Cleans up the interval on unmount.
+   //   - Once a server entry arrives, local-only overlays for the
+   //     same action (by stable `action` text within the last minute)
+   //     are removed — only then is the action considered "persisted".
+   useEffect(() => {
+     if (!authChecked) return undefined;
+     const POLL_INTERVAL_MS = 30000;
+     const inFlight = { current: false };
+     let cancelled = false;
+     const load = async (offset) => {
+       if (cancelled || inFlight.current) return;
+       inFlight.current = true;
+       setAuditLoading(true);
+       try {
+         const data = await fetchAuditLogs({ limit: AUDIT_PAGE_SIZE, offset });
+         if (cancelled) return;
+         setAuditEntries(data.entries || []);
+         setAuditTotal(data.total || 0);
+         setAuditError(null);
+         if (offset === 0) {
+           // Once the first server page is in, drop any local overlay
+           // rows whose action the server has already confirmed
+           // (matched by action text and recent ts window).
+           setLocalOverlayEntries((prev) => prev.filter((local) => {
+             const localTs = new Date(local.ts).getTime();
+             return !(data.entries || []).some((srv) =>
+               srv.action === local.action
+               && srv.created_at
+               && Math.abs(new Date(srv.created_at).getTime() - localTs) < 60_000);
+           }));
+         }
+       } catch (err) {
+         if (cancelled) return;
+         setAuditError(err?.response?.data?.error || err.message || 'Failed to load audit log');
+       } finally {
+         if (!cancelled) inFlight.current = false;
+         if (!cancelled) setAuditLoading(false);
+       }
+     };
+     load(auditOffset);
+     const id = setInterval(() => load(auditOffset), POLL_INTERVAL_MS);
+     return () => { cancelled = true; clearInterval(id); };
+   }, [authChecked, auditOffset]);
+
+   // Combined display list — server entries first (newest to oldest),
+   // then local overlay entries that have not yet been confirmed.
+   const combinedAuditEntries = useMemo(() => {
+     if (auditOffset !== 0) return auditEntries; // overlay only on page 0
+     return [...auditEntries, ...localOverlayEntries];
+   }, [auditEntries, localOverlayEntries, auditOffset]);
+
+   const loadMoreAudit = () => setAuditOffset((o) => o + AUDIT_PAGE_SIZE);
+   const resetAudit = () => setAuditOffset(0);
 
    // Initialize HLS for each camera video element. As of Phase 2, each
   // camera stream requires a short-lived token (see api/camera-views and
   // media-server's authHTTPAddress hook) -- the raw manifest URL alone is
   // no longer sufficient, and every view is logged server-side.
+  //
+  // Per-camera playback state is derived from hls.js events and the
+  // <video> element events through services/hls-state.js, so the UI
+  // shows honest Loading / Buffering / Live / Error badges. "Live" is
+  // only ever reached after an actual `playing` event AND at least
+  // one FRAG_LOADED / LEVEL_LOADED.
   useEffect(() => {
     if (!authChecked || !cameras) return undefined;
 
@@ -781,6 +1115,12 @@ export default function Dashboard() {
     const hlsInstances = [];
     const openViewLogIds = [];
     setStreamErrors({});
+    setStreamStates(
+      cameras.reduce((acc, cam) => {
+        acc[cam.id] = { state: HLS_STATE.LOADING, errorMessage: null, errorDetails: null };
+        return acc;
+      }, {}),
+    );
 
     const closeViewLog = (viewLogId) => {
       if (!viewLogId) return;
@@ -791,6 +1131,80 @@ export default function Dashboard() {
       });
     };
 
+    // Dispatch a state-machine event for a camera. Mirrors the shape
+    // the reducer expects: { state, errorMessage, errorDetails, ... }.
+    const dispatchHls = (camId, type, data) => {
+      if (cancelled) return;
+      setStreamStates((prev) => {
+        const cur = prev[camId] || initialHlsState();
+        const next = reduceHlsEvent(
+          {
+            state: cur.state,
+            errorMessage: cur.errorMessage,
+            errorDetails: cur.errorDetails,
+            fragmentsLoaded: cur.fragmentsLoaded || 0,
+            levelsLoaded: cur.levelsLoaded || 0,
+            manifestParsed: cur.manifestParsed || false,
+            mediaAttached: cur.mediaAttached || false,
+          },
+          type,
+          data,
+        );
+        if (
+          next.state === cur.state
+          && next.errorMessage === cur.errorMessage
+          && next.errorDetails === cur.errorDetails
+        ) {
+          return prev; // no change -> no re-render
+        }
+        return { ...prev, [camId]: next };
+      });
+      // Keep the legacy streamErrors map in sync for the existing
+      // banner UI. New state reads go through streamStates.
+      if (type === HLS_EVENT.ERROR || type === HLS_EVENT.ERROR_VIDEO) {
+        setStreamErrors((prev) => ({
+          ...prev,
+          [camId]: data && data.fatal
+            ? humanErrorMessage(data)
+            : (data && data.message) || 'Stream unavailable.',
+        }));
+      }
+    };
+
+    // Per-video listener bookkeeping. The cleanup function returns
+    // a function that removes all DOM listeners we attached.
+    const attachVideoListeners = (video, camId) => {
+      const onPlaying = () => dispatchHls(camId, HLS_EVENT.PLAYING);
+      const onWaiting = () => dispatchHls(camId, HLS_EVENT.WAITING);
+      const onStalled = () => dispatchHls(camId, HLS_EVENT.STALLED);
+      const onError = () => {
+        const err = video.error;
+        if (err) {
+          dispatchHls(camId, HLS_EVENT.ERROR_VIDEO, { code: err.code, message: err.message });
+        }
+      };
+      const onAutoplayRejected = () => dispatchHls(camId, HLS_EVENT.AUTOPLAY_REJECTED);
+      video.addEventListener('playing', onPlaying);
+      video.addEventListener('waiting', onWaiting);
+      video.addEventListener('stalled', onStalled);
+      video.addEventListener('error', onError);
+      // Autoplay rejection surfaces as a play() promise rejection.
+      const playPromise = video.play && video.play();
+      if (playPromise && typeof playPromise.catch === 'function') {
+        playPromise.catch((err) => {
+          if (err && (err.name === 'NotAllowedError' || err.name === 'AbortError')) {
+            onAutoplayRejected();
+          }
+        });
+      }
+      return () => {
+        video.removeEventListener('playing', onPlaying);
+        video.removeEventListener('waiting', onWaiting);
+        video.removeEventListener('stalled', onStalled);
+        video.removeEventListener('error', onError);
+      };
+    };
+
     async function initCamera(cam) {
       const video = document.getElementById(`video-${cam.id}`);
       if (!video) return;
@@ -799,38 +1213,38 @@ export default function Dashboard() {
       let viewLogId;
       try {
         const res = await api.post('/camera-views', { camera_id: cam.id });
-        
+
         // Validate response
         if (!res.data?.success) {
           console.error('Camera views API failed:', res.data?.error);
-          setStreamErrors((prev) => ({
-            ...prev,
-            [cam.id]: res.data?.error || 'Failed to start viewing session.',
-          }));
+          dispatchHls(cam.id, HLS_EVENT.ERROR_VIDEO, {
+            code: 0,
+            message: res.data?.error || 'Failed to start viewing session.',
+          });
           return;
         }
-        
+
         streamToken = res.data?.streamToken;
         viewLogId = res.data?.viewLogId;
-        
+
         // Validate token exists
         if (!streamToken) {
           console.error('No stream token returned for camera:', cam.id, 'Response:', res.data);
-          setStreamErrors((prev) => ({
-            ...prev,
-            [cam.id]: 'Stream token not received from server.',
-          }));
+          dispatchHls(cam.id, HLS_EVENT.ERROR_VIDEO, {
+            code: 0,
+            message: 'Stream token not received from server.',
+          });
           return;
         }
       } catch (err) {
         console.error('Camera views API error:', err.message, err.response?.data);
         if (cancelled) return;
-        setStreamErrors((prev) => ({
-          ...prev,
-          [cam.id]: err.response?.status === 404
+        dispatchHls(cam.id, HLS_EVENT.ERROR_VIDEO, {
+          code: err.response?.status || 0,
+          message: err.response?.status === 404
             ? 'You do not have access to this camera.'
             : 'Could not start a viewing session for this camera.',
-        }));
+        });
         return;
       }
       if (cancelled) {
@@ -842,33 +1256,66 @@ export default function Dashboard() {
       const manifestUrl = `${buildHlsManifestUrl(cam.id, cam.hls_base_url)}?token=${encodeURIComponent(streamToken)}`;
       console.log('HLS URL for camera', cam.id, ':', manifestUrl);
 
+      let detachVideoListeners = () => {};
       if (Hls.isSupported()) {
-        const hls = new Hls();
-        hls.on(Hls.Events.ERROR, (_event, data) => {
-          if (!data.fatal) return;
-          setStreamErrors((prev) => ({
-            ...prev,
-            [cam.id]: 'Stream unavailable. Check that the media server is running and reachable.',
-          }));
-        });
+        const hls = new Hls({ enableWorker: true });
+        const onMediaAttached = () => dispatchHls(cam.id, HLS_EVENT.MEDIA_ATTACHED);
+        const onManifestParsed = () => dispatchHls(cam.id, HLS_EVENT.MANIFEST_PARSED);
+        const onLevelLoaded = () => dispatchHls(cam.id, HLS_EVENT.LEVEL_LOADED);
+        const onFragLoaded = () => dispatchHls(cam.id, HLS_EVENT.FRAG_LOADED);
+        const onError = (_e, data) => {
+          if (!data || !data.fatal) return;
+          dispatchHls(cam.id, HLS_EVENT.ERROR, data);
+          // Let hls.js attempt to recover from mediaError / networkError
+          // (mirrors hls.js's default behavior). On recovery it will
+          // fire startLoad(), which we map back to BUFFERING.
+          if (data.type === 'mediaError') {
+            hls.recoverMediaError();
+          } else if (data.type === 'networkError') {
+            hls.startLoad();
+            dispatchHls(cam.id, HLS_EVENT.RECOVERY);
+          }
+        };
+        hls.on(Hls.Events.MEDIA_ATTACHED, onMediaAttached);
+        hls.on(Hls.Events.MANIFEST_PARSED, onManifestParsed);
+        hls.on(Hls.Events.LEVEL_LOADED, onLevelLoaded);
+        hls.on(Hls.Events.FRAG_LOADED, onFragLoaded);
+        hls.on(Hls.Events.ERROR, onError);
+        hlsInstances.push(hls);
+
+        detachVideoListeners = attachVideoListeners(video, cam.id);
+
         hls.loadSource(manifestUrl);
         hls.attachMedia(video);
-        hlsInstances.push(hls);
       } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
-        // Native HLS support (e.g. Safari)
+        // Native HLS support (e.g. Safari) — we cannot observe hls.js
+        // events here, so we infer state from the <video> element only.
+        detachVideoListeners = attachVideoListeners(video, cam.id);
+        // Synthesize a "manifest parsed" event when the video can
+        // actually start loading (loadedmetadata fires once the
+        // manifest is downloaded).
+        const onLoadedMetadata = () => dispatchHls(cam.id, HLS_EVENT.MANIFEST_PARSED);
+        const onLevelLoadedProxy = () => dispatchHls(cam.id, HLS_EVENT.LEVEL_LOADED);
+        video.addEventListener('loadedmetadata', onLoadedMetadata);
+        video.addEventListener('loadeddata', onLevelLoadedProxy);
+        // Chain our detach function so it also removes the synthetic
+        // listeners.
+        const prevDetach = detachVideoListeners;
+        detachVideoListeners = () => {
+          video.removeEventListener('loadedmetadata', onLoadedMetadata);
+          video.removeEventListener('loadeddata', onLevelLoadedProxy);
+          prevDetach();
+        };
         video.src = manifestUrl;
-        video.addEventListener('error', () => {
-          setStreamErrors((prev) => ({
-            ...prev,
-            [cam.id]: 'Stream unavailable. Check that the media server is running and reachable.',
-          }));
-        });
       } else {
-        setStreamErrors((prev) => ({
-          ...prev,
-          [cam.id]: 'This browser does not support HLS playback.',
-        }));
+        dispatchHls(cam.id, HLS_EVENT.ERROR_VIDEO, {
+          code: 0,
+          message: 'This browser does not support HLS playback.',
+        });
       }
+      // Stash the detach function on the camera record so the effect
+      // cleanup runs it.
+      video._talkdownDetach = (cam._detach = detachVideoListeners);
     }
 
     cameras.forEach((cam) => {
@@ -878,7 +1325,14 @@ export default function Dashboard() {
 
     return () => {
       cancelled = true;
-      hlsInstances.forEach((hls) => hls.destroy());
+      hlsInstances.forEach((hls) => {
+        try { hls.destroy(); } catch { /* noop */ }
+      });
+      cameras.forEach((cam) => {
+        if (typeof cam._detach === 'function') {
+          try { cam._detach(); } catch { /* noop */ }
+        }
+      });
       openViewLogIds.forEach(closeViewLog);
     };
   }, [cameras, authChecked]);
@@ -1455,18 +1909,24 @@ export default function Dashboard() {
             {cameras === null ? (
               <div className="skeleton skeleton-number" />
             ) : (
-              <strong>{cameras.length ? cameras.length - activeCameras : '-'}</strong>
+              <strong>{cameras.length ? offlineCameras : '-'}</strong>
             )}
-            <span>{cameras === null ? <div className="skeleton skeleton-text short" /> : cameras.length ? 'Disabled streams' : 'No cameras configured'}</span>
+            <span>{cameras === null ? <div className="skeleton skeleton-text short" /> : cameras.length ? 'Unreachable (heartbeat)' : 'No cameras configured'}</span>
           </article>
           <article className="metric-card">
             <p className="metric-label">Active Streams</p>
             {healthData === null ? (
               <div className="skeleton skeleton-number" />
             ) : (
-              <strong>{healthData.streams?.active ?? '-'}</strong>
+              <strong
+                title={
+                  streamsDiag
+                    ? `enabled=${streamsDiag.enabled_total}, with_node=${streamsDiag.enabled_with_node}, fresh_nodes=${streamsDiag.fresh_nodes}`
+                    : undefined
+                }
+              >{healthData.streams?.active ?? '-'}</strong>
             )}
-            <span>{healthData === null ? <div className="skeleton skeleton-text short" /> : 'Enabled cameras on online media nodes'}</span>
+            <span>{healthData === null ? <div className="skeleton skeleton-text short" /> : activeStreamsHint}</span>
           </article>
           <article className="metric-card">
             <p className="metric-label">Open Alerts</p>
@@ -1475,21 +1935,31 @@ export default function Dashboard() {
             ) : (
               <strong>{recentAlerts}</strong>
             )}
-            <span>{!incidentsLoaded ? <div className="skeleton skeleton-text short" /> : 'New & acknowledged'}</span>
+            <span>{!incidentsLoaded ? <div className="skeleton skeleton-text short" /> : 'New, acknowledged & in progress'}</span>
           </article>
           <article className="metric-card">
             <p className="metric-label">Incidents Today</p>
             {!incidentsLoaded ? (
               <div className="skeleton skeleton-number" />
             ) : (
-              <strong>{incidents.length}</strong>
+              <strong>{incidentsTodayTotal ?? incidents.length}</strong>
             )}
-            <span>{!incidentsLoaded ? <div className="skeleton skeleton-text short" /> : 'Total detections'}</span>
+            <span>{!incidentsLoaded ? <div className="skeleton skeleton-text short" /> : 'Total incidents'}</span>
           </article>
           <article className="metric-card">
             <p className="metric-label">System Health</p>
-            <strong className="metric-accent">{systemStatus.label}</strong>
-            <span>Core services operational</span>
+            {healthData === null ? (
+              <div className="skeleton skeleton-number" />
+            ) : (
+              <strong className={`metric-accent status-${systemStatus.tone}`}>{systemStatus.label}</strong>
+            )}
+            <span>
+              {healthData === null
+                ? <div className="skeleton skeleton-text short" />
+                : apiReachable
+                  ? (apiDegraded ? 'DB ping failed — partial' : 'Core services operational')
+                  : (healthData?.api_reason || 'API unreachable')}
+            </span>
           </article>
           <article className="metric-card">
             <p className="metric-label">Storage Usage</p>
@@ -1498,8 +1968,18 @@ export default function Dashboard() {
           </article>
           <article className="metric-card">
             <p className="metric-label">API Status</p>
-            <strong className="metric-accent">Online</strong>
-            <span>Backend connected</span>
+            {healthData === null ? (
+              <div className="skeleton skeleton-number" />
+            ) : (
+              <strong className={`metric-accent status-${apiStatusTile.tone}`}>{apiStatusTile.label}</strong>
+            )}
+            <span>
+              {healthData === null
+                ? <div className="skeleton skeleton-text short" />
+                : apiReachable
+                  ? (apiDegraded ? 'Reachable, but DB ping failed' : 'Backend connected')
+                  : (healthData?.api_reason || 'Unreachable')}
+            </span>
           </article>
         </section>
 
@@ -1568,7 +2048,7 @@ export default function Dashboard() {
                 <p className="eyebrow">Activity feed</p>
                 <h3>Recent Events</h3>
               </div>
-              <span className="subtle-chip">Last 24h</span>
+                <span className="subtle-chip">Today</span>
             </div>
 
             <div className="table-wrap">
@@ -1679,10 +2159,30 @@ export default function Dashboard() {
                         <p>{cam.location || cam.rtsp_url}</p>
                       </div>
                       <span className={`status-pill ${cam.enabled !== false ? 'good' : 'neutral'}`}>
-                        {cam.enabled !== false ? 'Live' : 'Disabled'}
+                        {cam.enabled !== false ? 'Enabled' : 'Disabled'}
                       </span>
                     </div>
                     <div className="camera-video-wrapper">
+                      {/* Honest playback-state badge. "Live" only when
+                          hls.js + the <video> element have both
+                          confirmed the stream is actually playing
+                          (see services/hls-state.js). */}
+                      <div className="camera-state-row" data-state={(streamStates[cam.id]?.state) || 'loading'}>
+                        <span className={`status-pill state-${(streamStates[cam.id]?.state) || 'loading'}`}>
+                          {(() => {
+                            const s = streamStates[cam.id]?.state || 'loading';
+                            if (s === 'live') return '● Live';
+                            if (s === 'buffering') return '◐ Buffering…';
+                            if (s === 'error') return '● Error';
+                            return '◌ Loading…';
+                          })()}
+                        </span>
+                        {streamStates[cam.id]?.errorDetails && (
+                          <span className="camera-state-detail" aria-live="polite">
+                            {streamStates[cam.id].errorDetails}
+                          </span>
+                        )}
+                      </div>
                       {streamErrors[cam.id] && (
                         <p className="checkout-status checkout-status-error" role="alert">
                           {streamErrors[cam.id]}
@@ -1702,19 +2202,51 @@ export default function Dashboard() {
                           snapshotStatus[cam.id] === 'success' ? 'Snapshot saved' :
                           snapshotStatus[cam.id] === 'error' ? 'Snapshot failed' : 'Take Snapshot'}
                       </button>
-                      <button
-                        type="button"
-                        className={`talkdown-btn${talkdownActive === cam.id ? ' talkdown-active' : ''}`}
-                        onClick={() => triggerTalkdown(cam.id)}
-                        disabled={talkdownActive === cam.id}
-                      >
-                        {talkdownActive === cam.id ? 'Warning Active...' : 'Trigger Talkdown'}
-                      </button>
-                      {talkdownActive === cam.id && (
-                        <span className="talkdown-indicator" aria-live="polite">
-                          <span className="talkdown-pulse" aria-hidden="true" /> Broadcasting warning to {cam.name}
-                        </span>
-                      )}
+                      {(() => {
+                        const supported = isCameraTalkdownSupported(cam);
+                        const status = talkdownStatus[cam.id] || {};
+                        const phase = status.phase || null;
+                        const errorMsg = status.error || null;
+                        const isActive = talkdownActive === cam.id;
+                        const label = !supported
+                          ? 'Two-way audio not supported for this camera'
+                          : phase === 'starting'
+                            ? 'Starting…'
+                            : phase === 'broadcasting'
+                              ? 'Broadcasting…'
+                              : phase === 'complete'
+                                ? 'Talkdown complete'
+                                : phase === 'error'
+                                  ? `Failed: ${errorMsg || 'talkdown error'}`
+                                  : 'Trigger Talkdown';
+                        return (
+                          <>
+                            <button
+                              type="button"
+                              className={`talkdown-btn${isActive ? ' talkdown-active' : ''}`}
+                              onClick={() => triggerTalkdown(cam.id)}
+                              disabled={!supported || isActive}
+                              title={!supported
+                                ? (AUDIO_NOT_CONFIGURED
+                                    ? 'Two-way audio API not configured (VITE_AUDIO_API_BASE_URL missing)'
+                                    : 'Talkdown is currently supported only for Xiongmai DVRIP cameras')
+                                : undefined}
+                            >
+                              {label}
+                            </button>
+                            {isActive && phase === 'broadcasting' && (
+                              <span className="talkdown-indicator" aria-live="polite">
+                                <span className="talkdown-pulse" aria-hidden="true" /> Broadcasting to {cam.name}
+                              </span>
+                            )}
+                            {phase === 'error' && errorMsg && (
+                              <span className="talkdown-indicator talkdown-error" role="alert" aria-live="assertive">
+                                {errorMsg}
+                              </span>
+                            )}
+                          </>
+                        );
+                      })()}
                     </div>
                   </article>
                 ))
@@ -1749,8 +2281,20 @@ export default function Dashboard() {
         <section className="dashboard-panel audit-panel" id="audit">
           <div className="panel-heading">
             <div><p className="eyebrow">Compliance &amp; traceability</p><h3>Operator Audit Trail</h3></div>
-            <span className="subtle-chip">{auditLog.length} entries</span>
+            <span className="subtle-chip">
+              {auditLoading && auditEntries.length === 0
+                ? 'Loading…'
+                : `${auditTotal} persisted`}
+              {auditOffset === 0 && localOverlayEntries.length > 0
+                ? ` · ${localOverlayEntries.length} pending`
+                : ''}
+            </span>
           </div>
+          {auditError && !auditLoading && auditEntries.length === 0 ? (
+            <p className="checkout-status checkout-status-error" role="alert">
+              Could not load audit log: {auditError}
+            </p>
+          ) : null}
           <div className="table-wrap">
             <table className="events-table audit-table">
               <thead>
@@ -1758,18 +2302,56 @@ export default function Dashboard() {
                   <th>Time</th>
                   <th>Operator</th>
                   <th>Action</th>
+                  <th>Source</th>
                 </tr>
               </thead>
               <tbody>
-                {(auditLog || []).map((entry) => (
-                  <tr key={entry.id}>
-                    <td><span className="audit-ts">{entry.ts}</span></td>
-                    <td><span className="audit-user">{entry.user}</span></td>
-                    <td>{entry.action}</td>
+                {!auditLoading && combinedAuditEntries.length === 0 ? (
+                  <tr>
+                    <td colSpan={4} className="empty-state">
+                      {auditError
+                        ? 'Audit log unavailable.'
+                        : 'No persisted audit entries yet. Server-side actions like snapshots and incident status changes will appear here.'}
+                    </td>
                   </tr>
-                ))}
+                ) : (
+                  combinedAuditEntries.map((entry) => {
+                    const ts = entry.ts || entry.created_at;
+                    const tsLabel = ts ? new Date(ts).toLocaleString() : '—';
+                    const user = entry.user_email || entry.user || '—';
+                    return (
+                      <tr key={entry.id} className={entry.local ? 'audit-row-local' : ''}>
+                        <td><span className="audit-ts">{tsLabel}</span></td>
+                        <td><span className="audit-user">{user}</span></td>
+                        <td>{entry.action}</td>
+                        <td>
+                          {entry.local
+                            ? <span className="subtle-chip" title="Not yet confirmed by server">local (pending)</span>
+                            : <span className="subtle-chip" title="Persisted in audit_logs">persisted</span>}
+                        </td>
+                      </tr>
+                    );
+                  })
+                )}
               </tbody>
             </table>
+          </div>
+          <div className="audit-pagination">
+            {auditOffset > 0 ? (
+              <button type="button" className="ghost-button" onClick={resetAudit} disabled={auditLoading}>
+                ← Newest
+              </button>
+            ) : null}
+            {auditEntries.length > 0 && auditOffset + auditEntries.length < auditTotal ? (
+              <button type="button" className="ghost-button" onClick={loadMoreAudit} disabled={auditLoading}>
+                {auditLoading ? 'Loading…' : 'Load older →'}
+              </button>
+            ) : null}
+            {auditTotal > 0 ? (
+              <span className="subtle-chip" style={{ marginLeft: 'auto' }}>
+                Showing {auditOffset + 1}–{auditOffset + auditEntries.length} of {auditTotal}
+              </span>
+            ) : null}
           </div>
         </section>
       </main>

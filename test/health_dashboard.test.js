@@ -24,6 +24,12 @@ let queryAsOrgCalls = [];
 let queryAsPlatformAdminCalls = [];
 
 function fakeRows(text) {
+  // Order matters: "LEFT JOIN media_nodes" must be checked BEFORE the
+  // plain "JOIN media_nodes" branch, because the latter substring also
+  // appears in the former.
+  if (text.includes('LEFT JOIN media_nodes n ON n.id = c.media_node_id')) {
+    return { rows: [{ enabled_total: 3, enabled_with_node: 2, fresh_nodes: 1 }] };
+  }
   if (text.includes('JOIN media_nodes n ON n.id = c.media_node_id')) {
     return { rows: [{ active: 2 }] };
   }
@@ -96,11 +102,12 @@ describe('GET /api/health/dashboard', () => {
     authResponse = { userId: 'user-1', organizationId: 'org-1', userType: 'org_admin' };
   });
 
-  test('org user: sva 4 query-ja idu kroz queryAsOrg sa organization filterom', async () => {
+  test('org user: sva query-ja idu kroz queryAsOrg sa organization filterom', async () => {
     const res = makeRes();
     await handler(makeReq(), res);
 
-    assert.equal(queryAsOrgCalls.length, 4);
+    // cameras, streams, streams_diagnostics, media_nodes, audit = 5 calls
+    assert.equal(queryAsOrgCalls.length, 5);
     assert.equal(queryAsPlatformAdminCalls.length, 0);
 
     for (const call of queryAsOrgCalls) {
@@ -108,12 +115,18 @@ describe('GET /api/health/dashboard', () => {
       assert.deepEqual(call.params, ['org-1']);
     }
 
-    const [cameras, streams, nodes, audit] = queryAsOrgCalls;
+    const [cameras, streams, streamsDiag, nodes, audit] = queryAsOrgCalls;
     assert.match(cameras.text, /FROM cameras WHERE organization_id = \$1/);
     assert.match(streams.text, /FROM cameras c\n\s+JOIN media_nodes n/);
     assert.match(streams.text, /c\.enabled = TRUE/);
     assert.match(streams.text, /n\.last_heartbeat_at > now\(\) - interval '90 seconds'/);
     assert.match(streams.text, /AND c\.organization_id = \$1/);
+    // Diagnostic query uses LEFT JOIN + FILTER, same tenant scope.
+    // Org filter may be either "WHERE … = $1" (first predicate) or
+    // "AND … = $1" (when other predicates come first).
+    assert.match(streamsDiag.text, /LEFT JOIN media_nodes n ON n\.id = c\.media_node_id/);
+    assert.match(streamsDiag.text, /count\(\*\) FILTER \(WHERE c\.enabled = TRUE\) AS enabled_total/);
+    assert.match(streamsDiag.text, /(WHERE|AND) c\.organization_id = \$1/);
     assert.match(nodes.text, /FROM media_nodes WHERE id IN \(SELECT media_node_id FROM cameras WHERE organization_id = \$1/);
     assert.match(audit.text, /AND organization_id = \$1/);
   });
@@ -123,18 +136,18 @@ describe('GET /api/health/dashboard', () => {
     await handler(makeReq(), res);
 
     assert.equal(queryAsPlatformAdminCalls.length, 0);
-    assert.equal(queryAsOrgCalls.length, 4);
+    assert.equal(queryAsOrgCalls.length, 5);
     assert.equal(res.statusCode, 200);
     assert.equal(res.body.streams.active, 2);
   });
 
-   test('platform_admin: sva 4 query-ja idu kroz queryAsPlatformAdmin (globalno)', async () => {
+   test('platform_admin: sva query-ja idu kroz queryAsPlatformAdmin (globalno)', async () => {
     authResponse = { userId: 'admin-1', organizationId: 'org-1', userType: 'platform_admin' };
 
     const res = makeRes();
     await handler(makeReq(), res);
 
-    assert.equal(queryAsPlatformAdminCalls.length, 4);
+    assert.equal(queryAsPlatformAdminCalls.length, 5);
     assert.equal(queryAsOrgCalls.length, 0);
 
     // Globalni SQL: nijedan query ne sme imati organization filter.
@@ -144,7 +157,7 @@ describe('GET /api/health/dashboard', () => {
     assert.equal(res.body.streams.active, 2);
   });
 
-  test('missing/null organizationId: zeroed response + 0 DB query-ja', async () => {
+  test('missing/null organizationId: zeroed response + 0 DB query-ja (no auth query)', async () => {
     authResponse = { userId: 'user-1', organizationId: null, userType: 'org_admin' };
 
     const res = makeRes();
@@ -157,6 +170,9 @@ describe('GET /api/health/dashboard', () => {
     assert.deepEqual(res.body.media_nodes, { active: 0, offline: 0, unknown: 0 });
     assert.deepEqual(res.body.streams, { active: 0, audio_ready: 0, talk_ready: 0 });
     assert.deepEqual(res.body.recent_errors, []);
+    // API probe still ran — api_reachable reflects the real env/DB state.
+    assert.equal(typeof res.body.api_reachable, 'boolean');
+    assert.equal(res.body.api_status, 'offline');
   });
 
   test('requireAuth null: 401 + 0 DB query-ja', async () => {
@@ -171,7 +187,7 @@ describe('GET /api/health/dashboard', () => {
     assert.equal(queryAsPlatformAdminCalls.length, 0);
   });
 
-  test('validan response: postojeci JSON shape ostaje isti', async () => {
+  test('validan response: postojeci JSON shape ostaje isti + new diagnostic fields', async () => {
     const res = makeRes();
     await handler(makeReq(), res);
 
@@ -186,5 +202,32 @@ describe('GET /api/health/dashboard', () => {
     assert.equal(res.body.media_nodes.active, 4);
     assert.equal(res.body.streams.active, 2);
     assert.deepEqual(res.body.recent_errors, [{ name: 'camera', error: 'boom' }]);
+    // New: diagnostic fields for Active Streams "Why is this 0?" UX.
+    assert.ok(res.body.streams_diagnostics);
+    assert.equal(res.body.streams_diagnostics.enabled_total, 3);
+    assert.equal(res.body.streams_diagnostics.enabled_with_node, 2);
+    assert.equal(res.body.streams_diagnostics.fresh_nodes, 1);
+    assert.equal(res.body.streams_diagnostics.fresh_threshold_seconds, 90);
+    // New: API probe fields for System Health / API Status tiles.
+    assert.equal(typeof res.body.api_reachable, 'boolean');
+    assert.ok(['online', 'offline', 'degraded'].includes(res.body.api_status));
+  });
+
+  test('api_reachable false when env missing (no DATABASE_URL) — even on success path', async () => {
+    // Force a cleared env so probeApiHealth's envOk check fails.
+    const prevUrl = process.env.DATABASE_URL;
+    const prevSecret = process.env.BETTER_AUTH_SECRET;
+    delete process.env.DATABASE_URL;
+    delete process.env.BETTER_AUTH_SECRET;
+
+    try {
+      const r = makeRes();
+      await handler(makeReq(), r);
+      assert.equal(r.body.api_reachable, false);
+      assert.equal(r.body.api_status, 'offline');
+    } finally {
+      if (prevUrl !== undefined) process.env.DATABASE_URL = prevUrl;
+      if (prevSecret !== undefined) process.env.BETTER_AUTH_SECRET = prevSecret;
+    }
   });
 });

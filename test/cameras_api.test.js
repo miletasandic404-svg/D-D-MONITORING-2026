@@ -222,6 +222,37 @@ describe('api/cameras — Phase 2: no direct camera creation', () => {
     assert.equal(listQuery.orgId, 'org-1');
   });
 
+  // ── Dashboard "Offline Cameras" tile: SELECT must include c.status ─
+  test('GET /api/cameras SELECT includes c.status so the Offline tile can count heartbeat-offline cameras', async () => {
+    dbScript = (text) => {
+      if (text.includes('FROM cameras c')) {
+        return {
+          rows: [
+            { id: 'CAM-01', name: 'Back Yard',  rtsp_url: null, enabled: true,  status: 'online'  },
+            { id: 'CAM-02', name: 'Side Gate',  rtsp_url: null, enabled: true,  status: 'offline' },
+            { id: 'CAM-03', name: 'Front Door', rtsp_url: null, enabled: false, status: null      },
+          ],
+        };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+    const req = makeReq({ method: 'GET' });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    const listQuery = queryCalls.find((c) => c.text.includes('FROM cameras c'))?.text || '';
+    // c.status and c.last_seen_at are required for the
+    // Dashboard's "Offline Cameras" tile to derive an honest
+    // offline count from heartbeat data.
+    assert.match(listQuery, /\bc\.status\b/, 'cameras list SELECT must include c.status');
+    assert.match(listQuery, /\bc\.last_seen_at\b/, 'cameras list SELECT must include c.last_seen_at');
+    // Verify the response carries them through to the client.
+    assert.equal(res.body.cameras[0].status, 'online');
+    assert.equal(res.body.cameras[1].status, 'offline');
+    assert.equal(res.body.cameras[2].status, null);
+  });
+
   test('POST /api/cameras?path=setup-create (mode=scan) still creates a scan task', async () => {
     dbScript = (text) => {
       if (text.startsWith('INSERT INTO camera_setup_tasks')) {

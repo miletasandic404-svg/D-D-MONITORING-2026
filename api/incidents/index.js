@@ -100,6 +100,31 @@ module.exports = async (req, res) => {
       return sendSuccess(res, { count: 0, incidents: [], statuses: ALLOWED_STATUSES });
     }
 
+    // The list query keeps LIMIT 100 as a UI safety cap. The
+    // dashboard tile "Incidents Today" needs the EXACT count for
+    // today, so we run a separate count(*) query in the same
+    // tenant scope. Both queries share the WHERE clause shape so
+    // a future filter change has to be made in one place -- but
+    // to keep that explicit, the predicates are duplicated here
+    // (mirrors the existing two-branch structure of the SELECT
+    // below). total_today is the count for "Incidents Today"
+    // regardless of the LIMIT.
+    const wherePlatform = 'e.is_dismissed = FALSE AND i.organization_id = $1 AND i.created_at >= CURRENT_DATE';
+    const whereScoped   = 'e.is_dismissed = FALSE AND i.organization_id = $1 AND i.camera_id = ANY($2::varchar[]) AND i.created_at >= CURRENT_DATE';
+    const totalTodayParams = accessibleIds === null
+      ? [auth.organizationId]
+      : [auth.organizationId, accessibleIds];
+    const totalTodayWhere = accessibleIds === null ? wherePlatform : whereScoped;
+    const totalTodayQuery = await db.queryAsOrg(
+      auth.organizationId,
+      `SELECT count(*)::int AS total
+       FROM incidents i
+       JOIN events e ON e.id = i.event_id
+       WHERE ${totalTodayWhere}`,
+      totalTodayParams,
+    );
+    const totalToday = totalTodayQuery.rows[0]?.total || 0;
+
     const { rows } = accessibleIds === null
       ? await db.queryAsOrg(auth.organizationId, `
           SELECT
@@ -110,7 +135,7 @@ module.exports = async (req, res) => {
           FROM incidents i
           JOIN events e ON e.id = i.event_id
           LEFT JOIN ai_detections a ON a.event_id = e.id
-          WHERE e.is_dismissed = FALSE AND i.organization_id = $1 AND i.created_at >= CURRENT_DATE
+          WHERE ${wherePlatform}
           ORDER BY i.created_at DESC
           LIMIT 100
         `, [auth.organizationId])
@@ -123,7 +148,7 @@ module.exports = async (req, res) => {
           FROM incidents i
           JOIN events e ON e.id = i.event_id
           LEFT JOIN ai_detections a ON a.event_id = e.id
-          WHERE e.is_dismissed = FALSE AND i.organization_id = $1 AND i.camera_id = ANY($2::varchar[]) AND i.created_at >= CURRENT_DATE
+          WHERE ${whereScoped}
           ORDER BY i.created_at DESC
           LIMIT 100
         `, [auth.organizationId, accessibleIds]);
@@ -144,7 +169,12 @@ module.exports = async (req, res) => {
       subtitle: row.confidence != null ? `Confidence ${Math.round(Number(row.confidence) * 100)}%` : row.severity,
     }));
 
-    return sendSuccess(res, { count: incidents.length, incidents, statuses: ALLOWED_STATUSES });
+    return sendSuccess(res, {
+      count: incidents.length,
+      total: totalToday,
+      incidents,
+      statuses: ALLOWED_STATUSES,
+    });
   } catch (err) {
     logger.error('GET /api/incidents error', { error: err.message });
     Sentry.captureException(err);

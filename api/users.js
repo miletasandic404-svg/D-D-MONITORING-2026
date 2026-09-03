@@ -8,6 +8,7 @@ const { rateLimit } = require('../lib/_rate_limit');
 const { makeLogger } = require('../lib/_logger');
 const Sentry = require('@sentry/node');
 const { initSentry } = require('../lib/_sentry');
+const auditLogsHandler = require('../lib/handlers/audit-logs');
 
 const logger = makeLogger('api-users');
 
@@ -155,6 +156,13 @@ module.exports = async (req, res) => {
       }
     }
     return sendError(res, 405, 'Method Not Allowed');
+  }
+
+  // ===== AUDIT LOG ROUTES =====
+  // Read-only list of audit_logs rows for the Operator Audit Trail
+  // tile. Tenant-scoped for org users; global for platform_admin.
+  if (path === 'audit-logs') {
+    return auditLogsHandler(req, res);
   }
 
   // ===== OPERATORS ROUTES =====

@@ -192,7 +192,8 @@ describe('api/incidents — Incidents Today date filter', () => {
   test('LIMIT 100 is preserved after date filter', async () => {
     cameraAccess = null;
     await handler(makeReq(), makeRes());
-    const sql = queryCalls.find((c) => c.text.includes('FROM incidents i'))?.text || '';
+    // Match the LIST query (not the uncapped count query).
+    const sql = queryCalls.find((c) => c.text.includes('FROM incidents i') && c.text.includes('LIMIT 100'))?.text || '';
     assert.match(sql, /LIMIT 100/,
       'LIMIT 100 must remain');
   });
@@ -200,7 +201,7 @@ describe('api/incidents — Incidents Today date filter', () => {
   test('ORDER BY i.created_at DESC is preserved', async () => {
     cameraAccess = null;
     await handler(makeReq(), makeRes());
-    const sql = queryCalls.find((c) => c.text.includes('FROM incidents i'))?.text || '';
+    const sql = queryCalls.find((c) => c.text.includes('FROM incidents i') && c.text.includes('LIMIT 100'))?.text || '';
     assert.match(sql, /ORDER BY i\.created_at DESC/,
       'ORDER BY must remain');
   });
@@ -228,5 +229,78 @@ describe('api/incidents — Incidents Today date filter', () => {
     const sql = queryCalls.find((c) => c.text.includes('FROM incidents i'))?.text || '';
     assert.doesNotMatch(sql, /i\.camera_id\s*=\s*ANY/,
       'platform admin (accessibleIds === null) should NOT have camera_id filter');
+  });
+
+  // ── Dashboard "Incidents Today" tile: exact total, not capped ────────
+  describe('incidents — exact total for "Incidents Today" tile', () => {
+    test('response carries a `total` field equal to the uncapped count', async () => {
+      cameraAccess = null;
+      // Simulate: 137 incidents today in the DB, the list returns
+      // the 100 newest, the count query returns 137. The Dashboard
+      // tile must show 137, not 100.
+      let countCalls = 0;
+      let listCalls = 0;
+      dbScript = (text) => {
+        if (text.includes('count(*)::int AS total')) {
+          countCalls += 1;
+          return { rows: [{ total: 137 }], rowCount: 1 };
+        }
+        if (text.includes('LIMIT 100')) {
+          listCalls += 1;
+          const rows = Array.from({ length: 100 }, (_, i) => todayIncident(i + 1));
+          return { rows, rowCount: 100 };
+        }
+        return { rows: [], rowCount: 0 };
+      };
+      const res = makeRes();
+      await handler(makeReq(), res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(countCalls, 1, 'count query should run exactly once');
+      assert.equal(listCalls, 1, 'list query should run exactly once');
+      assert.equal(res.body.count, 100, 'count stays the page size');
+      assert.equal(res.body.total, 137, 'total is the uncapped exact count');
+    });
+
+    test('total is 0 when there are no incidents today', async () => {
+      cameraAccess = null;
+      dbScript = () => ({ rows: [], rowCount: 0 });
+      const res = makeRes();
+      await handler(makeReq(), res);
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.body.total, 0);
+      assert.equal(res.body.incidents.length, 0);
+    });
+
+    test('total query uses the same WHERE as the list (org + today + not-dismissed)', async () => {
+      cameraAccess = null;
+      dbScript = () => ({ rows: [{ total: 5 }], rowCount: 1 });
+      const res = makeRes();
+      await handler(makeReq(), res);
+      const countSql = queryCalls.find((c) => c.text.includes('count(*)::int AS total'))?.text || '';
+      assert.match(countSql, /e\.is_dismissed\s*=\s*FALSE/, 'count must filter dismissed events');
+      assert.match(countSql, /i\.organization_id\s*=\s*\$1/, 'count must be org-scoped');
+      assert.match(countSql, /i\.created_at\s*>=\s*CURRENT_DATE/, 'count must restrict to today');
+      assert.doesNotMatch(countSql, /LIMIT/i, 'count must NOT carry a LIMIT');
+    });
+
+    test('total query in camera-access branch filters by camera_id', async () => {
+      cameraAccess = ['CAM-1', 'CAM-2'];
+      dbScript = () => ({ rows: [{ total: 2 }], rowCount: 1 });
+      const res = makeRes();
+      await handler(makeReq(), res);
+      const countSql = queryCalls.find((c) => c.text.includes('count(*)::int AS total'))?.text || '';
+      assert.match(countSql, /i\.camera_id\s*=\s*ANY\(\$2::varchar\[\]\)/,
+        'camera-access count must filter by camera_id');
+    });
+
+    test('total query is NOT issued when accessibleIds is []', async () => {
+      cameraAccess = [];
+      dbScript = () => ({ rows: [{ id: 'SHOULD_NOT_CALL' }], rowCount: 1 });
+      const res = makeRes();
+      await handler(makeReq(), res);
+      const countSql = queryCalls.find((c) => c.text.includes('count(*)::int AS total'));
+      assert.equal(countSql, undefined, 'count query must be skipped when no accessible cameras');
+      assert.equal(res.body.total, 0);
+    });
   });
 });
