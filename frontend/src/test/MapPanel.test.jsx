@@ -77,7 +77,7 @@ const leafletMock = vi.hoisted(() => {
 vi.mock('leaflet', () => ({ default: leafletMock.L }));
 vi.mock('leaflet/dist/leaflet.css', () => ({}));
 
-import MapPanel, { hasValidCoord, OPENFREEMAP_TILE_URL } from '../components/dashboard/MapPanel.jsx';
+import MapPanel, { hasValidCoord, CARTO_TILE_URL } from '../components/dashboard/MapPanel.jsx';
 
 beforeEach(() => {
   leafletMock.L.map.mockClear();
@@ -133,7 +133,15 @@ describe('MapPanel — rendering', () => {
     });
     expect(leafletMock.L.map).toHaveBeenCalledTimes(1);
     expect(leafletMock.L.tileLayer).toHaveBeenCalledTimes(1);
-    expect(leafletMock.L.tileLayer.mock.calls[0][0]).toBe(OPENFREEMAP_TILE_URL);
+    expect(leafletMock.L.tileLayer.mock.calls[0][0]).toBe(CARTO_TILE_URL);
+    // Tile layer options must declare the a/b/c/d subdomains so
+    // Leaflet can parallelise requests against the four CARTO CDN
+    // endpoints; this is what makes the {s}. placeholder in
+    // CARTO_TILE_URL actually resolve.
+    const tileOpts = leafletMock.L.tileLayer.mock.calls[0][1] || {};
+    expect(tileOpts.subdomains).toBe('abcd');
+    expect(typeof tileOpts.attribution).toBe('string');
+    expect(tileOpts.attribution).toMatch(/openstreetmap/i);
   });
 
   it('renders a marker for a valid camera', async () => {

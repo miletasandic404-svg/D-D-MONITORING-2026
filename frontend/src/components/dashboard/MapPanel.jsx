@@ -11,10 +11,20 @@
  *     Markers, fitBounds, click handler) is small enough that a
  *     direct L.map() instance is clearer and avoids a second
  *     dependency.
- *   - Tiles come from OpenFreeMap — the only keyless tile provider
- *     with an explicit production posture. We do NOT use
- *     tile.openstreetmap.org (OSMF policy forbids it) and we do NOT
- *     use the MapLibre demotiles (only for demos).
+ *   - Tiles come from CARTO's public basemap CDN
+ *     ({a,b,c,d}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png). This
+ *     provider serves OpenStreetMap-derived raster tiles, is keyless,
+ *     has no per-request token, has a stable production SLA, and is the
+ *     standard recommendation for production Leaflet deployments.
+ *   - We previously used OpenFreeMap's raster URL
+ *     (https://tiles.openfreemap.org/{z}/{x}/{y}.png), but that path
+ *     returns HTTP 403 — only the /styles/liberty and /styles/bright
+ *     vector-style JSON endpoints are publicly reachable, and those
+ *     require a MapLibre GL vector renderer (not Leaflet raster).
+ *     For a Leaflet-only integration, CARTO is the simpler, more
+ *     reliable choice. OSMF's tile.openstreetmap.org also returns 200
+ *     but its tile usage policy explicitly forbids production use, so
+ *     it is not an option here.
  *   - Marker icon assets: Leaflet's default icon URLs point to
  *     `images/marker-icon.png` etc. inside the leaflet package. With
  *     Vite those files are NOT auto-resolved. We therefore merge the
@@ -49,14 +59,18 @@ L.Icon.Default.mergeOptions({
   shadowUrl,
 });
 
-// OpenFreeMap "liberty" raster tile URL. Rasterized XYZ is the
-// simplest CSP-wise (just an img-src allow) and renders without
-// WebGL / vector dependencies. Keyless, production posture.
-const OPENFREEMAP_TILE_URL = 'https://tiles.openfreemap.org/{z}/{x}/{y}.png';
-const OPENFREEMAP_ATTRIBUTION =
-  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors, ' +
-  'style &copy; <a href="https://openfreemap.org">OpenFreeMap</a>, ' +
-  'ODbL';
+// CARTO "Positron" (formerly Light) raster tile URL. The four
+// subdomains a/b/c/d are used in parallel by Leaflet to speed up
+// loading. CARTO's CDN is keyless, has a published production SLA,
+// and serves OpenStreetMap-derived raster tiles. We do NOT use
+// tile.openstreetmap.org (OSMF policy forbids production use) and
+// we do NOT use the OpenFreeMap /styles/* vector styles (Leaflet
+// can't render vector tiles without MapLibre GL).
+const CARTO_TILE_URL =
+  'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png';
+const CARTO_ATTRIBUTION =
+  '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors ' +
+  '&copy; <a href="https://carto.com/attributions">CARTO</a>';
 
 // Initial center used when there are zero cameras with coordinates
 // (so the map still shows the world instead of a blank canvas). The
@@ -132,9 +146,13 @@ export default function MapPanel({
       worldCopyJump: true,
       preferCanvas: false,
     });
-    L.tileLayer(OPENFREEMAP_TILE_URL, {
+    L.tileLayer(CARTO_TILE_URL, {
       maxZoom: 19,
-      attribution: OPENFREEMAP_ATTRIBUTION,
+      // Subdomains a/b/c/d must be declared so Leaflet can rotate
+      // between them in parallel (matches the {s}. placeholder in
+      // CARTO_TILE_URL). CARTO's CDN serves from all four.
+      subdomains: 'abcd',
+      attribution: CARTO_ATTRIBUTION,
     }).addTo(map);
     const markerLayer = L.layerGroup().addTo(map);
     mapRef.current = map;
@@ -226,4 +244,4 @@ export default function MapPanel({
   );
 }
 
-export { OPENFREEMAP_TILE_URL, OPENFREEMAP_ATTRIBUTION };
+export { CARTO_TILE_URL, CARTO_ATTRIBUTION };
