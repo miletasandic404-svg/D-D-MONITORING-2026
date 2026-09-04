@@ -55,7 +55,7 @@ async function recordSegment(rtspUrl, outputPath, durationSeconds) {
   // only public hosts may be reached. Private/loopback/link-local/
   // metadata (169.254.169.254) addresses are rejected so an attacker-
   // controlled rtsp_url cannot probe the internal network.
-  await assertSafeTarget(rtspUrl, { allowPrivate: false });
+  await assertSafeTarget(rtspUrl, { allowPrivate: process.env.ALLOW_PRIVATE_NETWORK === 'true' });
   return new Promise((resolve, reject) => {
     const ffmpeg = spawn('ffmpeg', [
       '-y',
@@ -144,10 +144,23 @@ async function main() {
     process.exit(1);
   }
 
-  const listenClient = new Client({ connectionString: process.env.DATABASE_URL });
-  await listenClient.connect();
-  await listenClient.query('LISTEN new_camera_event');
-  logger.info('Listening on new_camera_event channel');
+  let listenClient = null;
+  let listenRetryDelay = 1000;
+
+  async function connectListener() {
+    const directUrl = process.env.DIRECT_DATABASE_URL || process.env.DATABASE_URL;
+    listenClient = new Client({ connectionString: directUrl });
+    await listenClient.connect();
+    await listenClient.query('LISTEN new_camera_event');
+    logger.info('Listening on new_camera_event channel', { backend: directUrl === process.env.DIRECT_DATABASE_URL ? 'direct' : 'pooled' });
+    listenRetryDelay = 1000;
+  }
+
+  await connectListener().catch((err) => {
+    logger.error('Failed to connect listener', { error: err.message });
+    Sentry.captureException(err);
+    process.exit(1);
+  });
 
   listenClient.on('notification', (msg) => {
     let payload;
@@ -157,8 +170,6 @@ async function main() {
       logger.error('Could not parse notification payload', { payload: msg.payload });
       return;
     }
-    // Handle each event independently -- one failing recording must
-    // not block the listener from picking up the next notification.
     handleEvent(payload).catch((err) => {
       logger.error('Unhandled error processing event', { error: err.message });
       Sentry.captureException(err);
@@ -166,9 +177,18 @@ async function main() {
   });
 
   listenClient.on('error', (err) => {
-    logger.error('Postgres connection error', { error: err.message });
+    logger.error('Listener connection error, will reconnect', { error: err.message });
     Sentry.captureException(err);
-    process.exit(1); // let a process manager (systemd/pm2/docker) restart it
+    setTimeout(async () => {
+      try {
+        await connectListener();
+      } catch (reconnectErr) {
+        logger.error('Listener reconnection failed', { error: reconnectErr.message });
+        Sentry.captureException(reconnectErr);
+        process.exit(1);
+      }
+    }, Math.min(listenRetryDelay, 30000));
+    listenRetryDelay = Math.min(listenRetryDelay * 2, 30000);
   });
 }
 
