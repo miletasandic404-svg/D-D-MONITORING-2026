@@ -13,9 +13,19 @@
  *     dependency.
  *   - Tiles come from CARTO's public basemap CDN
  *     ({a,b,c,d}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png). This
- *     provider serves OpenStreetMap-derived raster tiles, is keyless,
- *     has no per-request token, has a stable production SLA, and is the
+ *     provider serves OpenStreetMap-derived raster tiles and is the
  *     standard recommendation for production Leaflet deployments.
+ *   - CARTO basemap tiles now require a key query parameter for
+ *     unauthenticated requests (CARTO bakes an "API KEY REQUIRED"
+ *     watermark into the tile image otherwise). The key is sourced
+ *     from the build-time Vite env var VITE_CARTO_BASEMAPS_KEY and
+ *     is a public client-side token by CARTO's design (analogous to
+ *     a Stripe publishable key) — it is safe to inline into the
+ *     browser bundle. When the env var is missing we fall back to
+ *     the keyless URL so local dev / CI without a key still loads
+ *     the map (with a watermark). Configure it in
+ *     frontend/.env (gitignored) for local dev and in the Vercel
+ *     project's env vars for production.
  *   - We previously used OpenFreeMap's raster URL
  *     (https://tiles.openfreemap.org/{z}/{x}/{y}.png), but that path
  *     returns HTTP 403 — only the /styles/liberty and /styles/bright
@@ -59,15 +69,48 @@ L.Icon.Default.mergeOptions({
   shadowUrl,
 });
 
-// CARTO "Positron" (formerly Light) raster tile URL. The four
+// CARTO "Voyager" raster tile URL (rastertiles/voyager). The four
 // subdomains a/b/c/d are used in parallel by Leaflet to speed up
-// loading. CARTO's CDN is keyless, has a published production SLA,
-// and serves OpenStreetMap-derived raster tiles. We do NOT use
-// tile.openstreetmap.org (OSMF policy forbids production use) and
-// we do NOT use the OpenFreeMap /styles/* vector styles (Leaflet
-// can't render vector tiles without MapLibre GL).
-const CARTO_TILE_URL =
-  'https://{s}.basemaps.cartocdn.com/light_all/{z}/{x}/{y}.png';
+// loading. CARTO's CDN serves OpenStreetMap-derived raster tiles.
+// We do NOT use tile.openstreetmap.org (OSMF policy forbids
+// production use) and we do NOT use the OpenFreeMap /styles/*
+// vector styles (Leaflet can't render vector tiles without MapLibre
+// GL).
+//
+// The tile URL is composed once at module load. If the build-time
+// env var VITE_CARTO_BASEMAPS_KEY is set (via frontend/.env locally
+// or via Vercel project env vars in production), we append
+// ?key=<key> so CARTO removes its "API KEY REQUIRED" watermark.
+// The key is a public client-side token by CARTO's design and is
+// safe to inline into the browser bundle. When the env var is
+// missing we fall back to the keyless URL so the build never fails
+// in CI / dev environments without a key — the map still loads, just
+// with the watermark.
+const CARTO_TILE_URL_BASE =
+  'https://{s}.basemaps.cartocdn.com/rastertiles/voyager/{z}/{x}/{y}.png';
+
+/**
+ * Build the CARTO tile URL with the key query param if a key
+ * is provided. Exported so the tests can exercise both the
+ * key-present and key-absent branches without relying on
+ * import.meta.env (which is frozen at module load).
+ */
+export function buildCartoTileUrl(key) {
+  const k = typeof key === 'string' ? key.trim() : '';
+  return k
+    ? `${CARTO_TILE_URL_BASE}?key=${encodeURIComponent(k)}`
+    : CARTO_TILE_URL_BASE;
+}
+
+const CARTO_TILE_URL = (() => {
+  const key =
+    typeof import.meta !== 'undefined' &&
+    import.meta.env &&
+    typeof import.meta.env.VITE_CARTO_BASEMAPS_KEY === 'string'
+      ? import.meta.env.VITE_CARTO_BASEMAPS_KEY.trim()
+      : '';
+  return buildCartoTileUrl(key);
+})();
 const CARTO_ATTRIBUTION =
   '&copy; <a href="https://www.openstreetmap.org/copyright">OpenStreetMap</a> contributors ' +
   '&copy; <a href="https://carto.com/attributions">CARTO</a>';
@@ -244,4 +287,4 @@ export default function MapPanel({
   );
 }
 
-export { CARTO_TILE_URL, CARTO_ATTRIBUTION };
+export { CARTO_TILE_URL, CARTO_TILE_URL_BASE, CARTO_ATTRIBUTION };
