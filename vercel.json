@@ -75,12 +75,16 @@
                       {
                           "source": "/api/cron-pending-activations",
                           "destination": "/api/meta?handler=cron-pending-activations"
-                      },
-{
-                          "source":  "/api/health/:path*",
-                          "destination":  "/api/meta"
-                      },
-                     {
+                       },
+                       {
+                           "source": "/api/health/:path*",
+                           "destination": "/api/meta"
+                       },
+                       {
+                           "source": "/api/health-storage",
+                           "destination": "/api/meta?handler=health-storage"
+                       },
+                      {
                          "source":  "/api/ai-detections",
                          "destination":  "/api/resources"
                      },

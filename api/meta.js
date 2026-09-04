@@ -1,4 +1,5 @@
 const healthHandler = require('../lib/handlers/health');
+const healthStorageHandler = require('../lib/handlers/health-storage');
 const verifyStreamTokenHandler = require('../lib/handlers/verify-stream-token');
 const cronPendingActivationsHandler = require('../lib/handlers/cron-pending-activations');
 const cronRetentionHandler = require('../lib/handlers/cron-retention');
@@ -14,6 +15,9 @@ if (handler === 'cron-pending-activations') {
 }
 if (handler === 'cron-retention') {
   return cronRetentionHandler(req, res);
+}
+if (handler === 'health-storage') {
+  return healthStorageHandler(req, res);
 }
   // Default to health
   return healthHandler(req, res);

@@ -48,6 +48,17 @@ function buildCameraGeo(camera) {
   };
 }
 
+function formatBytes(bytes) {
+  if (!bytes && bytes !== 0) return '0 B';
+  const value = Number(bytes);
+  if (value === 0) return '0 B';
+  const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+  const i = Math.floor(Math.log(value) / Math.log(1024));
+  const clamped = Math.min(i, units.length - 1);
+  const display = value / Math.pow(1024, clamped);
+  return `${display.toFixed(display < 10 ? 2 : 1)} ${units[clamped]}`;
+}
+
 function buildIncidentReport(event, camera, contacts, plan) {
   const cameraGeo = buildCameraGeo(camera);
   return {
@@ -118,6 +129,7 @@ export default function Dashboard() {
   const [cameras, setCameras] = useState(null);
   const [camerasError, setCamerasError] = useState(null);
   const [healthData, setHealthData] = useState(null);
+  const [storageData, setStorageData] = useState(null);
   const [streamErrors, setStreamErrors] = useState({});
   // Per-camera HLS playback state machine result:
   //   { state: 'loading' | 'buffering' | 'live' | 'error',
@@ -1051,9 +1063,38 @@ export default function Dashboard() {
      poll();
      const id = setInterval(poll, POLL_INTERVAL_MS);
      return () => { cancelled = true; clearInterval(id); };
-   }, [authChecked]);
+    }, [authChecked]);
 
-   // Operator Audit Trail — backend is the source of truth.
+    // Storage Usage: polls /api/health/storage for tenant-scoped media
+    // usage (DB-backed byte/count totals). On failure, leaves the last
+    // good payload in place so the tile does not flicker.
+    useEffect(() => {
+      if (!authChecked) return undefined;
+      const POLL_INTERVAL_MS = 20000;
+      const inFlight = { current: false };
+      let cancelled = false;
+
+      const poll = async () => {
+        if (cancelled || inFlight.current) return;
+        inFlight.current = true;
+        try {
+          const res = await api.get('/health/storage');
+          if (cancelled) return;
+          setStorageData(res.data);
+        } catch {
+          if (cancelled) return;
+          setStorageData((prev) => (prev === null ? null : prev));
+        } finally {
+          inFlight.current = false;
+        }
+      };
+
+      poll();
+      const id = setInterval(poll, POLL_INTERVAL_MS);
+      return () => { cancelled = true; clearInterval(id); };
+    }, [authChecked]);
+
+    // Operator Audit Trail — backend is the source of truth.
    //   - Fetches the first page once auth is confirmed.
    //   - Polls every 30s to surface new persisted entries. The poll
    //     re-reads the current page (offset stays put); use the
@@ -1980,8 +2021,18 @@ export default function Dashboard() {
           </article>
           <article className="metric-card">
             <p className="metric-label">Storage Usage</p>
-            <strong>-</strong>
-            <span>Storage monitoring not configured</span>
+            {storageData === null ? (
+              <div className="skeleton skeleton-number" />
+            ) : (
+              <strong>{storageData.configured ? formatBytes(storageData.used_bytes) : '-'}</strong>
+            )}
+            <span>
+              {storageData === null
+                ? <div className="skeleton skeleton-text short" />
+                : storageData.configured
+                  ? `${storageData.object_count ?? 0} recordings/snapshots`
+                  : 'Storage monitoring not configured'}
+            </span>
           </article>
           <article className="metric-card">
             <p className="metric-label">API Status</p>
