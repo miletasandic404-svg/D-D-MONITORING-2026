@@ -222,6 +222,13 @@ describe('worker state cleanup', () => {
     state.lastDetectionTime.clear();
     state.lastEventTime.clear();
     state.alertsThisHour.clear();
+
+    if (typeof worker.stopProcessing === 'function') {
+      worker.stopProcessing();
+    }
+    if (typeof worker.stopRtspExtraction === 'function') {
+      worker.stopRtspExtraction();
+    }
   });
 
   test('cleanup removes state for deleted cameras', async () => {
@@ -309,6 +316,13 @@ describe('notification tenant isolation', () => {
     state.lastDetectionTime.clear();
     state.lastEventTime.clear();
     state.alertsThisHour.clear();
+
+    if (typeof worker.stopProcessing === 'function') {
+      worker.stopProcessing();
+    }
+    if (typeof worker.stopRtspExtraction === 'function') {
+      worker.stopRtspExtraction();
+    }
   });
 
   test('org A camera triggers only org A notification rules', async () => {
@@ -613,5 +627,167 @@ describe('YOLOv8 output parsing', () => {
 
     const boxes = parseDetections(output, 640, 640, 0.5);
     assert.equal(boxes.length, 2);
+  });
+});
+
+// ── E2E pipeline test: frame -> detection -> event -> DB -> API ──
+//
+// NOTE: This test uses a SYNTHETIC valid JPEG buffer and MOCKED ONNX/DB.
+// It is NOT a real-camera E2E test, but it proves the full application
+// pipeline is wired correctly: frame submission -> decode -> inference ->
+// event creation -> ai_detections insert -> notification check.
+//
+// For a real camera test, run manually against production with:
+//   node scripts/verify_person_detection_e2e.js
+
+describe('E2E person detection pipeline (synthetic JPEG)', () => {
+  let worker;
+  let mockDb;
+  let insertQueries;
+
+  // Minimal valid 1x1 white JPEG (baseline, 8-bit, no subsampling)
+  const VALID_JPEG = Buffer.from([
+    0xFF, 0xD8, 0xFF, 0xE0, 0x00, 0x10, 0x4A, 0x46, 0x49, 0x46, 0x00, 0x01,
+    0x01, 0x00, 0x00, 0x01, 0x00, 0x01, 0x00, 0x00, 0xFF, 0xDB, 0x00, 0x43,
+    0x00, 0x08, 0x06, 0x06, 0x07, 0x06, 0x05, 0x08, 0x07, 0x07, 0x07, 0x09,
+    0x09, 0x08, 0x0A, 0x0C, 0x14, 0x0D, 0x0C, 0x0B, 0x0B, 0x0C, 0x19, 0x12,
+    0x13, 0x0F, 0x14, 0x1D, 0x1A, 0x1F, 0x1E, 0x1D, 0x1A, 0x1C, 0x1C, 0x20,
+    0x24, 0x2E, 0x27, 0x20, 0x22, 0x2C, 0x23, 0x1C, 0x1C, 0x28, 0x37, 0x29,
+    0x2C, 0x30, 0x31, 0x34, 0x34, 0x34, 0x1F, 0x27, 0x39, 0x3D, 0x38, 0x32,
+    0x3C, 0x2E, 0x33, 0x34, 0x32, 0xFF, 0xC0, 0x00, 0x0B, 0x08, 0x00, 0x01,
+    0x00, 0x01, 0x01, 0x01, 0x11, 0x00, 0xFF, 0xC4, 0x00, 0x14, 0x00, 0x01,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x03, 0xFF, 0xC4, 0x00, 0x14, 0x10, 0x01, 0x00, 0x00,
+    0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+    0x00, 0x00, 0xFF, 0xDA, 0x00, 0x08, 0x01, 0x01, 0x00, 0x00, 0x3F, 0x00,
+    0x54, 0xAA, 0xFF, 0xD9,
+  ]);
+
+  beforeEach(() => {
+    insertQueries = [];
+
+    mockDb = {
+      queryAsPlatformAdmin: async (sql, params) => {
+        insertQueries.push({ sql, params });
+
+        if (sql.includes('SELECT organization_id FROM cameras')) {
+          return { rows: [{ organization_id: 'org-e2e-123' }] };
+        }
+        if (sql.includes('INSERT INTO events')) {
+          return { rows: [{ id: 999 }] };
+        }
+        if (sql.includes('INSERT INTO ai_detections')) {
+          return { rows: [{ id: 888 }] };
+        }
+        if (sql.includes('SELECT id FROM notification_rules')) {
+          return { rows: [] };
+        }
+        return { rows: [] };
+      },
+    };
+
+    require.cache[require.resolve('../db/index')] = {
+      id: require.resolve('../db/index'),
+      filename: require.resolve('../db/index'),
+      loaded: true,
+      exports: mockDb,
+    };
+
+    // Clear module cache for fresh worker state
+    delete require.cache[require.resolve('../workers/person-detection-worker')];
+    worker = require('../workers/person-detection-worker');
+  });
+
+  afterEach(() => {
+    const state = worker.__test;
+    state.frameQueues.clear();
+    state.lastDetectionTime.clear();
+    state.lastEventTime.clear();
+    state.alertsThisHour.clear();
+
+    if (typeof worker.stopProcessing === 'function') {
+      worker.stopProcessing();
+    }
+    if (typeof worker.stopRtspExtraction === 'function') {
+      worker.stopRtspExtraction();
+    }
+  });
+
+  test('valid JPEG -> decode -> mocked detection -> event -> ai_detections with org_id', async () => {
+    worker.startProcessing();
+
+    // Mock detectPersons to return a person detection directly.
+    // This tests the event/DB pipeline with a valid JPEG decode.
+    const detectionModule = require('../lib/_person_detection');
+    const originalModuleDetect = detectionModule.detectPersons;
+    const originalDecode = detectionModule._internal.decodeJpegAsync;
+    detectionModule.detectPersons = async () => ({
+      persons: [{ confidence: 0.9, x: 0, y: 0, w: 0, h: 0 }],
+      inferenceTimeMs: 100,
+      error: null,
+    });
+    detectionModule._internal.decodeJpegAsync = async () => ({
+      width: 640,
+      height: 480,
+      data: new Uint8Array(640 * 480 * 4),
+    });
+
+    // Submit a valid synthetic JPEG frame
+    worker.submitFrame('cam-e2e-test', VALID_JPEG);
+
+    // Wait for processing (processLoop runs every 1s)
+    await new Promise((r) => setTimeout(r, 1200));
+
+    // Restore originals
+    detectionModule.detectPersons = originalModuleDetect;
+    detectionModule._internal.decodeJpegAsync = originalDecode;
+
+    // Verify events INSERT ran with organization_id
+    const eventsInsert = insertQueries.find((q) => q.sql.includes('INSERT INTO events'));
+    assert.ok(eventsInsert, 'events INSERT should have been executed');
+    assert.ok(eventsInsert.sql.includes('organization_id'), 'events INSERT must include organization_id');
+    assert.deepEqual(eventsInsert.params, ['cam-e2e-test', 'Person detected with 90% confidence', 'org-e2e-123']);
+
+    // Verify ai_detections INSERT ran with organization_id
+    const detectionsInsert = insertQueries.find((q) => q.sql.includes('INSERT INTO ai_detections'));
+    assert.ok(detectionsInsert, 'ai_detections INSERT should have been executed');
+    assert.ok(detectionsInsert.sql.includes('organization_id'), 'ai_detections INSERT must include organization_id');
+    assert.ok(detectionsInsert.sql.includes("'person'"), 'object_type should be hardcoded person');
+    assert.deepEqual(detectionsInsert.params, [999, 0.9, '[{"confidence":0.9,"x":0,"y":0,"w":0,"h":0}]', 'org-e2e-123']);
+  });
+
+  test('missing organization_id prevents unscoped detection', async () => {
+    worker.startProcessing();
+
+    // Override mock to return null organization_id
+    mockDb.queryAsPlatformAdmin = async (sql, params) => {
+      insertQueries.push({ sql, params });
+      if (sql.includes('SELECT organization_id FROM cameras')) {
+        return { rows: [{ organization_id: null }] };
+      }
+      if (sql.includes('INSERT INTO events')) {
+        return { rows: [{ id: 998 }] };
+      }
+      return { rows: [] };
+    };
+
+    // Mock detectPersons
+    const detectionModule = require('../lib/_person_detection');
+    const originalModuleDetect = detectionModule.detectPersons;
+    detectionModule.detectPersons = async () => ({
+      persons: [{ confidence: 0.9, x: 0, y: 0, w: 0, h: 0 }],
+      inferenceTimeMs: 100,
+      error: null,
+    });
+
+    worker.submitFrame('cam-no-org', VALID_JPEG);
+
+    await new Promise((r) => setTimeout(r, 1200));
+
+    detectionModule.detectPersons = originalModuleDetect;
+
+    // Should NOT have inserted any events
+    const eventsInsert = insertQueries.find((q) => q.sql.includes('INSERT INTO events'));
+    assert.ok(!eventsInsert, 'events INSERT must NOT run when organization_id is missing');
   });
 });

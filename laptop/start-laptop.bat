@@ -79,19 +79,19 @@ goto done
 echo [start] MediaMTX API spreman (posle %TRIES%s).
 
 echo [start] Pokrecem camera-sync-worker...
-start "DND-camera-sync" /min cmd /c "cd /d %PROJECT_ROOT% && node workers\camera-sync-worker.js"
+start "DND-camera-sync" /min cmd /c "cd /d %PROJECT_ROOT% && call workers\worker-supervisor.bat camera-sync ""node workers\camera-sync-worker.js"""
 
 echo [start] Pokrecem media-node-heartbeat...
-start "DND-heartbeat" /min cmd /c "cd /d %PROJECT_ROOT% && node workers\media-node-heartbeat.js"
+start "DND-heartbeat" /min cmd /c "cd /d %PROJECT_ROOT% && call workers\heartbeat-supervisor.bat"
 
 echo [start] Pokrecem camera-setup-agent (wizard executor)...
-start "DND-camera-setup" /min cmd /c "cd /d %PROJECT_ROOT% && node workers\camera-setup-agent.js"
+start "DND-camera-setup" /min cmd /c "cd /d %PROJECT_ROOT% && call workers\worker-supervisor.bat camera-setup ""node workers\camera-setup-agent.js"""
 
 echo [start] Pokrecem person-detection-worker...
-start "DND-person-detection" /min cmd /c "cd /d %PROJECT_ROOT% && node workers\person-detection-worker.js"
+start "DND-person-detection" /min cmd /c "cd /d %PROJECT_ROOT% && call workers\worker-supervisor.bat person-detection ""node workers\person-detection-worker.js"""
 
 echo [start] Pokrecem xiongmai-stream-worker (DVRIP kamere)...
-start "DND-xiongmai-stream" /min cmd /c "cd /d %PROJECT_ROOT% && node workers\xiongmai-stream-worker.js >> %PROJECT_ROOT%\logs\xiongmai-runtime.log 2>>&1"
+start "DND-xiongmai-stream" /min cmd /c "cd /d %PROJECT_ROOT% && call workers\worker-supervisor.bat xiongmai ""node workers\xiongmai-stream-worker.js"""
 
 REM ---- Two-Way Audio API (lokalni, OPTalk ka DVRIP kamerama) ----
 REM Sluša na TWO_WAY_AUDIO_PORT (default 8890). Frontend ga zove
@@ -101,7 +101,7 @@ REM MEDIA_NODE_DATABASE_URL (fallback), ALLOWED_ORIGIN.
 set TWO_WAY_AUDIO_PORT=8890
 if not defined ALLOWED_ORIGIN set ALLOWED_ORIGIN=https://www.dnd-monitoring.com
 echo [start] Pokrecem two-way-audio-api (port %TWO_WAY_AUDIO_PORT%)...
-start "DND-audio-api" /min cmd /c "cd /d %PROJECT_ROOT% && node workers\two-way-audio-api.js >> %PROJECT_ROOT%\logs\audio-api-runtime.log 2>>&1"
+start "DND-audio-api" /min cmd /c "cd /d %PROJECT_ROOT% && call workers\worker-supervisor.bat audio-api ""node workers\two-way-audio-api.js"""
 
 echo.
 echo [start] SVE POKRENUTO. Prozori: DND-MediaMTX, DND-camera-sync, DND-heartbeat, DND-camera-setup, DND-person-detection, DND-xiongmai-stream, DND-audio-api.

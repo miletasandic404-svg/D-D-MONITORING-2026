@@ -26,6 +26,7 @@ COPY --from=worker-deps /worker/node_modules ./node_modules
 COPY media-server/package.json ./package.json
 COPY workers/ ./workers/
 COPY lib/ ./lib/
+COPY db/ ./db/
 
 # --- MediaMTX konfiguracija ---
 COPY media-server/mediamtx.yml /mediamtx.yml

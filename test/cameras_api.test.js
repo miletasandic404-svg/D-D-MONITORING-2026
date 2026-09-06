@@ -61,8 +61,14 @@ db.queryAsPlatformAdmin = async (text, params) => {
 const authModule = require('../lib/_auth');
 // Mutable response: handler je require-ovan posle ovoga i uhvatio je ovu
 // delegat funkciju, pa per-test promene idu kroz authResponse.
-let authResponse = { userId: 'user-1', organizationId: 'org-1', role: 'org_admin' };
-authModule.requireAuth = async () => authResponse;
+let authResponse = { userId: 'user-1', organizationId: 'org-1', userType: 'org_admin' };
+authModule.requireAuth = async (req, res, opts) => {
+  if (authResponse === null) {
+    res.status(401).json({ success: false, error: 'Unauthorized' });
+    return null;
+  }
+  return authResponse;
+};
 authModule.getAccessibleCameraIds = async () => null;
 
 // ── fake rate limit ──────────────────────────────────────────────────────
@@ -947,6 +953,125 @@ describe('api/cameras — camera location flow', () => {
     assert.match(res.body.error, /different organization/i);
     const cameraInsert = queryCalls.find((c) => c.text.startsWith('INSERT INTO cameras'));
     assert.equal(cameraInsert, undefined, 'no camera INSERT must run for a different-org camera');
+  });
+
+  describe('PATCH /api/cameras?path=reassign', () => {
+    beforeEach(() => {
+      resetFakes();
+      authResponse = { userId: 'user-1', organizationId: 'org-1', role: 'org_admin' };
+    });
+
+    test('org_admin can reassign own camera to a valid media node', async () => {
+      dbScript = (text) => {
+        if (text.includes('SELECT id, organization_id, media_node_id FROM cameras WHERE id = $1')) {
+          return { rows: [{ id: 'CAM-01', organization_id: 'org-1', media_node_id: 'node-1' }], rowCount: 1 };
+        }
+        if (text.includes('SELECT id, organization_id, last_heartbeat_at FROM media_nodes WHERE id = $1')) {
+          return { rows: [{ id: 'node-2', organization_id: null, last_heartbeat_at: new Date().toISOString() }], rowCount: 1 };
+        }
+        if (text.startsWith('UPDATE cameras SET media_node_id')) {
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      };
+      const req = makeReq({
+        method: 'PATCH',
+        query: { path: 'reassign' },
+        body: { camera_id: 'CAM-01', media_node_id: 'node-2' },
+      });
+      const res = makeRes();
+      await handler(req, res);
+
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.body.success, true);
+      assert.equal(res.body.media_node_id, 'node-2');
+      const update = queryCalls.find((c) => c.text.startsWith('UPDATE cameras SET media_node_id'));
+      assert.ok(update, 'camera media_node_id update ran');
+    });
+
+    test('org_admin cannot reassign camera of another organization', async () => {
+      dbScript = (text) => {
+        if (text.includes('SELECT id, organization_id, media_node_id FROM cameras WHERE id = $1')) {
+          return { rows: [], rowCount: 0 };
+        }
+        if (text.includes('SELECT id, organization_id, last_heartbeat_at FROM media_nodes WHERE id = $1')) {
+          return { rows: [{ id: 'node-2', organization_id: null, last_heartbeat_at: new Date().toISOString() }], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      };
+      const req = makeReq({
+        method: 'PATCH',
+        query: { path: 'reassign' },
+        body: { camera_id: 'CAM-OTHER', media_node_id: 'node-2' },
+      });
+      const res = makeRes();
+      await handler(req, res);
+
+      assert.equal(res.statusCode, 404);
+      assert.match(res.body.error, /Camera not found/i);
+    });
+
+    test('platform_admin can reassign any camera to a valid media node', async () => {
+      authResponse = { userId: 'user-2', organizationId: 'org-2', role: 'platform_admin' };
+      dbScript = (text) => {
+        if (text.includes('SELECT id, organization_id, media_node_id FROM cameras WHERE id = $1')) {
+          return { rows: [{ id: 'CAM-OTHER', organization_id: 'org-2', media_node_id: 'node-9' }], rowCount: 1 };
+        }
+        if (text.includes('SELECT id, organization_id, last_heartbeat_at FROM media_nodes WHERE id = $1')) {
+          return { rows: [{ id: 'node-2', organization_id: null, last_heartbeat_at: new Date().toISOString() }], rowCount: 1 };
+        }
+        if (text.startsWith('UPDATE cameras SET media_node_id')) {
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      };
+      const req = makeReq({
+        method: 'PATCH',
+        query: { path: 'reassign' },
+        body: { camera_id: 'CAM-OTHER', media_node_id: 'node-2' },
+      });
+      const res = makeRes();
+      await handler(req, res);
+
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.body.success, true);
+      assert.equal(res.body.media_node_id, 'node-2');
+    });
+
+    test('reassigning to an invalid media node is rejected (404)', async () => {
+      dbScript = (text) => {
+        if (text.includes('SELECT id, organization_id, media_node_id FROM cameras WHERE id = $1')) {
+          return { rows: [{ id: 'CAM-01', organization_id: 'org-1', media_node_id: 'node-1' }], rowCount: 1 };
+        }
+        if (text.includes('SELECT id, organization_id, last_heartbeat_at FROM media_nodes WHERE id = $1')) {
+          return { rows: [], rowCount: 0 };
+        }
+        return { rows: [], rowCount: 0 };
+      };
+      const req = makeReq({
+        method: 'PATCH',
+        query: { path: 'reassign' },
+        body: { camera_id: 'CAM-01', media_node_id: 'node-invalid' },
+      });
+      const res = makeRes();
+      await handler(req, res);
+
+      assert.equal(res.statusCode, 404);
+      assert.match(res.body.error, /Target media node not found/i);
+    });
+
+    test('unauthenticated reassignment is denied', async () => {
+      authResponse = null;
+      const req = makeReq({
+        method: 'PATCH',
+        query: { path: 'reassign' },
+        body: { camera_id: 'CAM-01', media_node_id: 'node-2' },
+      });
+      const res = makeRes();
+      await handler(req, res);
+
+      assert.equal(res.statusCode, 401);
+    });
   });
 });
 

@@ -39,7 +39,7 @@ const hasDatabase = Boolean(connectionString) && Boolean(Pool);
 const pool = hasDatabase
   ? new Pool({
       connectionString,
-      ssl: { rejectUnauthorized: false },
+      ssl: true,
       connectionTimeoutMillis: 10000,   // fail fast if Neon is unreachable
       idleTimeoutMillis: 30000,         // close idle clients after 30s
       max: 10,                          // max clients in pool

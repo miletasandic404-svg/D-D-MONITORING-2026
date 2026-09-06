@@ -77,7 +77,12 @@ const leafletMock = vi.hoisted(() => {
 vi.mock('leaflet', () => ({ default: leafletMock.L }));
 vi.mock('leaflet/dist/leaflet.css', () => ({}));
 
-import MapPanel, { hasValidCoord, CARTO_TILE_URL } from '../components/dashboard/MapPanel.jsx';
+import MapPanel, {
+  hasValidCoord,
+  CARTO_TILE_URL,
+  CARTO_TILE_URL_BASE,
+  buildCartoTileUrl,
+} from '../components/dashboard/MapPanel.jsx';
 
 beforeEach(() => {
   leafletMock.L.map.mockClear();
@@ -304,5 +309,49 @@ describe('MapPanel — lifecycle', () => {
     expect(leafletMock.L.marker).not.toHaveBeenCalled();
     expect(leafletMock.map.flyTo).not.toHaveBeenCalled();
     expect(leafletMock.map.fitBounds).not.toHaveBeenCalled();
+  });
+});
+
+describe('MapPanel — CARTO tile URL composition', () => {
+  it('buildCartoTileUrl returns the keyless base URL when the key is missing', () => {
+    expect(buildCartoTileUrl(undefined)).toBe(CARTO_TILE_URL_BASE);
+    expect(buildCartoTileUrl(null)).toBe(CARTO_TILE_URL_BASE);
+    expect(buildCartoTileUrl('')).toBe(CARTO_TILE_URL_BASE);
+    expect(buildCartoTileUrl('   ')).toBe(CARTO_TILE_URL_BASE);
+  });
+  it('buildCartoTileUrl appends ?key=<key> when a key is provided', () => {
+    expect(buildCartoTileUrl('test-key')).toBe(
+      `${CARTO_TILE_URL_BASE}?key=test-key`,
+    );
+  });
+  it('buildCartoTileUrl URL-encodes the key (handles special characters safely)', () => {
+    const out = buildCartoTileUrl('a b/c&d=e');
+    expect(out.startsWith(`${CARTO_TILE_URL_BASE}?key=`)).toBe(true);
+    // The space, slash, ampersand, and equals must all be percent-encoded.
+    expect(out).toContain('a%20b%2Fc%26d%3De');
+    // The result must contain exactly one key param and the raw
+    // value must not appear unencoded.
+    expect(out.match(/[?&]key=/g).length).toBe(1);
+    expect(out).not.toContain('a b/c&d=e');
+  });
+  it('buildCartoTileUrl trims surrounding whitespace from the key', () => {
+    expect(buildCartoTileUrl('  test-key  ')).toBe(
+      `${CARTO_TILE_URL_BASE}?key=test-key`,
+    );
+  });
+  it('CARTO_TILE_URL (frozen at module load) is the keyless base when no env var is set', () => {
+    // The test env does not define VITE_CARTO_BASEMAPS_KEY, so the
+    // module-load composition falls back to the keyless base URL.
+    // This guarantees the build never fails in CI / dev when the
+    // key is absent.
+    expect(CARTO_TILE_URL).toBe(CARTO_TILE_URL_BASE);
+  });
+  it('L.tileLayer is called with the module-load tile URL (no key param when env var is missing)', async () => {
+    await act(async () => {
+      render(<MemoryRouter><MapPanel cameras={[]} /></MemoryRouter>);
+    });
+    const tileUrl = leafletMock.L.tileLayer.mock.calls[0][0];
+    expect(tileUrl).toBe(CARTO_TILE_URL_BASE);
+    expect(tileUrl).not.toMatch(/[?&]key=/);
   });
 });

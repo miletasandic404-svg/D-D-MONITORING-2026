@@ -631,5 +631,62 @@ module.exports = async (req, res) => {
     }
   }
 
+  if (req.query.path === 'reassign') {
+    if (req.method !== 'PATCH') return sendError(res, 405, 'Method Not Allowed');
+    const auth = await requireAuth(req, res, { roles: ['platform_admin', 'org_admin'] });
+    if (!auth) return;
+
+    const cameraId = req.body?.camera_id || req.query.id;
+    const targetNodeId = req.body?.media_node_id;
+    if (!cameraId || !targetNodeId) {
+      return sendError(res, 400, 'camera_id and media_node_id are required');
+    }
+
+    try {
+      const camera = await db.queryAsOrg(
+        auth.organizationId,
+        'SELECT id, organization_id, media_node_id FROM cameras WHERE id = $1',
+        [cameraId],
+      );
+      if (camera.rows.length === 0) {
+        return sendError(res, 404, 'Camera not found');
+      }
+
+      const targetNode = await db.queryAsPlatformAdmin(
+        'SELECT id, organization_id, last_heartbeat_at FROM media_nodes WHERE id = $1',
+        [targetNodeId],
+      );
+      if (targetNode.rows.length === 0) {
+        return sendError(res, 404, 'Target media node not found');
+      }
+
+      const node = targetNode.rows[0];
+      if (node.organization_id && node.organization_id !== auth.organizationId && auth.userType !== 'platform_admin') {
+        return sendError(res, 403, 'Cannot assign camera to a media node owned by another organization');
+      }
+
+      await db.queryAsOrg(
+        auth.organizationId,
+        'UPDATE cameras SET media_node_id = $1, updated_at = now() WHERE id = $2',
+        [targetNodeId, cameraId],
+      );
+
+      await logAudit({
+        organizationId: auth.organizationId,
+        userId: auth.userId,
+        action: 'camera.reassign',
+        resourceType: 'camera',
+        resourceId: cameraId,
+        ipAddress: getIp(req),
+        metadata: { from_node: camera.rows[0].media_node_id, to_node: targetNodeId },
+      });
+
+      return sendSuccess(res, { message: 'Camera reassigned', camera_id: cameraId, media_node_id: targetNodeId });
+    } catch (err) {
+      console.error('PATCH /api/cameras?path=reassign error:', err.message);
+      return sendError(res, 500, err.message);
+    }
+  }
+
   return sendError(res, 405, "Method Not Allowed");
 };

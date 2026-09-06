@@ -122,7 +122,7 @@ describe('Migration integration (requires TEST_DATABASE_URL)', () => {
   }
 
   test('all migrations apply cleanly to a fresh schema in the correct order', async () => {
-    const pool = new Pool({ connectionString: dbUrl, ssl: { rejectUnauthorized: false }, max: 1 });
+    const pool = new Pool({ connectionString: dbUrl, ssl: true, max: 1 });
     const client = await pool.connect();
     let schemaName;
 

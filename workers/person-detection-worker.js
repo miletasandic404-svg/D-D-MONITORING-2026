@@ -27,6 +27,7 @@
  * Run with: node workers/person-detection-worker.js
  */
 
+const { spawn } = require('child_process');
 const { EventEmitter } = require('events');
 const db = require('../db/index');
 const detection = require('../lib/_person_detection');
@@ -45,6 +46,7 @@ const COOLDOWN_MS = parseInt(process.env.PERSON_COOLDOWN_MS || '300000', 10);
 const MAX_ALERTS_PER_HOUR = parseInt(process.env.PERSON_MAX_ALERTS_PER_HOUR || '10', 10);
 const FRAME_QUEUE_MAX = parseInt(process.env.PERSON_FRAME_QUEUE_MAX || '5', 10);
 const DB_CHECK_INTERVAL_MS = parseInt(process.env.PERSON_DB_CHECK_INTERVAL_MS || '60000', 10);
+const RTSP_FRAME_INTERVAL_MS = parseInt(process.env.PERSON_RTSP_FRAME_INTERVAL_MS || '10000', 10);
 
 // ── State ───────────────────────────────────────────────────────────
 
@@ -54,6 +56,8 @@ const lastEventTime = new Map(); // cameraId -> timestamp (cooldown)
 const alertsThisHour = new Map(); // cameraId -> count
 let currentHour = new Date().getHours();
 let cleanupInterval = null;
+let rtspInterval = null;
+const childProcesses = new Set();
 
 // Shared EventEmitter for receiving frames from stream workers
 const frameBus = new EventEmitter();
@@ -93,6 +97,125 @@ function submitFrame(cameraId, jpegBuffer) {
 
 // Register on the shared bus
 frameBus.on('frame', submitFrame);
+
+// ── RTSP frame extraction ──────────────────────────────────────────
+
+/**
+ * Query enabled RTSP/ONVIF cameras from the database.
+ * Excludes DVRIP cameras (handled by xiongmai-stream-worker).
+ *
+ * @returns {Array<{ id: string, rtsp_url: string, organization_id: string }>}
+ */
+async function fetchRtspCameras() {
+  try {
+    const result = await db.queryAsPlatformAdmin(
+      `SELECT c.id, c.rtsp_url, c.organization_id
+       FROM cameras c
+       WHERE c.rtsp_url IS NOT NULL
+         AND c.enabled = true
+         AND c.connection_type != 'dvrip'
+       ORDER BY c.id`,
+    );
+    return result.rows;
+  } catch (err) {
+    logger.error('Failed to fetch RTSP cameras', { error: err.message });
+    return [];
+  }
+}
+
+/**
+ * Extract a single JPEG frame from an RTSP URL using ffmpeg.
+ *
+ * @param {string} rtspUrl
+ * @returns {Promise<Buffer|null>}
+ */
+async function extractFrameFromRtsp(rtspUrl) {
+  return new Promise((resolve) => {
+    const args = [
+      '-rtsp_transport', 'tcp',
+      '-i', rtspUrl,
+      '-frames:v', '1',
+      '-f', 'image2pipe',
+      '-vframes', '1',
+      '-q:v', '2',
+      '-',
+    ];
+
+    const ffmpeg = spawn('ffmpeg', args);
+    childProcesses.add(ffmpeg);
+    const chunks = [];
+    let settled = false;
+
+    ffmpeg.stdout.on('data', (chunk) => {
+      chunks.push(chunk);
+    });
+
+    ffmpeg.stderr.on('data', () => {
+      // ffmpeg logs to stderr; ignore unless it's an error
+    });
+
+    ffmpeg.on('error', (err) => {
+      if (!settled) {
+        settled = true;
+        childProcesses.delete(ffmpeg);
+        logger.warn('RTSP frame extraction ffmpeg error', { error: err.message, rtsp_url: rtspUrl });
+        resolve(null);
+      }
+    });
+
+    ffmpeg.on('close', (code) => {
+      if (!settled) {
+        settled = true;
+        childProcesses.delete(ffmpeg);
+        if (code === 0 && chunks.length > 0) {
+          const buffer = Buffer.concat(chunks);
+          if (buffer.length > 100 && buffer[0] === 0xFF && buffer[1] === 0xD8) {
+            resolve(buffer);
+          } else {
+            resolve(null);
+          }
+        } else {
+          resolve(null);
+        }
+      }
+    });
+
+    // Timeout after 8s
+    const timeout = setTimeout(() => {
+      if (!settled) {
+        settled = true;
+        childProcesses.delete(ffmpeg);
+        ffmpeg.kill('SIGKILL');
+        resolve(null);
+      }
+    }, 8000);
+    ffmpeg.on('close', () => clearTimeout(timeout));
+    ffmpeg.on('error', () => clearTimeout(timeout));
+  });
+}
+
+/**
+ * Periodic loop: extract one frame from each RTSP camera and submit
+ * it to the person detection pipeline.
+ */
+async function rtspExtractionLoop() {
+  const cameras = await fetchRtspCameras();
+  if (cameras.length === 0) return;
+
+  logger.info('RTSP frame extraction started', { camera_count: cameras.length });
+
+  for (const cam of cameras) {
+    try {
+      const frame = await extractFrameFromRtsp(cam.rtsp_url);
+      if (frame) {
+        submitFrame(cam.id, frame);
+        logger.debug('RTSP frame extracted', { camera_id: cam.id });
+      }
+    } catch (err) {
+      logger.warn('RTSP frame extraction failed', { camera_id: cam.id, error: err.message });
+    }
+  }
+}
 
 // ── Debounce / Cooldown / Rate Limit ────────────────────────────────
 
@@ -204,11 +327,22 @@ async function createDetectionEvent(cameraId, confidence, boundingBoxes) {
   try {
     const description = `Person detected with ${Math.round(confidence * 100)}% confidence`;
 
+    // Look up camera organization_id first for tenant safety.
+    const cameraResult = await db.queryAsPlatformAdmin(
+      'SELECT organization_id FROM cameras WHERE id = $1',
+      [cameraId],
+    );
+    const organizationId = cameraResult.rows[0]?.organization_id;
+    if (!organizationId) {
+      logger.error('Cannot create detection event: camera has no organization_id', { cameraId });
+      return null;
+    }
+
     const result = await db.queryAsPlatformAdmin(
-      `INSERT INTO events (camera_id, event_type, severity, description)
-       VALUES ($1, 'person_detected', 'medium', $2)
+      `INSERT INTO events (camera_id, event_type, severity, description, organization_id)
+       VALUES ($1, 'person_detected', 'medium', $2, $3)
        RETURNING id`,
-      [cameraId, description],
+      [cameraId, description, organizationId],
     );
 
     const eventId = result.rows[0]?.id;
@@ -217,20 +351,26 @@ async function createDetectionEvent(cameraId, confidence, boundingBoxes) {
       return null;
     }
 
-    // Insert into ai_detections if schema supports it
+    // Insert into ai_detections - mandatory, not best-effort.
+    // This row must never be created without organization_id.
     try {
       await db.queryAsPlatformAdmin(
         `INSERT INTO ai_detections (event_id, object_type, confidence, bounding_box, timestamp, organization_id)
-         SELECT $1, 'person', $2, $3::jsonb, now(), c.organization_id
-         FROM cameras c WHERE c.id = $4`,
-        [eventId, confidence, JSON.stringify(boundingBoxes), cameraId],
+         VALUES ($1, 'person', $2, $3::jsonb, now(), $4)`,
+        [eventId, confidence, JSON.stringify(boundingBoxes), organizationId],
       );
     } catch (err) {
-      // ai_detections insert is best-effort
-      logger.warn('Failed to insert ai_detections (non-fatal)', { error: err.message });
+      logger.error('Failed to insert ai_detections', { eventId, error: err.message });
+      // Roll back the event so we don't have an incident without a detection
+      try {
+        await db.queryAsPlatformAdmin('DELETE FROM events WHERE id = $1', [eventId]);
+      } catch {
+        // ignore rollback failure
+      }
+      return null;
     }
 
-    logger.info('Detection event created', { eventId, cameraId, confidence });
+    logger.info('Detection event created', { eventId, cameraId, confidence, organizationId });
     return { eventId };
   } catch (err) {
     logger.error('Failed to create detection event', { error: err.message, cameraId });
@@ -420,20 +560,41 @@ async function main() {
     maxAlertsPerHour: MAX_ALERTS_PER_HOUR,
     frameQueueMax: FRAME_QUEUE_MAX,
     modelPath: process.env.PERSON_MODEL_PATH || 'models/yolov8n.onnx',
+    rtspFrameIntervalMs: RTSP_FRAME_INTERVAL_MS,
   });
 
   startProcessing();
+  startRtspExtraction();
 
   const shutdown = () => {
-    if (processInterval) clearInterval(processInterval);
-    if (cleanupInterval) clearInterval(cleanupInterval);
-    if (statusInterval) clearInterval(statusInterval);
+    stopProcessing();
+    stopRtspExtraction();
+    for (const child of childProcesses) {
+      try { child.kill('SIGKILL'); } catch {}
+    }
+    childProcesses.clear();
     logger.info('Person detection worker shutting down');
     process.exit(0);
   };
 
   process.on('SIGTERM', shutdown);
   process.on('SIGINT', shutdown);
+}
+
+function stopProcessing() {
+  if (processInterval) clearInterval(processInterval);
+  if (cleanupInterval) clearInterval(cleanupInterval);
+  if (statusInterval) clearInterval(statusInterval);
+  processInterval = null;
+  cleanupInterval = null;
+  statusInterval = null;
+  started = false;
+}
+
+function stopRtspExtraction() {
+  if (rtspInterval) clearInterval(rtspInterval);
+  rtspInterval = null;
+  rtspStarted = false;
 }
 
 function startProcessing() {
@@ -455,9 +616,22 @@ function startProcessing() {
   logger.info('Person detection processing started');
 }
 
+function startRtspExtraction() {
+  if (rtspStarted) return;
+  rtspStarted = true;
+
+  rtspInterval = setInterval(rtspExtractionLoop, RTSP_FRAME_INTERVAL_MS);
+
+  logger.info('RTSP frame extraction started', {
+    intervalMs: RTSP_FRAME_INTERVAL_MS,
+  });
+}
+
 let started = false;
+let rtspStarted = false;
 let processInterval = null;
 let statusInterval = null;
+rtspInterval = null;
 
 if (require.main === module) {
   main().catch((err) => {
@@ -474,8 +648,13 @@ module.exports = {
   submitFrame,
   frameBus,
   startProcessing,
+  startRtspExtraction,
+  stopProcessing,
+  stopRtspExtraction,
   cleanupStaleState,
   sendNotifications,
+  fetchRtspCameras,
+  extractFrameFromRtsp,
   getStatus: () => ({
     ...detection.getStatus(),
     camerasMonitored: frameQueues.size,

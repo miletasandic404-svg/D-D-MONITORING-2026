@@ -97,7 +97,7 @@ module.exports = async (req, res) => {
   try {
     const accessibleIds = await getAccessibleCameraIds(auth);
     if (accessibleIds !== null && accessibleIds.length === 0) {
-      return sendSuccess(res, { count: 0, incidents: [], statuses: ALLOWED_STATUSES });
+      return sendSuccess(res, { count: 0, total: 0, incidents: [], statuses: ALLOWED_STATUSES });
     }
 
     // The list query keeps LIMIT 100 as a UI safety cap. The

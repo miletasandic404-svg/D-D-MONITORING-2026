@@ -332,12 +332,19 @@ export default function Cameras() {
   const [editLng, setEditLng] = useState('');
   const [editError, setEditError] = useState('');
   const [editSaving, setEditSaving] = useState(false);
+  const [reassignNodeId, setReassignNodeId] = useState('');
+  const [reassignError, setReassignError] = useState('');
+  const [reassignSaving, setReassignSaving] = useState(false);
+  const [mediaNodes, setMediaNodes] = useState([]);
   useEffect(() => {
     if (selectedCamera) {
       setEditLocation(selectedCamera.location || '');
       setEditLat(selectedCamera.lat != null ? String(selectedCamera.lat) : '');
       setEditLng(selectedCamera.lng != null ? String(selectedCamera.lng) : '');
       setEditError('');
+      setReassignNodeId(selectedCamera.media_node_id || '');
+      setReassignError('');
+      fetchMediaNodes();
     }
   }, [selectedCamera]);
   const [streamCamera, setStreamCamera] = useState(null);
@@ -357,6 +364,34 @@ export default function Cameras() {
       console.error('Failed to fetch cameras:', err);
     } finally {
       setLoading(false);
+    }
+  };
+
+  const fetchMediaNodes = async () => {
+    try {
+      const res = await api.get('/media-nodes');
+      setMediaNodes(res.data.nodes || []);
+    } catch (err) {
+      console.error('Failed to fetch media nodes:', err);
+    }
+  };
+
+  const handleReassignMediaNode = async () => {
+    if (!selectedCamera || !reassignNodeId) return;
+    setReassignError('');
+    setReassignSaving(true);
+    try {
+      await api.patch('/cameras?path=reassign', {
+        camera_id: selectedCamera.id,
+        media_node_id: reassignNodeId,
+      });
+      fetchCameras();
+      setSelectedCamera(null);
+      setReassignNodeId('');
+    } catch (e) {
+      setReassignError(e.response?.data?.error || 'Failed to reassign media node');
+    } finally {
+      setReassignSaving(false);
     }
   };
 
@@ -546,13 +581,23 @@ export default function Cameras() {
              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Longitude</label><input type="number" step="any" placeholder="-180 to 180" value={editLng} onChange={(e) => setEditLng(e.target.value)} style={{ marginTop: '.25rem', padding: '.8rem', background: 'rgba(87,125,196,.1)', border: '1px solid rgba(87,125,196,.3)', borderRadius: '8px', color: '#dff7ff', width: '100%', boxSizing: 'border-box' }} /></div>
              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>FPS</label><div style={{ color: '#dff7ff', marginTop: '.25rem' }}>{selectedCamera.fps || 'Unknown'}</div></div>
              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Status</label><div style={{ color: selectedCamera.enabled !== false ? '#00d450' : '#ff5050', marginTop: '.25rem' }}>{selectedCamera.enabled !== false ? 'Online' : 'Offline'}</div></div>
-             <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>HLS Base URL</label><div style={{ color: '#dff7ff', marginTop: '.25rem', fontSize: '.85rem', fontFamily: 'monospace', wordBreak: 'break-all' }}>{selectedCamera.hls_base_url || 'Default'}</div></div>
-           </div>
-           {editError && <p style={{ color: '#ff5050', marginTop: '.75rem', fontSize: '.9rem' }}>{editError}</p>}
-           <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.5rem' }}>
-           <button onClick={handleSaveLocation} disabled={editSaving} style={{ flex: 1, padding: '.8rem', background: 'linear-gradient(135deg,#00d4ff,#8c4dff)', color: '#03101c', border: 'none', borderRadius: '8px', fontSize: '.8rem', fontWeight: 'bold', cursor: 'pointer' }}>{editSaving ? 'Saving...' : 'Save Location'}</button>
-           <button onClick={() => setSelectedCamera(null)} style={{ flex: 1, marginTop: '1.5rem', width: '100%', padding: '.8rem', background: 'rgba(87,125,196,.2)', border: 'none', color: '#dff7ff', borderRadius: '8px', cursor: 'pointer' }}>Close</button>
-           </div>
+              <div><label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>HLS Base URL</label><div style={{ color: '#dff7ff', marginTop: '.25rem', fontSize: '.85rem', fontFamily: 'monospace', wordBreak: 'break-all' }}>{selectedCamera.hls_base_url || 'Default'}</div></div>
+              <div>
+                <label style={{ color: '#8ab0c9', fontSize: '.85rem' }}>Media Node</label>
+                <select value={reassignNodeId} onChange={(e) => setReassignNodeId(e.target.value)} style={{ marginTop: '.25rem', padding: '.8rem', background: 'rgba(87,125,196,.1)', border: '1px solid rgba(87,125,196,.3)', borderRadius: '8px', color: '#dff7ff', width: '100%', boxSizing: 'border-box' }}>
+                  <option value="">-- select node --</option>
+                  {mediaNodes.map((node) => (
+                    <option key={node.id} value={node.id}>{node.hostname || node.region} ({node.id})</option>
+                  ))}
+                </select>
+              </div>
+            </div>
+            {reassignError && <p style={{ color: '#ff5050', marginTop: '.75rem', fontSize: '.9rem' }}>{reassignError}</p>}
+            <div style={{ display: 'flex', gap: '0.75rem', marginTop: '1.5rem' }}>
+            <button onClick={handleSaveLocation} disabled={editSaving} style={{ flex: 1, padding: '.8rem', background: 'linear-gradient(135deg,#00d4ff,#8c4dff)', color: '#03101c', border: 'none', borderRadius: '8px', fontSize: '.8rem', fontWeight: 'bold', cursor: 'pointer' }}>{editSaving ? 'Saving...' : 'Save Location'}</button>
+            <button onClick={handleReassignMediaNode} disabled={reassignSaving || !reassignNodeId || reassignNodeId === selectedCamera.media_node_id} style={{ flex: 1, padding: '.8rem', background: 'rgba(87,125,196,.2)', border: '1px solid rgba(87,125,196,.4)', color: '#dff5ff', borderRadius: '8px', fontSize: '.8rem', fontWeight: 'bold', cursor: 'pointer' }}>{reassignSaving ? 'Reassigning...' : 'Change Media Node'}</button>
+            <button onClick={() => setSelectedCamera(null)} style={{ flex: 1, marginTop: '1.5rem', width: '100%', padding: '.8rem', background: 'rgba(87,125,196,.2)', border: 'none', color: '#dff5ff', borderRadius: '8px', cursor: 'pointer' }}>Close</button>
+            </div>
           </div>
         </div>
       )}

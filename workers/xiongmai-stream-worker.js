@@ -289,6 +289,11 @@ async function startStreamForCamera(cameraId) {
   if (ctx && ctx.starting) {
     return;
   }
+  // Reconnect already pending: preserve existing state so discovery
+  // does not interfere with an in-flight reconnect timer.
+  if (ctx && ctx.reconnectTimer) {
+    return;
+  }
 
   ctx = {
     adapter: null,
@@ -348,7 +353,7 @@ async function startStreamForCamera(cameraId) {
       authResult.SessionId,
       { channel: 0, streamType: 'Main', transMode: 'TCP' },
        (frame) => {
-         if (frame.kind === 'video' && frame.data) {
+          if (frame.kind === 'video' && frame.data) {
            ctx.lastFrameAt = Date.now();
            // Stream is now active: clear starting flag
            ctx.starting = false;

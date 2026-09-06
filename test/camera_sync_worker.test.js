@@ -61,6 +61,16 @@ function freshRequireWorker() {
   return require(WORKER_PATH);
 }
 
+function freshRequireWorkerWithoutDotenv() {
+  const dotenv = require('dotenv');
+  const originalConfig = dotenv.config;
+  dotenv.config = () => {};
+  delete require.cache[WORKER_PATH];
+  const w = require(WORKER_PATH);
+  dotenv.config = originalConfig;
+  return w;
+}
+
 describe('workers/camera-sync-worker — fail-closed without MEDIA_NODE_ID', () => {
   beforeEach(() => {
     queryCalls = [];
@@ -70,14 +80,14 @@ describe('workers/camera-sync-worker — fail-closed without MEDIA_NODE_ID', () 
   });
 
   test('no MEDIA_NODE_ID -> returns [] and never queries cameras', async () => {
-    const worker = freshRequireWorker();
+    const worker = freshRequireWorkerWithoutDotenv();
     const result = await worker.fetchCamerasFromDb();
     assert.deepEqual(result, []);
     assert.equal(queryCalls.length, 0, 'no DB query may run without MEDIA_NODE_ID');
   });
 
   test('no MEDIA_NODE_ID -> credentials are never decrypted', async () => {
-    const worker = freshRequireWorker();
+    const worker = freshRequireWorkerWithoutDotenv();
     await worker.fetchCamerasFromDb();
     assert.equal(decryptCalls, 0, 'decrypt must never be called in the fail-closed path');
   });
@@ -88,7 +98,7 @@ describe('workers/camera-sync-worker — fail-closed without MEDIA_NODE_ID', () 
     poolScript = () => ({
       rows: [{ id: 'CAM-OTHER', rtsp_url: 'rtsp://x/live', rtsp_password_encrypted: 'enc' }],
     });
-    const worker = freshRequireWorker();
+    const worker = freshRequireWorkerWithoutDotenv();
     const result = await worker.fetchCamerasFromDb();
     assert.deepEqual(result, []);
     assert.equal(queryCalls.length, 0);

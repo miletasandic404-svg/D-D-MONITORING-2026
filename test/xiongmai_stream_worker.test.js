@@ -195,6 +195,16 @@ function freshRequireWorker() {
   return require(WORKER_PATH);
 }
 
+function freshRequireWorkerWithoutDotenv() {
+  const dotenv = require('dotenv');
+  const originalConfig = dotenv.config;
+  dotenv.config = () => {};
+  delete require.cache[WORKER_PATH];
+  const w = require(WORKER_PATH);
+  dotenv.config = originalConfig;
+  return w;
+}
+
 function resetFakes() {
   queryCalls = [];
   poolScript = null;
@@ -260,7 +270,7 @@ describe('xiongmai-stream-worker — fetchDvripCameras', () => {
   test('returns [] when MEDIA_NODE_ID is missing (fail-closed)', async () => {
     const saved = process.env.MEDIA_NODE_ID;
     delete process.env.MEDIA_NODE_ID;
-    const w = freshRequireWorker();
+    const w = freshRequireWorkerWithoutDotenv();
     const result = await w.fetchDvripCameras();
     assert.deepEqual(result, []);
     assert.equal(queryCalls.length, 0);
