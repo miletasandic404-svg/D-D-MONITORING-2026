@@ -174,14 +174,20 @@ cloudflared tunnel route dns dnd-hls hls.dnd-monitoring.com
 #    ingress:
 #      - hostname: hls.dnd-monitoring.com
 #        service: http://localhost:8888
+#      - hostname: audio.dnd-monitoring.com
+#        service: http://localhost:8890
 #      - service: http_status:404
 
-# 5. Pokretanje (dodati u start-desktop.bat, posle MediaMTX-a):
+# 5. DNS ruta za audio (JEDNOM): audio.dnd-monitoring.com -> tunnel
+cloudflared tunnel route dns dnd-hls audio.dnd-monitoring.com
+
+# 6. Pokretanje (dodati u start-desktop.bat, posle MediaMTX-a):
 cloudflared tunnel --config C:\dnd-media\tunnel.yml run dnd-hls
 ```
 
 4. `public_hls_url` = `https://hls.dnd-monitoring.com`
-5. Sadržaj je i dalje zaštićen token auth-om (verify-stream-token) — tunnel samo
+5. Postaviti `VITE_AUDIO_API_BASE_URL=https://audio.dnd-monitoring.com` u Vercel Dashboard → Settings → Environment Variables (production)
+6. Sadržaj je i dalje zaštićen token auth-om (verify-stream-token) — tunnel samo
    prosleđuje HTTPS; auth radi MediaMTX preko `/api/verify-stream-token`.
 
 ---

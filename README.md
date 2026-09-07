@@ -100,17 +100,33 @@ Fill the 3 values in `C:\dnd-media\start-laptop.bat` (`DATABASE_URL`,
 `MEDIA_NODE_ID`, `MEDIA_NODE_HEARTBEAT_SECRET`), then double-click it.
 It starts MediaMTX + camera-sync + heartbeat + the setup agent.
 
-### 4. Cloudflare Tunnel (public HLS)
+### 4. Cloudflare Tunnel (public HLS + Two-Way Audio)
 
 ```powershell
 cloudflared tunnel login
 cloudflared tunnel create dnd-hls
 cloudflared tunnel route dns dnd-hls hls.dnd-monitoring.com
+cloudflared tunnel route dns dnd-hls audio.dnd-monitoring.com
 ```
 
-Point the tunnel at the local MediaMTX HLS port (8888) with a config file and
+Tunnel config (`C:\dnd-media\tunnel.yml`) must include both hostnames:
+
+```yaml
+tunnel: <TUNNEL-ID-UUID>
+credentials-file: C:\Users\<you>\.cloudflared\<TUNNEL-ID-UUID>.json
+ingress:
+  - hostname: hls.dnd-monitoring.com
+    service: http://localhost:8888
+  - hostname: audio.dnd-monitoring.com
+    service: http://localhost:8890
+  - service: http_status:404
+```
+
+Point the tunnel at the local MediaMTX HLS port (8888) and Two-Way Audio API port (8890) with a config file and
 set `CLOUDFLARE_TUNNEL_NAME`/`CLOUDFLARE_TUNNEL_CONFIG` in `start-laptop.bat`
 — the wizard's **Start Tunnel** button then manages it for you.
+
+Set `VITE_AUDIO_API_BASE_URL=https://audio.dnd-monitoring.com` in Vercel Dashboard → Settings → Environment Variables (production).
 
 ### 5. Add your first camera — Camera Setup Wizard V3
 
