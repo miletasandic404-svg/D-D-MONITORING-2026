@@ -1320,7 +1320,10 @@ export default function Dashboard() {
 
       let detachVideoListeners = () => {};
       if (Hls.isSupported()) {
-        const hls = new Hls({ enableWorker: true });
+        const hls = new Hls({
+          enableWorker: true,
+          lowLatencyMode: true
+        });
         const onMediaAttached = () => dispatchHls(cam.id, HLS_EVENT.MEDIA_ATTACHED);
         const onManifestParsed = () => dispatchHls(cam.id, HLS_EVENT.MANIFEST_PARSED);
         const onLevelLoaded = () => dispatchHls(cam.id, HLS_EVENT.LEVEL_LOADED);
