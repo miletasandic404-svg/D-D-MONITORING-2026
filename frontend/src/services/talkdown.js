@@ -30,7 +30,7 @@
 export const AUDIO_API_BASE_URL =
   (typeof import.meta !== 'undefined' && import.meta.env?.VITE_AUDIO_API_BASE_URL) || '';
 
-export const TALKDOWN_DEFAULT_DURATION_MS = 5000;
+export const TALKDOWN_DEFAULT_DURATION_MS = 60000;
 export const TALKDOWN_FRAME_SAMPLES = 320; // 40 ms @ 8 kHz
 export const TALKDOWN_SAMPLE_RATE = 8000;
 

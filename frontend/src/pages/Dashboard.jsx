@@ -621,19 +621,13 @@ export default function Dashboard() {
   const triggerTalkdown = async (camId) => {
     const cam = cameras.find((c) => c.id === camId);
     if (!isCameraTalkdownSupported(cam)) return;
-    if (talkdownActive === camId) return; // already in flight
 
-    const camName = cam.name || camId;
-    setTalkdownStatus((prev) => ({ ...prev, [camId]: { phase: 'starting' } }));
-    setTalkdownActive(camId);
-
-    let token = null;
-    let pipeline = null;
     const finishWith = (phase, error) => {
       if (talkdownStopTimerRef.current) {
         clearTimeout(talkdownStopTimerRef.current);
         talkdownStopTimerRef.current = null;
       }
+      const pipeline = talkdownPipelineRef.current;
       if (pipeline) {
         try { pipeline.stop(); } catch { /* noop */ }
         talkdownPipelineRef.current = null;
@@ -647,6 +641,16 @@ export default function Dashboard() {
       setTalkdownActive((cur) => (cur === camId ? null : cur));
     };
 
+    if (talkdownActive === camId) {
+      await finishWith('stopped');
+      return;
+    }
+
+    const camName = cam.name || camId;
+    setTalkdownStatus((prev) => ({ ...prev, [camId]: { phase: 'starting' } }));
+    setTalkdownActive(camId);
+
+    let token = null;
     try {
       // Mint a stream token (same RBAC path as HLS viewing).
       const viewRes = await api.post('/camera-views', { camera_id: camId });
@@ -673,7 +677,7 @@ export default function Dashboard() {
       // Open mic and stream 40 ms frames. The worker drops frames
       // if a previous send is in flight (HTTP 202), so the browser
       // does not need to buffer.
-      pipeline = createMicPipeline({
+      const pipeline = createMicPipeline({
         onFrame: (base64Pcm) => {
           sendFrame({ id: camId }, token, base64Pcm).catch(() => {});
         },

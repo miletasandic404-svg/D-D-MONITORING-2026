@@ -28,7 +28,7 @@ vi.mock('../services/talkdown', () => ({
   startSession: mocks.startSession,
   stopSession: mocks.stopSession,
   createMicPipeline: mocks.createMicPipeline,
-  TALKDOWN_DEFAULT_DURATION_MS: 5000,
+  TALKDOWN_DEFAULT_DURATION_MS: 60000,
   TALKDOWN_FRAME_SAMPLES: 320,
   TALKDOWN_SAMPLE_RATE: 8000,
   isTalkdownConfigured: () => true,
@@ -109,8 +109,8 @@ describe('Dashboard talkdown flow (service-level integration)', () => {
     const { token: t } = await trigger(camera);
     mocks.stopSession.mockClear();
 
-    setTimeout(() => mocks.stopSession({ id: camera.id }, t), 5000);
-    await vi.advanceTimersByTimeAsync(5100);
+    setTimeout(() => mocks.stopSession({ id: camera.id }, t), 60000);
+    await vi.advanceTimersByTimeAsync(60100);
 
     expect(mocks.stopSession).toHaveBeenCalledWith({ id: 'cam_dvrip_1' }, token);
   });
@@ -244,5 +244,44 @@ describe('Dashboard talkdown flow (service-level integration)', () => {
     // Cleanup must clear the ref so a re-mount doesn't double-stop.
     expect(talkdownActiveRef.current).toBe('cam_dvrip_1'); // ref itself not auto-cleared
     expect(talkdownTokenRef.current).toBeNull();
+  });
+
+  it('toggle: triggering same camera again stops session and calls stopSession', async () => {
+    const pipeline = makePipelineMock();
+    mocks.createMicPipeline.mockReturnValue(pipeline);
+
+    // Simulate Dashboard refs/state for an already-active talkdown.
+    const talkdownActiveRef = { current: camera.id };
+    const talkdownStopTimerRef = { current: null };
+    const talkdownPipelineRef = { current: pipeline };
+    const talkdownTokenRef = { current: token };
+
+    // Mirror Dashboard's new toggle behavior.
+    const finishWith = (_phase, _error) => {
+      if (talkdownStopTimerRef.current) {
+        clearTimeout(talkdownStopTimerRef.current);
+        talkdownStopTimerRef.current = null;
+      }
+      const pl = talkdownPipelineRef.current;
+      if (pl) {
+        try { pl.stop(); } catch { /* noop */ }
+        talkdownPipelineRef.current = null;
+      }
+      const t = talkdownTokenRef.current;
+      talkdownTokenRef.current = null;
+      if (t) {
+        mocks.stopSession({ id: camera.id }, t).catch(() => {});
+      }
+      talkdownActiveRef.current = null;
+    };
+
+    mocks.stopSession.mockClear();
+    pipeline.stop.mockClear();
+
+    await finishWith('stopped');
+
+    expect(mocks.stopSession).toHaveBeenCalledWith({ id: camera.id }, token);
+    expect(pipeline.stop).toHaveBeenCalled();
+    expect(talkdownActiveRef.current).toBeNull();
   });
 });
