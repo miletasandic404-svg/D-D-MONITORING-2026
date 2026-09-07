@@ -105,7 +105,14 @@ async function fetchCamerasFromDb() {
     // Reconstruct full RTSP URL with credentials for MediaMTX (it needs auth to pull from camera)
     let fullUrl = c.rtsp_url;
     if (c.rtsp_username || c.rtsp_password_encrypted) {
-      const password = c.rtsp_password_encrypted ? decrypt(c.rtsp_password_encrypted) : '';
+      const decrypted = c.rtsp_password_encrypted ? decrypt(c.rtsp_password_encrypted) : '';
+      let password = '';
+      try {
+        const creds = JSON.parse(decrypted);
+        password = creds.password || '';
+      } catch {
+        password = decrypted;
+      }
       try {
         const u = new URL(fullUrl);
         if (c.rtsp_username) u.username = c.rtsp_username;

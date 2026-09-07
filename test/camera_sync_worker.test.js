@@ -41,9 +41,10 @@ pg.Pool = class {
 // ── fake decrypt (must never run in the fail-closed path) ────────────────
 const cryptoLib = require('../lib/_crypto');
 let decryptCalls = 0;
-cryptoLib.decrypt = () => {
+let decryptReturn = 'decrypted';
+cryptoLib.decrypt = (blob) => {
   decryptCalls += 1;
-  return 'decrypted';
+  return decryptReturn;
 };
 
 // The worker reads env at require time and only starts its main() loop
@@ -142,5 +143,59 @@ describe('workers/camera-sync-worker — org-scoped sync with MEDIA_NODE_ID', ()
     assert.deepEqual(result, []);
     assert.equal(queryCalls.length, 1);
     assert.equal(decryptCalls, 0);
+  });
+});
+
+describe('workers/camera-sync-worker — JSON credential parsing', () => {
+  beforeEach(() => {
+    queryCalls = [];
+    decryptCalls = 0;
+    poolScript = null;
+    process.env.MEDIA_NODE_ID = 'node-1';
+  });
+
+  test('JSON decrypted credential embeds password in RTSP URL', async () => {
+    decryptReturn = JSON.stringify({ username: 'admin', password: 'realPassword123' });
+    poolScript = () => ({
+      rows: [
+        { id: 'CAM-1', rtsp_url: 'rtsp://host/live', media_node_id: 'node-1', rtsp_username: 'admin', rtsp_password_encrypted: 'enc' },
+      ],
+    });
+    const worker = freshRequireWorker();
+    const result = await worker.fetchCamerasFromDb();
+
+    assert.equal(result.length, 1);
+    assert.ok(result[0].rtsp_url.includes('admin:realPassword123@'), 'RTSP URL should contain extracted password');
+    assert.ok(!result[0].rtsp_url.includes('username'), 'JSON structure should not leak into URL');
+  });
+
+  test('legacy plain decrypted password embeds in RTSP URL', async () => {
+    decryptReturn = 'plainLegacyPassword';
+    poolScript = () => ({
+      rows: [
+        { id: 'CAM-1', rtsp_url: 'rtsp://host/live', media_node_id: 'node-1', rtsp_username: 'admin', rtsp_password_encrypted: 'enc' },
+      ],
+    });
+    const worker = freshRequireWorker();
+    const result = await worker.fetchCamerasFromDb();
+
+    assert.equal(result.length, 1);
+    assert.ok(result[0].rtsp_url.includes('admin:plainLegacyPassword@'), 'RTSP URL should contain legacy password');
+  });
+
+  test('JSON with missing password field results in empty password', async () => {
+    decryptReturn = JSON.stringify({ username: 'admin' });
+    poolScript = () => ({
+      rows: [
+        { id: 'CAM-1', rtsp_url: 'rtsp://host/live', media_node_id: 'node-1', rtsp_username: 'admin', rtsp_password_encrypted: 'enc' },
+      ],
+    });
+    const worker = freshRequireWorker();
+    const result = await worker.fetchCamerasFromDb();
+
+    assert.equal(result.length, 1);
+    assert.ok(result[0].rtsp_url.includes('admin'), 'RTSP URL should contain username');
+    assert.ok(!result[0].rtsp_url.includes('username'), 'JSON structure should not leak into URL');
+    assert.ok(!result[0].rtsp_url.includes('password'), 'JSON structure should not leak into URL');
   });
 });

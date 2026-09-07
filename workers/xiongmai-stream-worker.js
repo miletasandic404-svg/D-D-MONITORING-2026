@@ -325,7 +325,16 @@ async function startStreamForCamera(cameraId) {
   }
 
   const port = cam.port || DVRIP_PORT;
-  const password = cam.rtsp_password_encrypted ? cryptoLib.decrypt(cam.rtsp_password_encrypted) : '';
+  const decrypted = cam.rtsp_password_encrypted
+    ? cryptoLib.decrypt(cam.rtsp_password_encrypted)
+    : '';
+  let password = '';
+  try {
+    const creds = JSON.parse(decrypted);
+    password = creds.password || '';
+  } catch {
+    password = decrypted;
+  }
 
   logger.info('stream.starting_auth', { camera_id: cameraId, ip: cam.ip, port });
 

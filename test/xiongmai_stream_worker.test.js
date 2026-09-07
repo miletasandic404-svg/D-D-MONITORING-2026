@@ -105,6 +105,7 @@ let adapterAuthSuccess = true;
 let authResult = { Ret: 100, AliveInterval: 30, SessionId: 12345, success: true };
 let streamCodec = 'h265';
 let streamFrames = null;
+let lastAdapterCredentials = null;
 
 class FakeSocket extends EventEmitter {
   constructor() {
@@ -128,6 +129,7 @@ dvripModule.XiongmaiDvripAdapter = class FakeXiongmaiDvripAdapter {
     adapterInstances.push(this);
   }
   async authenticate(username, password) {
+    lastAdapterCredentials = { username, password };
     if (!adapterAuthSuccess) {
       throw new Error('DVRIP authentication failed');
     }
@@ -330,6 +332,50 @@ describe('xiongmai-stream-worker — login success + stream start', () => {
 
     assert.equal(mtxRegisterCalls.length, 1);
     assert.deepEqual(mtxRegisterCalls[0], { cameraId: 'cam-1', rtspUrl: 'publisher' });
+  });
+});
+
+describe('xiongmai-stream-worker — JSON credential parsing', () => {
+  beforeEach(() => {
+    decryptCalls = 0;
+    lastAdapterCredentials = null;
+    poolScript = () => ({
+      rows: [{
+        id: 'cam-1', name: 'Front Door', ip: '192.168.1.10', port: 34567,
+        rtsp_username: 'admin', rtsp_password_encrypted: 'enc',
+      }],
+    });
+  });
+
+  test('JSON decrypted credential extracts password field', async () => {
+    decryptReturn = JSON.stringify({ username: 'admin', password: 'realPassword123' });
+    await worker.startStreamForCamera('cam-1');
+    await new Promise(r => setTimeout(r, 50));
+
+    assert.equal(decryptCalls, 1);
+    assert.ok(lastAdapterCredentials, 'adapter should have received credentials');
+    assert.equal(lastAdapterCredentials.username, 'admin');
+    assert.equal(lastAdapterCredentials.password, 'realPassword123', 'password should be extracted from JSON');
+  });
+
+  test('legacy plain decrypted password uses fallback', async () => {
+    decryptReturn = 'plainLegacyPassword';
+    await worker.startStreamForCamera('cam-1');
+    await new Promise(r => setTimeout(r, 50));
+
+    assert.equal(decryptCalls, 1);
+    assert.ok(lastAdapterCredentials);
+    assert.equal(lastAdapterCredentials.password, 'plainLegacyPassword', 'fallback should use full decrypted string');
+  });
+
+  test('JSON with missing password field falls back to empty string', async () => {
+    decryptReturn = JSON.stringify({ username: 'admin' });
+    await worker.startStreamForCamera('cam-1');
+    await new Promise(r => setTimeout(r, 50));
+
+    assert.equal(decryptCalls, 1);
+    assert.ok(lastAdapterCredentials);
+    assert.equal(lastAdapterCredentials.password, '', 'missing password field should result in empty string');
   });
 });
 
