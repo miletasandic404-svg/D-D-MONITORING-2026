@@ -23,6 +23,7 @@ import {
   capabilityCheck,
   startSession,
   stopSession,
+  sendFrame,
   createMicPipeline,
 } from '../services/talkdown';
 
@@ -673,6 +674,9 @@ export default function Dashboard() {
       // if a previous send is in flight (HTTP 202), so the browser
       // does not need to buffer.
       pipeline = createMicPipeline({
+        onFrame: (base64Pcm) => {
+          sendFrame({ id: camId }, token, base64Pcm).catch(() => {});
+        },
         onError: (err) => {
           // Don't tear down on a single bad frame; log and keep going.
           console.warn('[talkdown] frame error', err);

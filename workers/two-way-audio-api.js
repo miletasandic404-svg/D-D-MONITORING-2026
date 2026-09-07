@@ -1,4 +1,31 @@
 'use strict';
+
+// Load .env if one exists, without assuming any fixed install path.
+// Walks up from THIS FILE'S OWN directory rather than process.cwd(),
+// so it works regardless of how/where the worker is launched from.
+// Silent no-op if dotenv isn't installed or no .env is found.
+(function loadNearestDotEnv() {
+  let dotenv;
+  try {
+    dotenv = require('dotenv');
+  } catch {
+    return;
+  }
+  const fs = require('fs');
+  const path = require('path');
+  let dir = __dirname;
+  for (let i = 0; i < 6; i++) {
+    const candidate = path.join(dir, '.env');
+    if (fs.existsSync(candidate)) {
+      dotenv.config({ path: candidate });
+      return;
+    }
+    const parent = path.dirname(dir);
+    if (parent === dir) break;
+    dir = parent;
+  }
+})();
+
 /**
  * Two-Way Audio + Local Storage HTTP API server (runs on the media node).
  *
