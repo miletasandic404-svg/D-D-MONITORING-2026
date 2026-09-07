@@ -332,7 +332,7 @@ export default function Onboarding() {
     }
   }, [urlPaymentId]);
 
-  // Step 2 – account + org
+  // Step 2 – payment / subscription
   const [orgName, setOrgName]     = useState('');
   const [email, setEmail]         = useState('');
   const [phone, setPhone]         = useState('');
@@ -340,7 +340,14 @@ export default function Onboarding() {
   const [password, setPassword]   = useState('');
   const [confirm, setConfirm]     = useState('');
 
-  // Step 3 – camera connection
+  // Step 3 – emergency contacts
+  const [emergencyDistrict, setEmergencyDistrict] = useState('');
+  const [emergencyPolice, setEmergencyPolice]     = useState('');
+  const [emergencyFire, setEmergencyFire]         = useState('');
+  const [emergencyAmbulance, setEmergencyAmbulance] = useState('');
+  const [emergencyCommand, setEmergencyCommand]   = useState('');
+
+  // Step 5 – camera connection
   const [camIp, setCamIp]         = useState('');
   const [camPort, setCamPort]     = useState('80');
   const [camUser, setCamUser]     = useState('');
@@ -409,7 +416,7 @@ export default function Onboarding() {
     };
   }, [lastConnectedCam?.hls_url]);
 
-  // ── Step 2: account + org setup ─────────────────────────────────────────────
+  // ── Step 4: account + org setup ─────────────────────────────────────────────
 
   async function handleRegister() {
     setError('');
@@ -431,10 +438,15 @@ export default function Onboarding() {
         address: address.trim() || undefined,
         planTier,
         paymentId: paymentId || pendingPayment?.paymentId || undefined,
+        emergencyDistrict:   emergencyDistrict.trim() || undefined,
+        emergencyPolice:     emergencyPolice.trim() || undefined,
+        emergencyFire:       emergencyFire.trim() || undefined,
+        emergencyAmbulance:  emergencyAmbulance.trim() || undefined,
+        emergencyCommand:    emergencyCommand.trim() || undefined,
       });
 
       clearPendingPayment();
-      setStep(3);
+      setStep(5);
     } catch (err) {
       const msg = err?.response?.data?.error || err?.message || 'Registration failed. Please try again.';
       setError(msg);
@@ -443,7 +455,7 @@ export default function Onboarding() {
     }
   }
 
-  // ── Step 3: camera connection ────────────────────────────────────────────────
+  // ── Step 5: camera connection ────────────────────────────────────────────────
 
   // Optional location: mirrors the manual Add Camera form in Cameras.jsx.
   // Reuses the browser geolocation API (no polling, no background calls).
@@ -579,7 +591,7 @@ export default function Onboarding() {
     }
   }
 
-  // ── Step 4: complete onboarding ──────────────────────────────────────────────
+  // ── Step 6: secure console ──────────────────────────────────────────────────
 
   async function handleComplete() {
     setLoading(true);
@@ -628,9 +640,9 @@ export default function Onboarding() {
             <p>Complete your account in a few simple steps</p>
           </div>
 
-          {/* Progress bar — 4 steps */}
+          {/* Progress bar — 6 steps */}
           <div className="ob-progress">
-            {[1, 2, 3, 4].map((s) => (
+            {[1, 2, 3, 4, 5, 6].map((s) => (
               <div key={s} className={`ob-step-bar ${s < step ? 'completed' : s === step ? 'active' : ''}`} />
             ))}
           </div>
@@ -662,10 +674,94 @@ export default function Onboarding() {
                   {' '}{PLANS[planTier].price}
                 </div>
               </>
-            )}
+             )}
 
-            {/* ── STEP 2: Account + Organization ───────────────────────── */}
-            {step === 2 && (
+             {/* ── STEP 2: PayPal / Subscription ───────────────────────── */}
+             {step === 2 && (
+               <>
+                 <h2 className="ob-step-title"><span>💳</span> Payment &amp; Subscription</h2>
+                 <div className="ob-info" style={{ marginBottom: '1.5rem' }}>
+                   Review your selected plan below. Payment will be processed securely via PayPal.
+                 </div>
+                 <div className="ob-summary">
+                   <h3>📋 Plan Summary</h3>
+                   <div className="ob-summary-row">
+                     <span className="label">Selected Plan</span>
+                     <span className="value" style={{ color: 'var(--accent-primary, #00d4ff)' }}>
+                       {PLANS[planTier].name}
+                     </span>
+                   </div>
+                   <div className="ob-summary-row">
+                     <span className="label">Cameras Included</span>
+                     <span className="value">{PLANS[planTier].cameras}</span>
+                   </div>
+                   <div className="ob-summary-row">
+                     <span className="label">Monthly Price</span>
+                     <span className="value" style={{ color: 'var(--accent-success, #00d450)' }}>
+                       {PLANS[planTier].price}
+                     </span>
+                   </div>
+                 </div>
+                 <div className="ob-info">
+                   By continuing, you agree to the subscription terms. You can change or cancel your plan at any time from the billing settings.
+                 </div>
+               </>
+             )}
+
+             {/* ── STEP 3: Emergency Contacts ───────────────────────────── */}
+             {step === 3 && (
+               <>
+                 <h2 className="ob-step-title"><span>🚨</span> Emergency Contacts</h2>
+                 <div className="ob-info" style={{ marginBottom: '1.5rem' }}>
+                   Provide emergency service numbers for your organization. These contacts will be used for critical alerts and dispatch.
+                 </div>
+
+                 <div className="ob-form-group">
+                   <label className="ob-label">District / Region</label>
+                   <input className="ob-input" type="text"
+                     placeholder="e.g. Central District"
+                     value={emergencyDistrict}
+                     onChange={(e) => setEmergencyDistrict(e.target.value)} />
+                 </div>
+
+                 <div className="ob-row">
+                   <div className="ob-form-group">
+                     <label className="ob-label">Police Station</label>
+                     <input className="ob-input" type="text"
+                       placeholder="e.g. 911 or +1 555 0001"
+                       value={emergencyPolice}
+                       onChange={(e) => setEmergencyPolice(e.target.value)} />
+                   </div>
+                   <div className="ob-form-group">
+                     <label className="ob-label">Fire Service</label>
+                     <input className="ob-input" type="text"
+                       placeholder="e.g. 911 or +1 555 0002"
+                       value={emergencyFire}
+                       onChange={(e) => setEmergencyFire(e.target.value)} />
+                   </div>
+                 </div>
+
+                 <div className="ob-row">
+                   <div className="ob-form-group">
+                     <label className="ob-label">Ambulance</label>
+                     <input className="ob-input" type="text"
+                       placeholder="e.g. 911 or +1 555 0003"
+                       value={emergencyAmbulance}
+                       onChange={(e) => setEmergencyAmbulance(e.target.value)} />
+                   </div>
+                   <div className="ob-form-group">
+                     <label className="ob-label">Local Command Center</label>
+                     <input className="ob-input" type="text"
+                       placeholder="e.g. +1 555 0004"
+                       value={emergencyCommand}
+                       onChange={(e) => setEmergencyCommand(e.target.value)} />
+                   </div>
+                 </div>
+               </>
+             )}
+
+              {/* ── STEP 4: Customer / Organization Data ────────────────── */}
+             {step === 4 && (
               <>
                 <h2 className="ob-step-title"><span>🏢</span> Account &amp; Organization</h2>
 
@@ -717,8 +813,8 @@ export default function Onboarding() {
               </>
             )}
 
-            {/* ── STEP 3: Connect Camera ────────────────────────────────── */}
-            {step === 3 && (
+             {/* ── STEP 5: Camera Setup ────────────────────────────────── */}
+             {step === 5 && (
               <>
                 <h2 className="ob-step-title"><span>📹</span> Connect Your Camera</h2>
 
@@ -915,63 +1011,63 @@ export default function Onboarding() {
               </>
             )}
 
-            {/* ── STEP 4: Done ──────────────────────────────────────────── */}
-            {step === 4 && (
-              <>
-                <div className="ob-success-icon">🎉</div>
-                <div className="ob-success-msg">
-                  <h2>You&apos;re All Set!</h2>
-                  <p>Your security monitoring system has been configured and is ready to use.</p>
-                </div>
+             {/* ── STEP 6: Secure Console ────────────────────────────────── */}
+             {step === 6 && (
+               <>
+                 <div className="ob-success-icon">🔒</div>
+                 <div className="ob-success-msg">
+                   <h2>Secure Console Ready</h2>
+                   <p>Your monitoring console is configured and secured. All connections are encrypted and access is restricted to authorized personnel.</p>
+                 </div>
 
-                <div className="ob-summary">
-                  <h3>📋 Setup Summary</h3>
-                  <div className="ob-summary-row">
-                    <span className="label">Organization</span>
-                    <span className="value">{orgName}</span>
-                  </div>
-                  <div className="ob-summary-row">
-                    <span className="label">Plan</span>
-                    <span className="value" style={{ color: 'var(--accent-primary, #00d4ff)' }}>
-                      {PLANS[planTier].name} — {PLANS[planTier].price}
-                    </span>
-                  </div>
-                  <div className="ob-summary-row">
-                    <span className="label">Cameras Connected</span>
-                    <span className="value" style={{ color: 'var(--accent-success, #00d450)' }}>
-                      {connectedCams.length} / {PLANS[planTier].cameras}
-                    </span>
-                  </div>
-                  {email && (
-                    <div className="ob-summary-row">
-                      <span className="label">Account Email</span>
-                      <span className="value">{email}</span>
-                    </div>
-                  )}
-                </div>
+                 <div className="ob-summary">
+                   <h3>📋 Setup Summary</h3>
+                   <div className="ob-summary-row">
+                     <span className="label">Organization</span>
+                     <span className="value">{orgName}</span>
+                   </div>
+                   <div className="ob-summary-row">
+                     <span className="label">Plan</span>
+                     <span className="value" style={{ color: 'var(--accent-primary, #00d4ff)' }}>
+                       {PLANS[planTier].name} — {PLANS[planTier].price}
+                     </span>
+                   </div>
+                   <div className="ob-summary-row">
+                     <span className="label">Cameras Connected</span>
+                     <span className="value" style={{ color: 'var(--accent-success, #00d450)' }}>
+                       {connectedCams.length} / {PLANS[planTier].cameras}
+                     </span>
+                   </div>
+                   {email && (
+                     <div className="ob-summary-row">
+                       <span className="label">Account Email</span>
+                       <span className="value">{email}</span>
+                     </div>
+                   )}
+                 </div>
 
-                {connectedCams.length === 0 && (
-                  <div className="ob-info">
-                    No cameras were connected during setup. You can add cameras at any time from the
-                    Cameras page in your dashboard.
-                  </div>
-                )}
+                 {connectedCams.length === 0 && (
+                   <div className="ob-info">
+                     No cameras were connected during setup. You can add cameras at any time from the
+                     Cameras page in your dashboard.
+                   </div>
+                 )}
 
-                <button
-                  className="ob-btn ob-btn-primary"
-                  onClick={handleComplete}
-                  disabled={loading}
-                  style={{ width: '100%', justifyContent: 'center' }}
-                >
-                  {loading ? 'Loading…' : '🚀 Go to Dashboard'}
-                </button>
-              </>
-            )}
+                 <button
+                   className="ob-btn ob-btn-primary"
+                   onClick={handleComplete}
+                   disabled={loading}
+                   style={{ width: '100%', justifyContent: 'center' }}
+                 >
+                   {loading ? 'Loading…' : '🚀 Go to Dashboard'}
+                 </button>
+               </>
+             )}
 
           </div>{/* end step-content */}
 
           {/* ── Navigation buttons ────────────────────────────────────── */}
-          {step < 4 && (
+          {step < 6 && (
             <div className="ob-nav">
               {step > 1 && !loading && !connecting && (
                 <button className="ob-btn ob-btn-secondary" onClick={() => { setError(''); setStep(step - 1); }}>
@@ -982,12 +1078,26 @@ export default function Onboarding() {
               {/* Step 1 → 2 */}
               {step === 1 && (
                 <button className="ob-btn ob-btn-primary" onClick={() => setStep(2)}>
+                  Continue to Payment →
+                </button>
+              )}
+
+              {/* Step 2 → 3 */}
+              {step === 2 && (
+                <button className="ob-btn ob-btn-primary" onClick={() => setStep(3)}>
                   Continue →
                 </button>
               )}
 
-              {/* Step 2 → 3 (account + org registration) */}
-              {step === 2 && (
+              {/* Step 3 → 4 */}
+              {step === 3 && (
+                <button className="ob-btn ob-btn-primary" onClick={() => setStep(4)}>
+                  Continue →
+                </button>
+              )}
+
+              {/* Step 4 → 5 (account + org registration) */}
+              {step === 4 && (
                 <button
                   className="ob-btn ob-btn-primary"
                   onClick={handleRegister}
@@ -997,11 +1107,11 @@ export default function Onboarding() {
                 </button>
               )}
 
-              {/* Step 3 → 4 */}
-              {step === 3 && (
+              {/* Step 5 → 6 */}
+              {step === 5 && (
                 <button
                   className="ob-btn ob-btn-primary"
-                  onClick={() => setStep(4)}
+                  onClick={() => setStep(6)}
                   disabled={connecting}
                 >
                   {connectedCams.length > 0 ? 'Continue →' : 'Skip for now →'}

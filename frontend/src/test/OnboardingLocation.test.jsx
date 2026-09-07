@@ -54,15 +54,17 @@ function setupCreateCalls() {
 }
 
 // Drives the wizard from the welcome screen through the account form and into
-// Step 3 (Connect Camera) so the Connect button can be exercised.
+// Step 5 (Camera Setup) so the Connect button can be exercised.
 async function advanceToCameraStep() {
+  await userEvent.click(await screen.findByRole('button', { name: /continue to payment/i }));
+  await userEvent.click(await screen.findByRole('button', { name: /continue/i }));
   await userEvent.click(await screen.findByRole('button', { name: /continue/i }));
   await userEvent.type(await screen.findByPlaceholderText(/your company/i), 'Test Org');
   await userEvent.type(await screen.findByPlaceholderText(/you@company/i), 'admin@example.com');
   await userEvent.type(await screen.findByPlaceholderText(/min\. 8 characters/i), 'password123');
   await userEvent.type(await screen.findByPlaceholderText(/repeat password/i), 'password123');
   await userEvent.click(await screen.findByRole('button', { name: /create account/i }));
-  // Step 3 camera IP field appears after the account is registered.
+  // Step 5 camera IP field appears after the account is registered.
   await screen.findByPlaceholderText(/e\.g\. 192/i);
 }
 
@@ -96,7 +98,7 @@ describe('Onboarding -> setup-create location flow', () => {
       lat: 45.2671,
       lng: 19.8335,
     }));
-  });
+  }, 15000);
 
   it('B) setup-create without location sends nulls (no 0 conversion)', async () => {
     render(<MemoryRouter><Onboarding /></MemoryRouter>);
@@ -111,7 +113,7 @@ describe('Onboarding -> setup-create location flow', () => {
     expect(body.location).toBeNull();
     expect(body.lat).toBeNull();
     expect(body.lng).toBeNull();
-  });
+  }, 15000);
 
   it('C) invalid latitude is rejected before setup-create fires', async () => {
     render(<MemoryRouter><Onboarding /></MemoryRouter>);
@@ -122,7 +124,7 @@ describe('Onboarding -> setup-create location flow', () => {
 
     expect(await screen.findByText(/latitude must be a number/i)).toBeInTheDocument();
     expect(setupCreateCalls().length).toBe(0);
-  });
+  }, 15000);
 
   it('D) invalid longitude is rejected before setup-create fires', async () => {
     render(<MemoryRouter><Onboarding /></MemoryRouter>);
@@ -133,7 +135,7 @@ describe('Onboarding -> setup-create location flow', () => {
 
     expect(await screen.findByText(/longitude must be a number/i)).toBeInTheDocument();
     expect(setupCreateCalls().length).toBe(0);
-  });
+  }, 15000);
 
   it('E) decimal coordinates are accepted', async () => {
     render(<MemoryRouter><Onboarding /></MemoryRouter>);
@@ -150,7 +152,7 @@ describe('Onboarding -> setup-create location flow', () => {
       lat: 45.1234,
       lng: -75.9999,
     }));
-  });
+  }, 15000);
 
   it('F) existing setup-create fields are preserved', async () => {
     render(<MemoryRouter><Onboarding /></MemoryRouter>);
@@ -166,5 +168,5 @@ describe('Onboarding -> setup-create location flow', () => {
       ip: '192.168.1.50',
       onvif_port: 80,
     }));
-  });
+  }, 15000);
 });

@@ -72,6 +72,11 @@ module.exports = async (req, res) => {
       address,
       planTier: requestedPlanTier = 'starter',
       paymentId = '',
+      emergencyDistrict = '',
+      emergencyPolice = '',
+      emergencyFire = '',
+      emergencyAmbulance = '',
+      emergencyCommand = '',
     } = req.body || {};
 
     if (!orgName || typeof orgName !== 'string' || orgName.trim().length < 2) {
@@ -149,6 +154,24 @@ module.exports = async (req, res) => {
           userId: auth.userId,
           req,
         });
+      }
+
+      const emergencyContacts = {
+        district: String(emergencyDistrict || '').trim() || null,
+        policeStation: String(emergencyPolice || '').trim() || null,
+        fireService: String(emergencyFire || '').trim() || null,
+        ambulance: String(emergencyAmbulance || '').trim() || null,
+        localCommand: String(emergencyCommand || '').trim() || null,
+      };
+
+      if (Object.values(emergencyContacts).some((v) => v !== null)) {
+        await db.query(
+          `INSERT INTO organization_settings (organization_id, emergency_contacts, updated_at, updated_by)
+           VALUES ($1, $2, now(), $3)
+           ON CONFLICT (organization_id)
+           DO UPDATE SET emergency_contacts = $2, updated_at = now(), updated_by = $3`,
+          [orgId, JSON.stringify(emergencyContacts), auth.userId],
+        );
       }
     } catch (dbErr) {
       logger.error('[onboarding/register] DB error', { error: dbErr.message });
