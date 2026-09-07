@@ -86,8 +86,6 @@ const fakeAdapter = {
   authenticate: async () => {},
   startTalk: async () => {
     if (dbState.adapterMode === 'hang') {
-      // Never resolves on its own; the server's 5 s timeout must
-      // surface a 504 to the client.
       return new Promise(() => {});
     }
     if (dbState.adapterMode === 'throw') {
@@ -99,6 +97,26 @@ const fakeAdapter = {
   stopTalk: async () => {},
   close: () => {},
 };
+
+// Also mock OptalkAudioAdapter (new adapter used by _two_way_audio.js)
+const fakeOptalkAdapter = {
+  login: async () => {},
+  claimTalk: async () => {},
+  startTalk: async () => {
+    if (dbState.adapterMode === 'hang') {
+      return new Promise(() => {});
+    }
+    if (dbState.adapterMode === 'throw') {
+      throw new Error('simulated adapter failure');
+    }
+    return { ok: true };
+  },
+  sendAudio: () => {},
+  stopTalk: async () => {},
+  close: () => {},
+};
+const fakeOptalkAdapterClass = function () { return fakeOptalkAdapter; };
+
 const fakeAdapterClass = function () { return fakeAdapter; };
 const dvripPath = require.resolve('../lib/_xiongmai_dvrip');
 const origDvrip = require.cache[dvripPath];
@@ -108,6 +126,17 @@ require.cache[dvripPath] = {
     ...(origDvrip ? origDvrip.exports : {}),
     XiongmaiDvripAdapter: fakeAdapterClass,
     DVRIP_PORT: 34567,
+  },
+};
+
+// Mock OptalkAudioAdapter
+const optalkPath = require.resolve('../lib/_optalk_audio');
+const origOptalk = require.cache[optalkPath];
+require.cache[optalkPath] = {
+  id: optalkPath, filename: optalkPath, loaded: true,
+  exports: {
+    ...(origOptalk ? origOptalk.exports : {}),
+    OptalkAudioAdapter: fakeOptalkAdapterClass,
   },
 };
 
