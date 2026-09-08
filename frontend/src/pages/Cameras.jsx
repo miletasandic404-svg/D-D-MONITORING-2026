@@ -428,6 +428,13 @@ export default function Cameras() {
             liveSyncDuration: 2,
             maxBufferLength: 3,
             backBufferLength: 1,
+            xhrSetup: (xhr, xhrUrl) => {
+              const url = new URL(xhrUrl, window.location.origin);
+              if (!url.searchParams.has('token')) {
+                url.searchParams.set('token', streamToken);
+              }
+              xhr.open('GET', url.toString(), true);
+            }
           });
           hls.on(Hls.Events.ERROR, (_event, data) => {
             if (!data.fatal) return;

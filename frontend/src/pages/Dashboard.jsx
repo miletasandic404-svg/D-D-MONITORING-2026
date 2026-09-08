@@ -1326,7 +1326,14 @@ export default function Dashboard() {
       if (Hls.isSupported()) {
         const hls = new Hls({
           enableWorker: true,
-          lowLatencyMode: true
+          lowLatencyMode: true,
+          xhrSetup: (xhr, xhrUrl) => {
+            const url = new URL(xhrUrl, window.location.origin);
+            if (!url.searchParams.has('token')) {
+              url.searchParams.set('token', streamToken);
+            }
+            xhr.open('GET', url.toString(), true);
+          }
         });
         const onMediaAttached = () => dispatchHls(cam.id, HLS_EVENT.MEDIA_ATTACHED);
         const onManifestParsed = () => dispatchHls(cam.id, HLS_EVENT.MANIFEST_PARSED);

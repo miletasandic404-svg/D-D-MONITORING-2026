@@ -116,7 +116,15 @@ export default function LiveStreams() {
         const manifestUrl = `${buildHlsManifestUrl(viewingCamera.id, viewingCamera.hls_base_url)}?token=${encodeURIComponent(streamToken)}`;
 
         if (Hls.isSupported()) {
-          hls = new Hls();
+          hls = new Hls({
+            xhrSetup: (xhr, xhrUrl) => {
+              const url = new URL(xhrUrl, window.location.origin);
+              if (!url.searchParams.has('token')) {
+                url.searchParams.set('token', streamToken);
+              }
+              xhr.open('GET', url.toString(), true);
+            }
+          });
           hls.loadSource(manifestUrl);
           hls.attachMedia(video);
         } else if (video.canPlayType('application/vnd.apple.mpegurl')) {
