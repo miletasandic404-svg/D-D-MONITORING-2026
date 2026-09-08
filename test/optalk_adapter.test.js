@@ -208,6 +208,81 @@ async function testMessageIds() {
 }
 
 // ============================================================
+// TEST 6: sendAudio backpressure + error handling (unit)
+// ============================================================
+async function testSendAudioBackpressure() {
+  console.log('\n=== TEST 6: sendAudio backpressure + error handling ===');
+
+  const { OptalkAudioAdapter } = require('../lib/_optalk_audio');
+  const adapter = new OptalkAudioAdapter('1.2.3.4', 34567);
+
+  adapter.isAuthenticated = true;
+  adapter.isTalkActive = true;
+  adapter.sessionId = 12345;
+
+  const pcmBuffer = Buffer.alloc(640);
+  pcmBuffer.fill(0);
+
+  // Test 6a: write() returns false → await 'drain' → resolves
+  {
+    let resolveDrain = null;
+    const mockSocket = {
+      destroyed: false,
+      write: () => false,
+      once: (event, fn) => {
+        if (event === 'drain') resolveDrain = fn;
+      },
+      removeListener: () => {},
+    };
+
+    adapter.socket = mockSocket;
+
+    const sendPromise = adapter.sendAudio(pcmBuffer);
+    await new Promise(r => setTimeout(r, 20));
+
+    assert(resolveDrain !== null, 'registered drain listener when write() returns false');
+
+    resolveDrain();
+    await sendPromise;
+    assert(true, 'sendAudio resolves after drain event');
+  }
+
+  // Test 6b: write() returns false → 'error' → rejects with Error
+  {
+    let errorHandler = null;
+    const mockSocket = {
+      destroyed: false,
+      write: () => false,
+      once: (event, fn) => {
+        if (event === 'error') errorHandler = fn;
+      },
+      removeListener: () => {},
+    };
+
+    adapter.socket = mockSocket;
+
+    let rejected = false;
+    let errorMsg = '';
+    const sendPromise = adapter.sendAudio(pcmBuffer).catch(err => {
+      rejected = true;
+      errorMsg = err.message;
+    });
+
+    await new Promise(r => setTimeout(r, 20));
+    assert(errorHandler !== null, 'registered error listener when write() returns false');
+
+    errorHandler(new Error('EPIPE'));
+    await sendPromise;
+
+    assert(rejected, 'sendAudio rejects on socket error');
+    assert(errorMsg.includes('Socket error'), `Error message mentions socket error (got: ${errorMsg})`);
+  }
+
+  console.log('  ✅ Backpressure waits for drain');
+  console.log('  ✅ Socket error is propagated to caller');
+}
+
+// ============================================================
 // MAIN
 // ============================================================
 async function main() {
@@ -221,6 +296,7 @@ async function main() {
   await testPayloadStructure();
   await testSessionIdInHeader();
   await testAudioFrameFormat();
+  await testSendAudioBackpressure();
   await testHardwareSequence();
   
   console.log('\n' + '='.repeat(60));
