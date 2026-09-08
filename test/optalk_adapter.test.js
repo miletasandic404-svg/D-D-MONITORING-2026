@@ -180,7 +180,7 @@ async function testHardwareSequence() {
     console.log('  Sending test audio frame...');
     const pcmBuffer = Buffer.alloc(640);
     pcmBuffer.fill(0); // silence
-    adapter.sendAudio(pcmBuffer);
+    await adapter.sendAudio(pcmBuffer);
     console.log('  ✅ Audio sent successfully');
     
     // Stop
