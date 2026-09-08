@@ -3,7 +3,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import Hls from 'hls.js';
 import api from '../services/api';
 import { signUp } from '../services/auth-client';
-import { clearPendingPayment, readPendingPayment } from '../services/payment-helpers';
+import { clearPendingPayment, loadPayPalSdk, readPendingPayment, storePendingPayment } from '../services/payment-helpers';
 
 const PAGE_CSS = `
   @keyframes spin {
@@ -289,6 +289,7 @@ const PAGE_CSS = `
   .ob-success-icon { font-size: 4rem; text-align: center; margin-bottom: 1.25rem; }
   .ob-success-msg { text-align: center; color: var(--text-secondary, #8ab0c9); margin-bottom: 2rem; }
   .ob-success-msg h2 { font-family: 'Orbitron', sans-serif; color: var(--accent-success, #00d450); margin-bottom: 0.5rem; }
+  .ob-paypal-container { margin: 1rem 0; }
   @media (max-width: 600px) {
     .ob-row, .ob-plan-grid { grid-template-columns: 1fr; }
     .onboarding-container { padding: 1.5rem; }
@@ -322,6 +323,13 @@ export default function Onboarding() {
     PLANS[urlPlan] ? urlPlan : 'starter',
   );
 
+  // PayPal checkout state for Step 2
+  const paypalClientId = import.meta.env.VITE_PAYPAL_CLIENT_ID || '';
+  const [paypalMounting, setPaypalMounting] = useState(false);
+  const [paypalError, setPaypalError] = useState('');
+  const paypalRef = useRef(null);
+  const [paymentCompleted, setPaymentCompleted] = useState(false);
+
   useEffect(() => {
     const pendingPayment = readPendingPayment();
     if (pendingPayment?.planId && PLANS[pendingPayment.planId]) {
@@ -331,6 +339,110 @@ export default function Onboarding() {
       clearPendingPayment();
     }
   }, [urlPaymentId]);
+
+  // Mount PayPal Buttons when Step 2 is active.
+  useEffect(() => {
+    if (step !== 2 || paymentCompleted) return undefined;
+    if (!paypalClientId) {
+      setPaypalError('PayPal client ID is missing.');
+      return undefined;
+    }
+
+    let cancelled = false;
+    setPaypalMounting(true);
+    setPaypalError('');
+
+    (async () => {
+      try {
+        const paypal = await loadPayPalSdk(paypalClientId, 'USD');
+        if (cancelled) return;
+
+        if (paypalRef.current) paypalRef.current.innerHTML = '';
+
+        const plan = PLANS[planTier];
+        if (!plan) {
+          if (!cancelled) setPaypalError('Selected plan is not available.');
+          return;
+        }
+
+        const contacts = {
+          policeStation: emergencyPolice,
+          fireService: emergencyFire,
+          ambulance: emergencyAmbulance,
+          localCommand: emergencyCommand,
+        };
+
+        const buttons = paypal.Buttons({
+          style: {
+            layout: 'vertical',
+            shape: 'rect',
+            label: 'paypal',
+            height: 48,
+          },
+          createOrder: async () => {
+            const response = await api.post('/paypal/orders', {
+              planId: planTier,
+              district: emergencyDistrict,
+              contacts,
+              idempotencyKey: window.crypto?.randomUUID?.(),
+            });
+            return response.data.id;
+          },
+          onApprove: async (data) => {
+            if (cancelled) return;
+            setPaypalMounting(true);
+            try {
+              const response = await api.post(`/paypal/orders/${data.orderID}/capture`);
+              if (cancelled) return;
+
+              storePendingPayment({
+                provider: 'paypal',
+                paymentId: response.data.paymentId,
+                paymentReference: data.orderID,
+                planId: response.data.planId,
+              });
+              setPaymentCompleted(true);
+              setPaypalError('');
+            } catch (err) {
+              if (!cancelled) {
+                setPaypalError(err?.response?.data?.error || err?.message || 'PayPal capture failed.');
+              }
+            } finally {
+              if (!cancelled) setPaypalMounting(false);
+            }
+          },
+          onCancel: () => {
+            if (!cancelled) {
+              setPaypalError('PayPal checkout canceled.');
+            }
+          },
+          onError: (err) => {
+            if (!cancelled) {
+              setPaypalError(err?.message || 'PayPal checkout failed.');
+            }
+          },
+        });
+
+        if (!buttons.isEligible()) {
+          if (!cancelled) setPaypalError('PayPal is not available in this browser.');
+          return;
+        }
+
+        await buttons.render(paypalRef.current);
+        if (!cancelled) setPaypalMounting(false);
+      } catch (err) {
+        if (!cancelled) {
+          setPaypalError(err?.message || 'Failed to load PayPal checkout.');
+          setPaypalMounting(false);
+        }
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+      if (paypalRef.current) paypalRef.current.innerHTML = '';
+    };
+  }, [step, planTier, paymentCompleted, paypalClientId]);
 
   // Step 2 – payment / subscription
   const [orgName, setOrgName]     = useState('');
@@ -701,12 +813,32 @@ export default function Onboarding() {
                        {PLANS[planTier].price}
                      </span>
                    </div>
-                 </div>
-                 <div className="ob-info">
-                   By continuing, you agree to the subscription terms. You can change or cancel your plan at any time from the billing settings.
-                 </div>
-               </>
-             )}
+                  </div>
+
+                  {!paymentCompleted && (
+                    <>
+                      <div className="ob-info" style={{ marginBottom: '1rem' }}>
+                        Complete payment to activate your subscription and continue setup.
+                      </div>
+                      <div ref={paypalRef} className="ob-paypal-container" style={{ minHeight: 120 }} />
+                      {paypalMounting && (
+                        <div className="ob-info" style={{ marginTop: '0.5rem' }}>
+                          Loading PayPal checkout…
+                        </div>
+                      )}
+                      {paypalError && (
+                        <div className="ob-error" style={{ marginTop: '0.5rem' }}>⚠ {paypalError}</div>
+                      )}
+                    </>
+                  )}
+
+                  {paymentCompleted && (
+                    <div className="ob-info" style={{ color: 'var(--accent-success, #00d450)', marginTop: '1rem' }}>
+                      ✓ Payment confirmed. You may continue to the next step.
+                    </div>
+                  )}
+                </>
+              )}
 
              {/* ── STEP 3: Emergency Contacts ───────────────────────────── */}
              {step === 3 && (
@@ -1084,8 +1216,12 @@ export default function Onboarding() {
 
               {/* Step 2 → 3 */}
               {step === 2 && (
-                <button className="ob-btn ob-btn-primary" onClick={() => setStep(3)}>
-                  Continue →
+                <button
+                  className="ob-btn ob-btn-primary"
+                  onClick={() => setStep(3)}
+                  disabled={!paymentCompleted}
+                >
+                  {paymentCompleted ? 'Continue →' : 'Complete payment to continue →'}
                 </button>
               )}
 

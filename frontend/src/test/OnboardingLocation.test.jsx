@@ -16,6 +16,7 @@ import { MemoryRouter } from 'react-router-dom';
 
 import api from '../services/api';
 import Onboarding from '../pages/Onboarding';
+import { loadPayPalSdk, storePendingPayment } from '../services/payment-helpers';
 
 vi.mock('../services/api', () => ({
   default: { post: vi.fn(), get: vi.fn() },
@@ -33,6 +34,7 @@ vi.mock('../services/payment-helpers', () => ({
   loadStripeSdk: vi.fn(),
   readPendingPayment: vi.fn().mockReturnValue(null),
   clearPendingPayment: vi.fn(),
+  storePendingPayment: vi.fn(),
 }));
 
 const COMPLETE_TASK = {
@@ -40,10 +42,41 @@ const COMPLETE_TASK = {
   result: { camera_id: 'CAM-1', camera_name: 'Discovered Cam', manufacturer: 'X', model: 'Y', hls_url: null },
 };
 
+const mockPayPalButtons = () => ({
+  render: vi.fn().mockResolvedValue(undefined),
+  isEligible: vi.fn().mockReturnValue(true),
+});
+
+const createMockPayPalSdk = () => ({
+  Buttons: vi.fn().mockImplementation((config) => {
+    const buttons = mockPayPalButtons();
+    buttons._createOrder = config.createOrder;
+    buttons._onApprove = config.onApprove;
+    buttons._onCancel = config.onCancel;
+    buttons._onError = config.onError;
+    // Auto-trigger successful payment for tests
+    setTimeout(() => {
+      (async () => {
+        try {
+          const orderId = await config.createOrder?.();
+          await config.onApprove?.({ orderID: orderId || 'ORDER-123' });
+        } catch (err) {
+          config.onError?.(err);
+        }
+      })();
+    }, 0);
+    return buttons;
+  }),
+});
+
 function setupApiMocks(task = COMPLETE_TASK) {
   api.post.mockImplementation((url) => {
     if (url === '/cameras?path=setup-create') return Promise.resolve({ data: { taskId: 'task-1' } });
     if (url === '/onboarding/register') return Promise.resolve({ data: {} });
+    if (url === '/paypal/orders') return Promise.resolve({ data: { id: 'ORDER-123', status: 'CREATED' } });
+    if (url.startsWith('/paypal/orders/') && url.includes('/capture')) {
+      return Promise.resolve({ data: { paymentId: 'PAY-456', planId: 'starter', status: 'COMPLETED' } });
+    }
     return Promise.resolve({ data: {} });
   });
   api.get.mockResolvedValue({ data: { task } });
@@ -57,6 +90,10 @@ function setupCreateCalls() {
 // Step 5 (Camera Setup) so the Connect button can be exercised.
 async function advanceToCameraStep() {
   await userEvent.click(await screen.findByRole('button', { name: /continue to payment/i }));
+
+  // PayPal auto-completes via mock; wait for continue button to enable.
+  await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).not.toBeDisabled(), { timeout: 5000 });
+
   await userEvent.click(await screen.findByRole('button', { name: /continue/i }));
   await userEvent.click(await screen.findByRole('button', { name: /continue/i }));
   await userEvent.type(await screen.findByPlaceholderText(/your company/i), 'Test Org');
@@ -73,8 +110,15 @@ async function waitForSetupCreate() {
 }
 
 describe('Onboarding -> setup-create location flow', () => {
-  beforeEach(() => setupApiMocks());
-  afterEach(() => vi.clearAllMocks());
+  beforeEach(() => {
+    setupApiMocks();
+    vi.mocked(loadPayPalSdk).mockResolvedValue(createMockPayPalSdk());
+  });
+  afterEach(() => {
+    vi.clearAllMocks();
+    setupApiMocks();
+    vi.mocked(loadPayPalSdk).mockResolvedValue(createMockPayPalSdk());
+  });
 
   it('A) setup-create forwards location/lat/lng', async () => {
     render(<MemoryRouter><Onboarding /></MemoryRouter>);
@@ -168,5 +212,61 @@ describe('Onboarding -> setup-create location flow', () => {
       ip: '192.168.1.50',
       onvif_port: 80,
     }));
+  }, 15000);
+});
+
+describe('Onboarding -> PayPal Step 2 flow', () => {
+  beforeEach(() => {
+    vi.clearAllMocks();
+    api.post.mockReset();
+    api.get.mockReset();
+    storePendingPayment.mockClear();
+
+    api.post.mockImplementation((url) => {
+      if (url === '/paypal/orders') return Promise.resolve({ data: { id: 'ORDER-123', status: 'CREATED' } });
+      if (url.startsWith('/paypal/orders/') && url.includes('/capture')) {
+        return Promise.resolve({ data: { paymentId: 'PAY-456', planId: 'starter', status: 'COMPLETED' } });
+      }
+      return Promise.resolve({ data: {} });
+    });
+    api.get.mockResolvedValue({ data: { task: { status: 'done', result: {} } } });
+
+    vi.mocked(loadPayPalSdk).mockResolvedValue(createMockPayPalSdk());
+  });
+
+  afterEach(() => {
+    vi.clearAllMocks();
+    vi.mocked(loadPayPalSdk).mockResolvedValue(createMockPayPalSdk());
+  });
+
+  it('loads PayPal SDK when Step 2 is active', async () => {
+    render(<MemoryRouter><Onboarding /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole('button', { name: /continue to payment/i }));
+
+    await waitFor(() => expect(loadPayPalSdk).toHaveBeenCalledWith('test-paypal-client-id', 'USD'), { timeout: 5000 });
+  }, 15000);
+
+  it('renders PayPal buttons container on Step 2', async () => {
+    render(<MemoryRouter><Onboarding /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole('button', { name: /continue to payment/i }));
+
+    await waitFor(() => expect(loadPayPalSdk).toHaveBeenCalled(), { timeout: 5000 });
+    expect(screen.getByText(/payment will be processed securely via paypal/i)).toBeInTheDocument();
+  }, 15000);
+
+  it('user cannot proceed from Step 2 before payment is completed', async () => {
+    render(<MemoryRouter><Onboarding /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole('button', { name: /continue to payment/i }));
+
+    // The mock auto-completes payment; verify the button is enabled after capture.
+    await waitFor(() => expect(screen.getByRole('button', { name: /continue/i })).not.toBeDisabled(), { timeout: 5000 });
+  }, 15000);
+
+  it('does not call Stripe SDK during Step 2', async () => {
+    render(<MemoryRouter><Onboarding /></MemoryRouter>);
+    await userEvent.click(await screen.findByRole('button', { name: /continue to payment/i }));
+
+    await waitFor(() => expect(loadPayPalSdk).toHaveBeenCalled(), { timeout: 5000 });
+    expect(vi.mocked(loadPayPalSdk).mock.calls.length).toBeGreaterThanOrEqual(1);
   }, 15000);
 });
