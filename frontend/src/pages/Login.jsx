@@ -223,6 +223,10 @@ export default function Login() {
   useEffect(() => {
     if (step !== 'checkout' || !contactsFilled || paymentMethod !== 'card') return;
     if (!plan) return;
+    if (!stripePublishableKey) {
+      setCardError('Stripe publishable key is missing in VITE_STRIPE_PUBLISHABLE_KEY.');
+      return;
+    }
     let cancelled = false;
     let paymentElement = null;
     setCardError('');
@@ -433,13 +437,15 @@ export default function Login() {
                         <button
                           type="button"
                           onClick={() => setPaymentMethod('card')}
+                          disabled={!stripePublishableKey}
                           style={{
                             padding: '.65rem 1rem',
                             borderRadius: '999px',
                             border: paymentMethod === 'card' ? '1px solid rgba(0,212,255,.7)' : '1px solid rgba(87,125,196,.3)',
                             background: paymentMethod === 'card' ? 'rgba(0,212,255,.15)' : 'rgba(4,10,28,.65)',
                             color: 'var(--text-primary, #dff7ff)',
-                            cursor: 'pointer',
+                            cursor: stripePublishableKey ? 'pointer' : 'not-allowed',
+                            opacity: stripePublishableKey ? 1 : 0.6,
                           }}
                         >
                           Visa / Mastercard
