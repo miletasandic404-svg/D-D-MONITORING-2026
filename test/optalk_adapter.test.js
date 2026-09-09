@@ -22,6 +22,7 @@ const PASSWORD = 'd23061988';
 
 let passed = 0;
 let failed = 0;
+let skipped = 0;
 
 function assert(condition, message) {
   if (condition) {
@@ -142,7 +143,13 @@ async function testAudioFrameFormat() {
 // ============================================================
 async function testHardwareSequence() {
   console.log('\n=== TEST 4: Login → Claim → Start (Hardware) ===');
-  
+
+  if (process.env.CI === 'true') {
+    console.log('  ⏭️  Skipped in CI environment (requires local DVRIP camera)');
+    skipped++;
+    return;
+  }
+
   const adapter = new OptalkAudioAdapter(CAMERA_IP, CAMERA_PORT);
   
   try {
@@ -304,7 +311,8 @@ async function main() {
   console.log('='.repeat(60));
   console.log(`Passed: ${passed}`);
   console.log(`Failed: ${failed}`);
-  console.log(`Total:  ${passed + failed}`);
+  console.log(`Skipped: ${skipped}`);
+  console.log(`Total:  ${passed + failed + skipped}`);
   
   if (failed === 0) {
     console.log('\n🎉 ALL TESTS PASSED');
