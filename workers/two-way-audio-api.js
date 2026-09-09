@@ -56,12 +56,15 @@ const { initSentry } = require('../lib/_sentry');
 const { logAudit } = require('../lib/_audit');
 const storage = require('../lib/_storage');
 const Sentry = require('@sentry/node');
+const { beat } = require('../lib/_worker_heartbeat');
 
 initSentry();
 
 const PORT = parseInt(process.env.TWO_WAY_AUDIO_PORT || '8890', 10);
 const DB_URL = process.env.MEDIA_NODE_DATABASE_URL || process.env.DATABASE_URL;
 const ALLOWED_ORIGIN = process.env.ALLOWED_ORIGIN || 'https://www.dnd-monitoring.com';
+const WORKER_HEARTBEAT_INTERVAL_MS = parseInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS || '15000', 10);
+let heartbeatTimer = null;
 
 // Talk session registry: cameraId -> { adapter, createdAt, sessionId,
 // lastActivity, framesSent, startedByUserId }
@@ -540,21 +543,44 @@ const shutdown = async () => {
   server.close(() => process.exit(0));
 };
 
-server.listen(PORT, () => {
-  console.log(`[node-api] Two-way audio + storage server listening on port ${PORT}`);
-  if (storage.getBackend() === 'local') {
-    console.log(`[node-api] Local storage: ${storage.getBackend()} at ${require('../lib/_storage_local').getStorageRoot()}`);
-  }
-  // When run under the test harness (TALKDOWN_TEST_EXPORT=1), export
-  // the server and stop helpers so the test can drive a clean
-  // lifecycle without leaving the Node process hanging.
-  if (process.env.TALKDOWN_TEST_EXPORT === '1') {
+  if (require.main === module || process.env.TALKDOWN_TEST_EXPORT === '1') {
+    server.listen(PORT, () => {
+      console.log(`[node-api] Two-way audio + storage server listening on port ${PORT}`);
+      if (storage.getBackend() === 'local') {
+        console.log(`[node-api] Local storage: ${storage.getBackend()} at ${require('../lib/_storage_local').getStorageRoot()}`);
+      }
+      beat('two-way-audio-api', { status: 'running' });
+      heartbeatTimer = setInterval(() => {
+        beat('two-way-audio-api', { status: 'running' });
+      }, WORKER_HEARTBEAT_INTERVAL_MS);
+      server.on('close', () => {
+        if (heartbeatTimer) clearInterval(heartbeatTimer);
+      });
+      // When run under the test harness (TALKDOWN_TEST_EXPORT=1), export
+      // the server and stop helpers so the test can drive a clean
+      // lifecycle without leaving the Node process hanging.
+      if (process.env.TALKDOWN_TEST_EXPORT === '1') {
+        module.exports.server = server;
+        module.exports.talkSessions = talkSessions;
+        module.exports.startRateLimits = startRateLimits;
+        module.exports._stopSessionSweep = () => clearInterval(sessionSweepTimer);
+      }
+    });
+  } else {
     module.exports.server = server;
     module.exports.talkSessions = talkSessions;
     module.exports.startRateLimits = startRateLimits;
     module.exports._stopSessionSweep = () => clearInterval(sessionSweepTimer);
   }
+
+process.on('SIGTERM', () => {
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  beat('two-way-audio-api', { status: 'stopped' });
+  shutdown();
 });
 
-process.on('SIGTERM', shutdown);
-process.on('SIGINT', shutdown);
+process.on('SIGINT', () => {
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
+  beat('two-way-audio-api', { status: 'stopped' });
+  shutdown();
+});

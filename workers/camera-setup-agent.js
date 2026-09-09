@@ -57,6 +57,7 @@ const { rtspCommonConnector, connectors, getConnector } = require('../lib/_camer
 const { DVRIP_PORT } = require('../lib/_xiongmai_dvrip');
 const { addOrUpdateCameraPath, deleteCameraPath, getPathStatus } = require('../lib/_mediamtx_client');
 const { reportNodeHealth, checkTunnel, HEARTBEAT_LOOP_MS } = require('../lib/_node_health');
+const { beat } = require('../lib/_worker_heartbeat');
 const { encrypt, decrypt, extractCredentialsFromUrl, stripCredentialsFromUrl } = require('../lib/_crypto');
 const { buildClaimTaskSql, canClaimTasks } = require('../lib/_task_queue_sql');
 const { assertSafeTarget } = require('../lib/_network_security');
@@ -704,6 +705,7 @@ async function healthTick() {
   const now = Date.now();
   if (now - lastHealthAt < HEARTBEAT_LOOP_MS) return;
   lastHealthAt = now;
+  beat('camera-setup-agent', { status: 'running' });
   const h = await reportNodeHealth(pool, MEDIA_NODE_ID);
   if (h) logger.info('health.report', { mediamtx: h.mediamtx_online, tunnel: h.tunnel_online });
 }
@@ -733,11 +735,13 @@ async function main() {
   setInterval(tick, POLL_INTERVAL_MS);
 }
 
-main().catch((err) => {
-  console.error('[camera-setup] Fatal error, exiting:', err);
-  Sentry.captureException(err);
-  process.exit(1);
-});
+if (require.main === module) {
+  main().catch((err) => {
+    console.error('[camera-setup] Fatal error, exiting:', err);
+    Sentry.captureException(err);
+    process.exit(1);
+  });
+}
 
 process.on('SIGTERM', async () => {
   logger.info('worker.sigterm');
