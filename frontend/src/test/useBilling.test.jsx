@@ -179,4 +179,91 @@ describe('useBilling', () => {
       expect(formatted.features[0]).toBe('Unlimited cameras / locations');
     });
   });
+
+  describe('Stripe guard', () => {
+    it('startCheckout blocks card checkout when Stripe key is missing', async () => {
+      vi.resetModules();
+      const original = process.env.VITE_STRIPE_PUBLISHABLE_KEY;
+      process.env.VITE_STRIPE_PUBLISHABLE_KEY = '';
+
+      try {
+        vi.mock('../services/api', () => ({
+          default: { post: vi.fn(), get: vi.fn() },
+        }));
+        vi.mock('../services/billing', () => ({
+          fetchSubscriptionState: vi.fn(),
+        }));
+        vi.mock('../services/payment-helpers', () => ({
+          loadPayPalSdk: vi.fn(),
+          loadStripeSdk: vi.fn(),
+        }));
+
+        const { useBilling } = await import('../hooks/useBilling');
+        const { result } = renderHook(() => useBilling());
+
+        act(() => {
+          result.current.setEmergencyDistrict('Downtown');
+          result.current.setEmergencyContacts({
+            policeStation: '110',
+            fireService: '112',
+            ambulance: '194',
+            localCommand: 'HQ-7',
+          });
+          result.current.setPaymentMethod('card');
+        });
+
+        act(() => {
+          result.current.startCheckout();
+        });
+
+        expect(result.current.checkoutStatus).toMatch(/Stripe publishable key is missing/);
+        expect(result.current.paymentStep).toBe('details');
+      } finally {
+        process.env.VITE_STRIPE_PUBLISHABLE_KEY = original;
+      }
+    });
+
+    it('does not call /payments/card/intent when Stripe key is missing in checkout', async () => {
+      vi.resetModules();
+      const original = process.env.VITE_STRIPE_PUBLISHABLE_KEY;
+      process.env.VITE_STRIPE_PUBLISHABLE_KEY = '';
+
+      try {
+        vi.mock('../services/api', () => ({
+          default: { post: vi.fn(), get: vi.fn() },
+        }));
+        vi.mock('../services/billing', () => ({
+          fetchSubscriptionState: vi.fn(),
+        }));
+        vi.mock('../services/payment-helpers', () => ({
+          loadPayPalSdk: vi.fn(),
+          loadStripeSdk: vi.fn(),
+        }));
+
+        const { useBilling } = await import('../hooks/useBilling');
+        const api = (await import('../services/api')).default;
+        const { result } = renderHook(() => useBilling());
+
+        act(() => {
+          result.current.setEmergencyDistrict('Downtown');
+          result.current.setEmergencyContacts({
+            policeStation: '110',
+            fireService: '112',
+            ambulance: '194',
+            localCommand: 'HQ-7',
+          });
+        });
+
+        act(() => {
+          result.current.startCheckout();
+          result.current.setPaymentMethod('card');
+        });
+
+        expect(api.post).not.toHaveBeenCalledWith('/payments/card/intent', expect.anything());
+        expect(result.current.cardMountError).toMatch(/Stripe publishable key is missing/);
+      } finally {
+        process.env.VITE_STRIPE_PUBLISHABLE_KEY = original;
+      }
+    });
+  });
 });

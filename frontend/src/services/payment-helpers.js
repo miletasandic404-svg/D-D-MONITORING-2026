@@ -23,8 +23,11 @@ export function loadPayPalSdk(clientId, currency = 'USD') {
         return;
       }
 
+      const env = String(import.meta.env.VITE_PAYPAL_ENVIRONMENT || 'live').toLowerCase();
+      const host = env === 'sandbox' ? 'www.sandbox.paypal.com' : 'www.paypal.com';
+
       const script = document.createElement('script');
-      script.src = `https://www.paypal.com/sdk/js?client-id=${encodeURIComponent(clientId)}&currency=${encodeURIComponent(currency)}&intent=capture&components=buttons`;
+      script.src = `https://${host}/sdk/js?client-id=${encodeURIComponent(clientId)}&currency=${encodeURIComponent(currency)}&intent=capture&components=buttons`;
       script.async = true;
       script.defer = true;
       script.dataset.paypalSdk = 'true';

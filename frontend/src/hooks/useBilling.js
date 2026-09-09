@@ -273,6 +273,11 @@ export function useBilling({ addAuditEntry } = {}) {
       return undefined;
     }
 
+    if (!stripePublishableKey) {
+      setCardMountError('Stripe publishable key is missing in VITE_STRIPE_PUBLISHABLE_KEY.');
+      return undefined;
+    }
+
     let cancelled = false;
     let paymentElement = null;
 
