@@ -177,10 +177,14 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
       sourceRef.current.connect(processorRef.current);
       processorRef.current.connect(audioContextRef.current.destination);
 
-      await fetch(
+      const startRes = await fetch(
         `${audioApiBaseUrl}/api/audio/${cameraId}/start?token=${encodeURIComponent(streamToken)}`,
         { method: 'POST', headers: { 'Content-Type': 'application/json' } }
       );
+      if (!startRes.ok) {
+        const errBody = await startRes.json().catch(() => ({ error: 'Start failed' }));
+        throw new Error(errBody.error || `Start failed: ${startRes.status}`);
+      }
       setSpeaking(true);
       setSessionActive(true);
     } catch (err) {
