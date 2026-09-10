@@ -687,7 +687,11 @@ export default function Dashboard() {
       // does not need to buffer.
       const pipeline = createMicPipeline({
         onFrame: (base64Pcm) => {
-          sendFrame({ id: camId }, token, base64Pcm).catch(() => {});
+          sendFrame({ id: camId }, token, base64Pcm).catch((err) => {
+            if (err.status === 400 || err.status === 401 || err.status === 410) {
+              finishWith('error', err.message || 'Talkdown session ended');
+            }
+          });
         },
         onError: (err) => {
           // Don't tear down on a single bad frame; log and keep going.

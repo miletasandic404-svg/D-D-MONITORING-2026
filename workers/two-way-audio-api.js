@@ -376,12 +376,18 @@ const server = http.createServer(async (req, res) => {
 
     const existing = talkSessions.get(cameraId);
     if (existing) {
-      existing.lastActivity = Date.now();
-      return jsonResponse(res, 200, {
-        success: true,
-        session_id: existing.sessionId,
-        resumed: true,
-      });
+      if (Date.now() - existing.createdAt > MAX_SESSION_DURATION_MS) {
+        try { existing.adapter.stopTalk(); } catch (_) {}
+        try { existing.adapter.close(); } catch (_) {}
+        talkSessions.delete(cameraId);
+      } else {
+        existing.lastActivity = Date.now();
+        return jsonResponse(res, 200, {
+          success: true,
+          session_id: existing.sessionId,
+          resumed: true,
+        });
+      }
     }
 
     const camera = await getCamera(cameraId);
