@@ -93,6 +93,14 @@ start "DND-person-detection" /min cmd /c "cd /d %PROJECT_ROOT% && call workers\w
 echo [start] Pokrecem xiongmai-stream-worker (DVRIP kamere)...
 start "DND-xiongmai-stream" /min cmd /c "cd /d %PROJECT_ROOT% && call workers\worker-supervisor.bat xiongmai ""node workers\xiongmai-stream-worker.js"""
 
+REM ---- Recording worker (event-triggered clips via ffmpeg) ----
+REM Desktop Node serves cameras on the local LAN (192.168.x.x), so
+REM ALLOW_PRIVATE_NETWORK=true is required for ffmpeg to reach them.
+REM Also requires ffmpeg on PATH and STORAGE_* env vars (from .env).
+set ALLOW_PRIVATE_NETWORK=true
+echo [start] Pokrecem recording-worker...
+start "DND-recording" /min cmd /c "cd /d %PROJECT_ROOT% && call workers\worker-supervisor.bat recording ""node workers\recording-worker.js"""
+
 REM ---- Two-Way Audio API (lokalni, OPTalk ka DVRIP kamerama) ----
 REM Sluša na TWO_WAY_AUDIO_PORT (default 8890). Frontend ga zove
 REM preko VITE_AUDIO_API_BASE_URL kroz Cloudflare Tunnel.
@@ -104,7 +112,7 @@ echo [start] Pokrecem two-way-audio-api (port %TWO_WAY_AUDIO_PORT%)...
 start "DND-audio-api" /min cmd /c "cd /d %PROJECT_ROOT% && call workers\worker-supervisor.bat audio-api ""node workers\two-way-audio-api.js"""
 
 echo.
-echo [start] SVE POKRENUTO. Prozori: DND-MediaMTX, DND-camera-sync, DND-heartbeat, DND-camera-setup, DND-person-detection, DND-xiongmai-stream, DND-audio-api.
+echo [start] SVE POKRENUTO. Prozori: DND-MediaMTX, DND-camera-sync, DND-heartbeat, DND-camera-setup, DND-person-detection, DND-recording, DND-xiongmai-stream, DND-audio-api.
 echo [start] Logove gledaj u svakom prozoru posebno.
 echo [start] Provera: curl http://127.0.0.1:9997/v3/config/global/get
 echo [start] Audio API provera: curl http://127.0.0.1:%TWO_WAY_AUDIO_PORT%/api/audio/test/capabilities

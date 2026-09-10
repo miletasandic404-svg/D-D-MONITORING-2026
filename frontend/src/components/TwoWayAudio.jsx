@@ -41,6 +41,7 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
   const sendTimerRef = useRef(null);
   const resampleStateRef = useRef(null);
   const listeningRef = useRef(false);
+  const speakingRef = useRef(false);
 
   const caps = capabilities || { supported: false, reason: 'not loaded' };
 
@@ -75,6 +76,7 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
   // ── Send a PCM frame to the backend ─────────────────────────────────
   async function sendAudioFrame(pcmFloat32) {
     if (!audioApiBaseUrl || !streamToken || !cameraId) return;
+    if (!speakingRef.current) return;
 
     // Convert Float32 [-1, 1] → Int16
     const int16 = new Int16Array(pcmFloat32.length);
@@ -110,9 +112,11 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
 
   // ── Cleanup audio pipeline ─────────────────────────────────────────
   const cleanupAudio = () => {
+    speakingRef.current = false;
     if (processorRef.current) {
-      processorRef.current.disconnect();
       processorRef.current.onaudioprocess = null;
+      processorRef.current.disconnect();
+      processorRef.current = null;
     }
     if (sourceRef.current) sourceRef.current.disconnect();
     if (audioContextRef.current) {
@@ -124,7 +128,6 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
     audioContextRef.current = null;
     analyserRef.current = null;
     sourceRef.current = null;
-    processorRef.current = null;
     micStreamRef.current = null;
     resampleStateRef.current = null;
   };
@@ -132,6 +135,7 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
   // ── Start speaking (push-to-talk) ───────────────────────────────────
   const startSpeaking = async () => {
     if (!listeningRef.current) return;
+    if (speakingRef.current) return;
 
     try {
       setError(null);
@@ -156,7 +160,7 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
       processorRef.current = audioContextRef.current.createScriptProcessor(bufferSize, 1, 1);
 
       processorRef.current.onaudioprocess = (e) => {
-        if (!speaking) return;
+        if (!speakingRef.current || !processorRef.current) return;
         const input = e.inputBuffer.getChannelData(0);
 
         if (inputRate === SAMPLE_RATE) {
@@ -185,6 +189,7 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
         const errBody = await startRes.json().catch(() => ({ error: 'Start failed' }));
         throw new Error(errBody.error || `Start failed: ${startRes.status}`);
       }
+      speakingRef.current = true;
       setSpeaking(true);
       setSessionActive(true);
     } catch (err) {
@@ -194,6 +199,7 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
   };
 
   const stopSpeaking = async () => {
+    speakingRef.current = false;
     setSpeaking(false);
     try {
       await fetch(
@@ -209,6 +215,7 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
 
   // ── Stop listening ──────────────────────────────────────────────────
   const stopListening = () => {
+    speakingRef.current = false;
     listeningRef.current = false;
     cleanupAudio();
     setListening(false);
