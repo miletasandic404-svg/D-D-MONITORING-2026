@@ -37,11 +37,13 @@ describe('lib/auth.js — createUser field mapping', () => {
       'signUpEmail body must NOT use organization_id (Better Auth has input: false)');
   });
 
-  test('createUser uses module-level context for organizationId', () => {
-    assert.match(authSource, /_createUserContext/,
-      'createUser should use _createUserContext for passing organizationId to databaseHooks');
-    assert.match(authSource, /_createUserContext\.organizationId = organizationId/,
-      'createUser should set organizationId in context');
+  test('createUser passes organizationId via request-local context (not module-level state)', () => {
+    assert.doesNotMatch(authSource, /_createUserContext/,
+      'createUser should NOT use _createUserContext (removed race condition)');
+    assert.match(authSource, /organizationId,/,
+      'createUser should pass organizationId as a request-local property to signUpEmail');
+    assert.match(authSource, /status: 'invited'/,
+      'createUser should pass status as a request-local property to signUpEmail');
   });
 
   test('createUser signUpEmail body uses user_type as key', () => {
@@ -88,8 +90,8 @@ describe('lib/auth.js — createUser field mapping', () => {
       'createUser signature should retain camelCase params');
   });
 
-  test('databaseHooks.user.create.before also uses snake_case', () => {
-    const hookMatch = authSource.match(/before:\s*async\s*\([^)]+\)\s*=>\s*\{[^]*?return\s*\{[^]*?data:\s*\{([^}]+)\}/);
+  test('databaseHooks.user.create.before reads organization_id from request context', () => {
+    const hookMatch = authSource.match(/before:\s*async\s*\([^)]+\)\s*=>\s*\{[\s\S]*?return\s*\{[\s\S]*?data:\s*\{([^}]+)\}/);
     assert.ok(hookMatch, 'Should find databaseHooks before hook');
     const hookData = hookMatch[1];
 
@@ -97,6 +99,13 @@ describe('lib/auth.js — createUser field mapping', () => {
       'databaseHooks should use organization_id');
     assert.match(hookData, /user_type/,
       'databaseHooks should use user_type');
+    // The hook should accept a context parameter and read organizationId from it
+    const hookSignature = authSource.match(/before:\s*async\s*\(([^)]+)\)/);
+    assert.ok(hookSignature, 'Should find databaseHooks before hook signature');
+    assert.match(hookSignature[1], /context/,
+      'databaseHooks before hook should accept context as second parameter');
+    assert.match(authSource, /context\?\.organizationId/,
+      'databaseHooks should read organizationId from context');
   });
 
   test('Add Operator flow integrity: api/users.js calls createUser correctly', () => {

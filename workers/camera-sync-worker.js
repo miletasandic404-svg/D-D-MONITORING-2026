@@ -20,9 +20,13 @@
 const { Pool } = require('pg');
 const { addOrUpdateCameraPath, deleteCameraPath, listConfiguredPaths } = require('../lib/_mediamtx_client');
 const { decrypt } = require('../lib/_crypto');
+const { beat } = require('../lib/_worker_heartbeat');
 const L = require('../lib/_logger');
 const Sentry = require('@sentry/node');
 const { initSentry } = require('../lib/_sentry');
+
+const WORKER_HEARTBEAT_INTERVAL_MS = parseInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS || '15000', 10);
+let heartbeatTimer = null;
 
 const logger = L.makeLogger('camera-sync');
 
@@ -274,6 +278,15 @@ async function runFullSync() {
 async function main() {
   logger.info('worker.start', { interval_seconds: SYNC_INTERVAL_SECONDS, media_node_id: MEDIA_NODE_ID || null });
 
+  // Heartbeat so the media-node health panel (via reportNodeHealth ->
+  // getWorkerStatus) knows this worker is alive. Matches the 15s cadence used
+  // by the other media-node workers. Emitted before the first sync so a slow
+  // initial resync doesn't immediately mark the worker stale.
+  beat('camera-sync-worker', { status: 'running' });
+  heartbeatTimer = setInterval(() => {
+    beat('camera-sync-worker', { status: 'running' });
+  }, WORKER_HEARTBEAT_INTERVAL_MS);
+
   // Puni resync ODMAH pri startu -- ovo je "recovery" korak (D/E).
   await runFullSync();
 
@@ -313,6 +326,8 @@ module.exports = { fetchCamerasFromDb, runFullSync, main };
 
 process.on('SIGTERM', async () => {
   logger.info('worker.sigterm');
+  beat('camera-sync-worker', { status: 'stopped' });
+  if (heartbeatTimer) clearInterval(heartbeatTimer);
   await pool.end();
   process.exit(0);
 });

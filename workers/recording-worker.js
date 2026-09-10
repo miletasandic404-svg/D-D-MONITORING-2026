@@ -55,12 +55,14 @@ async function recordSegment(rtspUrl, outputPath, durationSeconds) {
   // only public hosts may be reached. Private/loopback/link-local/
   // metadata (169.254.169.254) addresses are rejected so an attacker-
   // controlled rtsp_url cannot probe the internal network.
-  await assertSafeTarget(rtspUrl, { allowPrivate: process.env.ALLOW_PRIVATE_NETWORK === 'true' });
+  const result = await assertSafeTarget(rtspUrl, { allowPrivate: process.env.ALLOW_PRIVATE_NETWORK === 'true' });
+  const safeUrl = new URL(rtspUrl);
+  safeUrl.hostname = result.addresses[0];
   return new Promise((resolve, reject) => {
     const ffmpeg = spawn('ffmpeg', [
       '-y',
       '-rtsp_transport', 'tcp',
-      '-i', rtspUrl,
+      '-i', safeUrl.toString(),
       '-t', String(durationSeconds),
       '-c', 'copy',
       outputPath,

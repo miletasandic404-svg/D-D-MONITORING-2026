@@ -26,6 +26,13 @@ function resetFakes() {
 
 db.queryAsOrg = async (orgId, text, params) => {
   queryCalls.push({ orgId, text, params });
+  if (text.includes('SELECT status FROM organizations')) {
+    if (dbScript) {
+      const result = dbScript(text, params);
+      if (result && result.rows.length > 0) return result;
+    }
+    return { rows: [{ status: 'active' }], rowCount: 1 };
+  }
   if (dbScript) return dbScript(text, params);
   return { rows: [], rowCount: 0 };
 };
@@ -110,7 +117,12 @@ describe('api/users — DELETE handler', () => {
   });
 
   test('DELETE /api/users is organization-scoped (uses queryAsOrg with org id)', async () => {
-    dbScript = () => ({ rows: [{ id: 'u1', email: 'a@b.com' }], rowCount: 1 });
+    dbScript = (text) => {
+      if (text.includes('SELECT status FROM organizations')) {
+        return { rows: [{ status: 'active' }], rowCount: 1 };
+      }
+      return { rows: [{ id: 'u1', email: 'a@b.com' }], rowCount: 1 };
+    };
 
     const req = makeReq({ method: 'DELETE', query: { id: 'u1' } });
     const res = makeRes();
@@ -165,7 +177,12 @@ describe('api/users — DELETE handler', () => {
   });
 
   test('DELETE /api/users handles database errors (500)', async () => {
-    dbScript = () => { throw new Error('DB connection lost'); };
+    dbScript = (text) => {
+      if (text.includes('SELECT status FROM organizations')) {
+        return { rows: [{ status: 'active' }], rowCount: 1 };
+      }
+      throw new Error('DB connection lost');
+    };
 
     const req = makeReq({ method: 'DELETE', query: { id: 'u1' } });
     const res = makeRes();
@@ -417,5 +434,90 @@ describe('api/users — Add Operator flow (POST)', () => {
     await handler(req, res);
 
     assert.equal(res.statusCode, 400);
+  });
+});
+
+describe('api/users — organization active guard', () => {
+  beforeEach(() => {
+    resetFakes();
+  });
+
+  test('POST /api/users returns 403 when org is not active', async () => {
+    dbScript = (text) => {
+      if (text.includes('SELECT status FROM organizations')) {
+        return { rows: [{ status: 'inactive' }], rowCount: 1 };
+      }
+      if (text.includes('SELECT id FROM users WHERE email')) {
+        return { rows: [], rowCount: 0 };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+
+    const req = makeReq({
+      method: 'POST',
+      body: { email: 'new@example.com', user_type: 'operator' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /not active/i);
+  });
+
+  test('DELETE /api/users returns 403 when org is not active', async () => {
+    dbScript = (text) => {
+      if (text.includes('SELECT status FROM organizations')) {
+        return { rows: [{ status: 'suspended' }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+
+    const req = makeReq({ method: 'DELETE', query: { id: 'user-1' } });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /not active/i);
+  });
+
+  test('PATCH /api/users returns 403 when org is not active', async () => {
+    dbScript = (text) => {
+      if (text.includes('SELECT status FROM organizations')) {
+        return { rows: [{ status: 'inactive' }], rowCount: 1 };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+
+    const req = makeReq({
+      method: 'PATCH',
+      body: { id: 'user-1', status: 'active' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /not active/i);
+  });
+
+  test('POST /api/users proceeds when org is active', async () => {
+    dbScript = (text) => {
+      if (text.includes('SELECT status FROM organizations')) {
+        return { rows: [{ status: 'active' }], rowCount: 1 };
+      }
+      if (text.includes('SELECT id FROM users WHERE email')) {
+        return { rows: [], rowCount: 0 };
+      }
+      return { rows: [], rowCount: 0 };
+    };
+
+    const req = makeReq({
+      method: 'POST',
+      body: { email: 'new@example.com', user_type: 'operator' },
+    });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(mockedCreateUserCalls.length, 1);
   });
 });

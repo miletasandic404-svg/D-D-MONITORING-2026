@@ -148,6 +148,7 @@ dvripModule.XiongmaiDvripAdapter = class FakeXiongmaiDvripAdapter {
   }
   close() {
     this.isAuthenticated = false;
+    this.stopKeepalive();
     if (this.socket) {
       this.socket.destroy();
       this.socket = null;

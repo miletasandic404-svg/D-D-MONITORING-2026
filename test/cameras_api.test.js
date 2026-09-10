@@ -16,7 +16,7 @@
  * MediaMTX, or Redis (same technique as test/camera_cloud.test.js).
  */
 
-const { test, describe, beforeEach } = require('node:test');
+const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('node:assert/strict');
 
 // ── fake db ──────────────────────────────────────────────────────────────
@@ -25,6 +25,7 @@ let queryCalls = [];
 let platformAdminCalls = [];
 let dbScript = null; // (text, params) => { rows, rowCount }
 let mtxAddCalls = [];
+let deleteCallOrder = []; // 'storage:<key>' and 'db:delete-camera' in call order
 
 let orgStatusMock = { status: 'active', camera_limit: 5 };
 let cameraCountMock = 0;
@@ -33,8 +34,10 @@ function resetFakes() {
   queryCalls = [];
   platformAdminCalls = [];
   dbScript = null;
-  mtxAddCalls = [];
-  authResponse = { userId: 'user-1', organizationId: 'org-1', role: 'org_admin' };
+   mtxAddCalls = [];
+   deleteCallOrder = [];
+   mtxDeleteCalls = [];
+  authResponse = { userId: 'user-1', organizationId: 'org-1', role: 'org_admin', userType: 'org_admin' };
   orgStatusMock = { status: 'active', camera_limit: 5 };
   cameraCountMock = 0;
 }
@@ -47,8 +50,12 @@ db.queryAsOrg = async (orgId, text, params) => {
   if (text.includes('AS total')) {
     return { rows: [{ total: cameraCountMock }], rowCount: 1 };
   }
-  if (dbScript) return dbScript(text, params);
-  return { rows: [], rowCount: 0 };
+   if (text.startsWith('DELETE FROM cameras')) {
+     deleteCallOrder.push('db:delete-camera');
+     return { rows: [], rowCount: 1 };
+   }
+   if (dbScript) return dbScript(text, params);
+   return { rows: [], rowCount: 0 };
 };
 
 db.queryAsPlatformAdmin = async (text, params) => {
@@ -84,11 +91,15 @@ mediaNodesModule.pickMediaNodeForCamera = async () => ({
 
 // ── fake MediaMTX client (no network) ────────────────────────────────────
 const mediamtxModule = require('../lib/_mediamtx_client');
+let mtxDeleteCalls = [];
 mediamtxModule.addOrUpdateCameraPath = async (cameraId, rtspUrl) => {
   mtxAddCalls.push({ cameraId, rtspUrl });
   return true;
 };
-mediamtxModule.deleteCameraPath = async () => true;
+mediamtxModule.deleteCameraPath = async (cameraId) => {
+  mtxDeleteCalls.push(cameraId);
+  return true;
+};
 
 // ── load module under test AFTER patching its dependencies ───────────────
 const handler = require('../api/cameras');
@@ -1071,6 +1082,184 @@ describe('api/cameras — camera location flow', () => {
       await handler(req, res);
 
       assert.equal(res.statusCode, 401);
+    });
+  });
+
+  // ── DELETE /api/cameras: storage cleanup before cascade ──────────────────
+  describe('DELETE /api/cameras — storage cleanup before cascade', () => {
+    const storage = require('../lib/_storage');
+    let deletedKeys;
+
+    const STORAGE_BASE = 'https://storage.example';
+
+    beforeEach(() => {
+      resetFakes();
+      deletedKeys = [];
+      storage.getBackend = () => 'local';
+      storage.isConfigured = () => true;
+      storage.keyFromPublicUrl = (url) => {
+        if (!url) return null;
+        if (url.startsWith('local://')) return url.slice('local://'.length);
+        if (url.startsWith(STORAGE_BASE)) return url.slice(STORAGE_BASE.length + 1);
+        return null;
+      };
+      storage.deleteObject = async (key) => {
+        deletedKeys.push(key);
+        deleteCallOrder.push(`storage:${key}`);
+        return true;
+      };
+    });
+
+    test('A: camera with one recording + one snapshot -> both storage objects deleted, camera deleted afterward', async () => {
+      const recKey = `recordings/org-1/CAM-01/rec-a.mp4`;
+      const snapKey = `snapshots/org-1/CAM-01/snap-a.jpg`;
+      dbScript = (text) => {
+        if (text.includes('FROM recordings WHERE camera_id')) {
+          return { rows: [{ id: 'rec-a', storage_url: `${STORAGE_BASE}/${recKey}` }], rowCount: 1 };
+        }
+        if (text.includes('FROM snapshots WHERE camera_id')) {
+          return { rows: [{ id: 'snap-a', storage_url: `local://${snapKey}` }], rowCount: 1 };
+        }
+        if (text.startsWith('DELETE FROM cameras')) {
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      };
+      const req = makeReq({ method: 'DELETE', query: { id: 'CAM-01' } });
+      const res = makeRes();
+      await handler(req, res);
+
+      assert.equal(res.statusCode, 200);
+      assert.equal(res.body.success, true);
+      assert.ok(deletedKeys.includes(recKey), 'should delete recording storage object');
+      assert.ok(deletedKeys.includes(snapKey), 'should delete snapshot storage object');
+      const storageIdx = deleteCallOrder.findIndex((v) => v === `storage:${recKey}`);
+      const cameraIdx = deleteCallOrder.indexOf('db:delete-camera');
+      assert.ok(cameraIdx !== -1, 'camera DB delete should run');
+      assert.ok(storageIdx !== -1, 'recording storage delete should run');
+      assert.ok(cameraIdx > storageIdx, 'storage deletion must precede camera DB delete (recording)');
+      const snapIdx = deleteCallOrder.findIndex((v) => v === `storage:${snapKey}`);
+      assert.ok(snapIdx !== -1 && cameraIdx > snapIdx, 'snapshot storage deletion must precede camera DB delete');
+    });
+
+    test('B: recording with NULL storage_url -> no storage deletion, camera can still be deleted', async () => {
+      dbScript = (text) => {
+        if (text.includes('FROM recordings WHERE camera_id')) {
+          return { rows: [{ id: 'rec-null', storage_url: null }], rowCount: 1 };
+        }
+        if (text.startsWith('DELETE FROM cameras')) {
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      };
+      const req = makeReq({ method: 'DELETE', query: { id: 'CAM-01' } });
+      const res = makeRes();
+      await handler(req, res);
+
+      assert.equal(res.statusCode, 200);
+      assert.equal(deletedKeys.length, 0, 'should NOT attempt storage deletion for NULL storage_url');
+      assert.ok(deleteCallOrder.includes('db:delete-camera'), 'camera should still be deleted');
+    });
+
+    test('C: snapshot with NULL/unrecognized storage_url -> no storage deletion, camera can still be deleted', async () => {
+      dbScript = (text) => {
+        if (text.includes('FROM snapshots WHERE camera_id')) {
+          return { rows: [{ id: 'snap-null', storage_url: null }], rowCount: 1 };
+        }
+        if (text.startsWith('DELETE FROM cameras')) {
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      };
+      const req = makeReq({ method: 'DELETE', query: { id: 'CAM-01' } });
+      const res = makeRes();
+      await handler(req, res);
+
+      assert.equal(res.statusCode, 200);
+      assert.equal(deletedKeys.length, 0, 'should NOT attempt storage deletion for null snapshot storage_url');
+      assert.ok(deleteCallOrder.includes('db:delete-camera'), 'camera should still be deleted');
+    });
+
+    test('D: storage deletion failure -> camera DB DELETE is NOT executed', async () => {
+      const recKey = `recordings/org-1/CAM-01/rec-fail.mp4`;
+      storage.deleteObject = async (key) => {
+        deletedKeys.push(key);
+        deleteCallOrder.push(`storage:${key}`);
+        throw new Error('storage delete failure');
+      };
+      dbScript = (text) => {
+        if (text.includes('FROM recordings WHERE camera_id')) {
+          return { rows: [{ id: 'rec-fail', storage_url: `${STORAGE_BASE}/${recKey}` }], rowCount: 1 };
+        }
+        if (text.startsWith('DELETE FROM cameras')) {
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      };
+      const req = makeReq({ method: 'DELETE', query: { id: 'CAM-01' } });
+      const res = makeRes();
+      await handler(req, res);
+
+      assert.equal(res.statusCode, 500);
+      assert.match(res.body.error, /Failed to clean up camera storage/);
+      assert.ok(!deleteCallOrder.includes('db:delete-camera'), 'camera DB delete must NOT run on storage failure');
+    });
+
+    test('E: organization isolation -> other org rows never selected/deleted', async () => {
+      authResponse = { userId: 'user-1', organizationId: 'org-1', userType: 'org_admin' };
+      let otherOrgSelected = false;
+      const originalQueryAsOrg = db.queryAsOrg;
+      db.queryAsOrg = async (orgId, text, params) => {
+        if ((text.includes('FROM recordings WHERE camera_id') || text.includes('FROM snapshots WHERE camera_id'))
+            && params && params.indexOf('org-2') !== -1) {
+          otherOrgSelected = true;
+        }
+        if ((text.includes('FROM recordings WHERE camera_id') || text.includes('FROM snapshots WHERE camera_id'))
+            && params && params.indexOf('org-1') !== -1) {
+          return { rows: [{ id: 'rec-1', storage_url: `${STORAGE_BASE}/recordings/org-1/CAM-01/rec-1.mp4` }], rowCount: 1 };
+        }
+        if (text.startsWith('DELETE FROM cameras')) {
+          deleteCallOrder.push('db:delete-camera');
+          return { rows: [], rowCount: 1 };
+        }
+        return { rows: [], rowCount: 0 };
+      };
+
+      try {
+        const req = makeReq({ method: 'DELETE', query: { id: 'CAM-01' } });
+        const res = makeRes();
+        await handler(req, res);
+
+        assert.equal(res.statusCode, 200);
+        assert.equal(otherOrgSelected, false, 'should never select another org rows');
+      } finally {
+        db.queryAsOrg = originalQueryAsOrg;
+      }
+    });
+
+    test('F: existing MediaMTX deleteCameraPath behavior still fires', async () => {
+      const req = makeReq({ method: 'DELETE', query: { id: 'CAM-01' } });
+      const res = makeRes();
+      await handler(req, res);
+
+      assert.equal(res.statusCode, 200);
+      assert.ok(mtxDeleteCalls.includes('CAM-01'), 'deleteCameraPath should still be called for the deleted camera');
+      assert.ok(deleteCallOrder.includes('db:delete-camera'), 'camera DB delete should run');
+      const storageIdx = deleteCallOrder.findIndex((v) => v === `storage:`);
+      const mtxIdx = deleteCallOrder.length;
+      const cameraIdx = deleteCallOrder.indexOf('db:delete-camera');
+      assert.notEqual(cameraIdx, -1, 'camera DB delete should run');
+    });
+
+    test('G: camera with no recordings/snapshots -> existing delete behavior unchanged', async () => {
+      dbScript = () => ({ rows: [], rowCount: 0 });
+      const req = makeReq({ method: 'DELETE', query: { id: 'CAM-01' } });
+      const res = makeRes();
+      await handler(req, res);
+
+      assert.equal(res.statusCode, 200);
+      assert.deepEqual(deleteCallOrder, ['db:delete-camera'], 'only the camera DB delete should occur');
+      assert.equal(deletedKeys.length, 0, 'no storage deletion for a camera without media');
     });
   });
 });

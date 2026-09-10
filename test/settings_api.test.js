@@ -27,6 +27,13 @@ function resetFakes() {
 
 db.queryAsOrg = async (orgId, text, params) => {
   queryCalls.push({ orgId, text, params });
+  if (text.includes('SELECT status FROM organizations')) {
+    if (dbScript) {
+      const result = dbScript(text, params);
+      if (result && result.rows.length > 0) return result;
+    }
+    return { rows: [{ status: 'active' }], rowCount: 1 };
+  }
   if (dbScript) return dbScript(text, params);
   return { rows: [], rowCount: 0 };
 };

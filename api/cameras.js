@@ -10,25 +10,56 @@ const { rateLimit } = require("../lib/_rate_limit");
 const { makeLogger } = require("../lib/_logger");
 const Sentry = require("@sentry/node");
 const { initSentry } = require("../lib/_sentry");
+const storage = require("../lib/_storage");
+const requireOrgActive = require("../lib/_require_org_active");
 
 const logger = makeLogger('api-cameras');
 
 // Initialize Sentry for error tracking
 initSentry();
 
-async function requireOrgActive(auth, res) {
-  const orgResult = await db.queryAsOrg(
-    auth.organizationId,
-    'SELECT status FROM organizations WHERE id = $1',
-    [auth.organizationId],
+// ─── Camera storage cleanup helper ──────────────────────────────────────
+// deletes the corresponding storage objects. Storage_url values that are
+// NULL or unrecognizable are skipped (no storage deletion attempted),
+// matching the retention-job semantics. A failure to delete ANY
+// recognizable object aborts the operation so the caller can avoid the
+// camera DELETE.
+async function cleanupCameraStorage(cameraId, organizationId) {
+  const errors = [];
+
+  const recordingsResult = await db.queryAsOrg(
+    organizationId,
+    "SELECT id, storage_url FROM recordings WHERE camera_id = $1 AND organization_id = $2",
+    [cameraId, organizationId],
   );
-  if (orgResult.rows.length === 0) {
-    return sendError(res, 403, 'Organization not found');
+  for (const row of recordingsResult.rows) {
+    if (!row.storage_url) continue;
+    const key = storage.keyFromPublicUrl(row.storage_url);
+    if (!key) continue;
+    try {
+      await storage.deleteObject(key);
+    } catch (err) {
+      errors.push(new Error(`recording ${row.id}: ${err.message}`));
+    }
   }
-  if (orgResult.rows[0].status !== 'active') {
-    return sendError(res, 403, 'Organization is not active');
+
+  const snapshotsResult = await db.queryAsOrg(
+    organizationId,
+    "SELECT id, storage_url FROM snapshots WHERE camera_id = $1 AND organization_id = $2",
+    [cameraId, organizationId],
+  );
+  for (const row of snapshotsResult.rows) {
+    if (!row.storage_url) continue;
+    const key = storage.keyFromPublicUrl(row.storage_url);
+    if (!key) continue;
+    try {
+      await storage.deleteObject(key);
+    } catch (err) {
+      errors.push(new Error(`snapshot ${row.id}: ${err.message}`));
+    }
   }
-  return null;
+
+  return errors;
 }
 
 // ─── Zod schema ──────────────────────────────────────────────────────────
@@ -591,6 +622,25 @@ module.exports = async (req, res) => {
     try {
       const { id } = req.query;
       if (!id) return sendError(res, 400, "id is required");
+
+      // Pre-delete: remove this camera's recording/snapshot storage objects
+      // BEFORE the DB row is cascade-deleted. The FK cascade
+      // (db/migrations/004_snapshots_recordings.sql) removes the
+      // recordings/snapshots rows -- and with them the only `storage_url`
+      // references -- so we must read the URLs and delete the objects first,
+      // or they become unreferenced orphans on disk/S3.
+      // All selects are org-scoped (queryAsOrg + organization_id in WHERE)
+      // so another org's rows are never touched.
+      const storageErrors = await cleanupCameraStorage(id, auth.organizationId);
+      if (storageErrors.length > 0) {
+        logger.error('Storage cleanup failed; aborting camera delete', {
+          camera_id: id,
+          organization_id: auth.organizationId,
+          errors: storageErrors,
+        });
+        Sentry.captureException(new Error(`Storage cleanup failed for camera ${id}: ${storageErrors.map((e) => e.message).join('; ')}`));
+        return sendError(res, 500, "Failed to clean up camera storage; camera was not deleted");
+      }
 
       const result = await db.queryAsOrg(
         auth.organizationId,

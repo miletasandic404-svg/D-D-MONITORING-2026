@@ -31,6 +31,7 @@ const mediamtXClient = require('../lib/_mediamtx_client');
 const L = require('../lib/_logger');
 const Sentry = require('@sentry/node');
 const { initSentry } = require('../lib/_sentry');
+const { beat } = require('../lib/_worker_heartbeat');
 
 // Person detection worker (optional - only if available)
 let personDetection = null;
@@ -55,6 +56,7 @@ const DISCOVERY_INTERVAL_SECONDS = parseInt(process.env.XM_DISCOVERY_INTERVAL_SE
 const MAX_RECONNECT_ATTEMPTS = 10;
 const MAX_BACKOFF_MS = 60000;
 let FRAME_TIMEOUT_MS = parseInt(process.env.XM_FRAME_TIMEOUT_MS || '30000', 10);
+const WORKER_HEARTBEAT_INTERVAL_MS = parseInt(process.env.WORKER_HEARTBEAT_INTERVAL_MS || '15000', 10);
 
 if (!WORKER_DB_URL) {
   logger.error('worker.database_url_missing');
@@ -464,6 +466,7 @@ async function shutdown() {
     cleanupStream(cameraId, 'shutdown');
   }
 
+  beat('xiongmai-stream-worker', { status: 'stopped' });
   await pool.end();
   logger.info('worker.shutdown_complete');
   process.exit(0);
@@ -475,6 +478,11 @@ async function main() {
     discovery_interval_seconds: DISCOVERY_INTERVAL_SECONDS,
     ffmpeg_path: FFMPEG_PATH,
   });
+
+  beat('xiongmai-stream-worker', { status: 'running' });
+  const heartbeatTimer = setInterval(() => {
+    beat('xiongmai-stream-worker', { status: 'running' });
+  }, WORKER_HEARTBEAT_INTERVAL_MS);
 
   const ffmpegOk = await checkFfmpegAvailable();
   if (!ffmpegOk) {
@@ -496,11 +504,13 @@ async function main() {
 
   process.on('SIGTERM', () => {
     logger.info('worker.sigterm');
+    clearInterval(heartbeatTimer);
     shutdown().catch(() => process.exit(0));
   });
 
   process.on('SIGINT', () => {
     logger.info('worker.sigint');
+    clearInterval(heartbeatTimer);
     shutdown().catch(() => process.exit(0));
   });
 }

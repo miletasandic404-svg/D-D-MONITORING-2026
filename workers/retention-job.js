@@ -76,26 +76,32 @@ async function run() {
   let deleted = 0;
   let failed = 0;
 
-  for (const row of expired.rows) {
-    try {
-      const key = row.storage_url ? storage.keyFromPublicUrl(row.storage_url) : null;
-      if (!key) {
-        logger.warn('Skipping retention for recording with unrecognized storage URL', {
-          recording_id: row.id,
-          storage_url: row.storage_url,
-        });
-        continue;
-      }
+   for (const row of expired.rows) {
+     try {
+       const key = row.storage_url ? storage.keyFromPublicUrl(row.storage_url) : null;
+       if (!key) {
+         // No recognizable storage object to delete (NULL or unparseable
+         // storage_url). Still remove the expired DB row so stale rows
+         // do not accumulate indefinitely; only a DB deletion is performed
+         // -- no storage path is touched, preserving traversal protections.
+         logger.warn('Retention: storage URL not recognized, deleting DB row only', {
+           recording_id: row.id,
+           storage_url: row.storage_url || null,
+         });
+         await db.queryAsPlatformAdmin('DELETE FROM recordings WHERE id = $1', [row.id]);
+         deleted += 1;
+         continue;
+       }
 
-      await deleteFromStorage(key);
-      await db.queryAsPlatformAdmin('DELETE FROM recordings WHERE id = $1', [row.id]);
-      deleted += 1;
-    } catch (err) {
-      logger.error('Failed to delete recording', { recording_id: row.id, error: err.message });
-      Sentry.captureException(err);
-      failed += 1;
-    }
-  }
+       await deleteFromStorage(key);
+       await db.queryAsPlatformAdmin('DELETE FROM recordings WHERE id = $1', [row.id]);
+       deleted += 1;
+     } catch (err) {
+       logger.error('Failed to delete recording', { recording_id: row.id, error: err.message });
+       Sentry.captureException(err);
+       failed += 1;
+     }
+   }
 
   logger.info('Retention job completed', { deleted, failed, total: expired.rows.length });
   return { deleted, failed, total: expired.rows.length };

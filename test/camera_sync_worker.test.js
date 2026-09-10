@@ -24,6 +24,13 @@
 const { test, describe, beforeEach, after } = require('node:test');
 const assert = require('node:assert/strict');
 
+// ── fake _worker_heartbeat.beat (intercept calls without touching the FS) ─
+const heartbeat = require('../lib/_worker_heartbeat');
+let beatCalls = [];
+heartbeat.beat = (name, meta = {}) => {
+  beatCalls.push({ name, status: meta && meta.status });
+};
+
 // ── fake pg Pool ─────────────────────────────────────────────────────────
 const pg = require('pg');
 let queryCalls = [];
@@ -77,6 +84,7 @@ describe('workers/camera-sync-worker — fail-closed without MEDIA_NODE_ID', () 
     queryCalls = [];
     decryptCalls = 0;
     poolScript = null;
+    beatCalls = [];
     delete process.env.MEDIA_NODE_ID;
   });
 
@@ -112,6 +120,7 @@ describe('workers/camera-sync-worker — org-scoped sync with MEDIA_NODE_ID', ()
     queryCalls = [];
     decryptCalls = 0;
     poolScript = null;
+    beatCalls = [];
     process.env.MEDIA_NODE_ID = 'node-1';
   });
 
@@ -151,6 +160,7 @@ describe('workers/camera-sync-worker — JSON credential parsing', () => {
     queryCalls = [];
     decryptCalls = 0;
     poolScript = null;
+    beatCalls = [];
     process.env.MEDIA_NODE_ID = 'node-1';
   });
 
@@ -197,5 +207,64 @@ describe('workers/camera-sync-worker — JSON credential parsing', () => {
     assert.ok(result[0].rtsp_url.includes('admin'), 'RTSP URL should contain username');
     assert.ok(!result[0].rtsp_url.includes('username'), 'JSON structure should not leak into URL');
     assert.ok(!result[0].rtsp_url.includes('password'), 'JSON structure should not leak into URL');
+  });
+});
+
+describe('workers/camera-sync-worker — heartbeat', () => {
+  beforeEach(() => {
+    queryCalls = [];
+    decryptCalls = 0;
+    poolScript = null;
+    beatCalls = [];
+    process.env.MEDIA_NODE_ID = 'node-1';
+  });
+
+  test('main() emits a running heartbeat before the first sync', async () => {
+    const worker = freshRequireWorker();
+    // runFullSync runs immediately inside main(); intercept it so the sync
+    // loop doesn't set up the polling setInterval that would keep the
+    // process alive (open handle).
+    worker.runFullSync = () => Promise.resolve();
+    // Replace the sync setInterval factory so no timer is created.
+    const realSetInterval = setInterval;
+    let intervalCreated = false;
+    global.setInterval = () => {
+      intervalCreated = true;
+      return { _isMock: true };
+    };
+
+    await worker.main();
+
+    global.setInterval = realSetInterval;
+
+    const runningBeats = beatCalls.filter((b) => b.name === 'camera-sync-worker' && b.status === 'running');
+    assert.ok(runningBeats.length >= 1, 'a running heartbeat should be emitted at startup');
+    // main() should still schedule the periodic heartbeat timer.
+    assert.equal(intervalCreated, true, 'sync interval timer should be scheduled');
+  });
+
+  test('SIGTERM emits a stopped heartbeat before exit', async () => {
+    const worker = freshRequireWorker();
+    // Override process.exit to prevent the test from terminating.
+    const realExit = process.exit;
+    let exitCalled = false;
+    process.exit = () => { exitCalled = true; };
+
+    // Override pool.end to prevent real DB interaction.
+    worker; // no-op to ensure module is loaded
+    // The pool is created at module load with the mocked pg.Pool, whose
+    // end() is a no-op. SIGTERM handler calls beat then pool.end then exit.
+
+    // We can't easily invoke the process 'SIGTERM' listener directly without
+    // triggering real signals, so call it via process.emit.
+    process.emit('SIGTERM');
+
+    // Allow the async handler to flush.
+    await new Promise((r) => setTimeout(r, 50));
+
+    process.exit = realExit;
+
+    const stoppedBeats = beatCalls.filter((b) => b.name === 'camera-sync-worker' && b.status === 'stopped');
+    assert.ok(stoppedBeats.length >= 1, 'a stopped heartbeat should be emitted on SIGTERM');
   });
 });

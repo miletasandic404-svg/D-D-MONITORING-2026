@@ -1,3 +1,4 @@
+const crypto = require('crypto');
 const db = require('../db/index');
 const { requireAuth } = require('../lib/_auth');
 const { createUser } = require('../lib/auth');
@@ -9,6 +10,7 @@ const { makeLogger } = require('../lib/_logger');
 const Sentry = require('@sentry/node');
 const { initSentry } = require('../lib/_sentry');
 const auditLogsHandler = require('../lib/handlers/audit-logs');
+const requireOrgActive = require('../lib/_require_org_active');
 
 const logger = makeLogger('api-users');
 
@@ -108,6 +110,7 @@ module.exports = async (req, res) => {
     if (req.method === 'POST') {
       const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
       if (!auth) return;
+      if (await requireOrgActive(auth, res)) return;
       try {
         const { user_id, site_id } = req.body || {};
         if (!user_id || !site_id) return sendError(res, 400, 'user_id and site_id are required');
@@ -126,6 +129,7 @@ module.exports = async (req, res) => {
     if (req.method === 'PATCH') {
       const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
       if (!auth) return;
+      if (await requireOrgActive(auth, res)) return;
       try {
         const { id, active } = req.body || {};
         if (!id) return sendError(res, 400, 'id is required');
@@ -142,6 +146,7 @@ module.exports = async (req, res) => {
     if (req.method === 'DELETE') {
       const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
       if (!auth) return;
+      if (await requireOrgActive(auth, res)) return;
       try {
         const { id } = req.query;
         if (!id) return sendError(res, 400, 'id is required');
@@ -234,10 +239,18 @@ module.exports = async (req, res) => {
   if (req.method === 'POST') {
     const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
     if (!auth) return;
-
+    if (await requireOrgActive(auth, res)) return;
     try {
       const data = inviteSchema.parse(req.body || {});
       const { email, user_type } = data;
+
+      // Application-layer guard: only a platform_admin may grant the global
+      // platform_admin role. organization_id/role are tenant-scoped concerns,
+      // but platform_admin is a platform-level super-role (bypasses every org
+      // boundary), so org_admin must not be able to issue it.
+      if (user_type === 'platform_admin' && auth.userType !== 'platform_admin') {
+        return sendError(res, 403, 'Only platform_admin can grant the platform_admin role');
+      }
 
       // Check if email already exists (org-scoped)
       try {
@@ -255,11 +268,7 @@ module.exports = async (req, res) => {
       }
 
       // Generate a temporary password
-      const tempPassword = Array.from({ length: 16 }, () =>
-        'abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789!@#$%^&*'.charAt(
-          Math.floor(Math.random() * 72),
-        ),
-      ).join('');
+      const tempPassword = crypto.randomBytes(16).toString('hex');
 
       const created = await createUser({
         email,
@@ -293,9 +302,16 @@ module.exports = async (req, res) => {
   if (req.method === 'PATCH') {
     const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
     if (!auth) return;
+    if (await requireOrgActive(auth, res)) return;
 
     try {
       const data = updateSchema.parse(req.body || {});
+
+      // Application-layer guard: only platform_admin may promote to the global
+      // platform_admin role (which bypasses all org boundaries).
+      if (data.user_type === 'platform_admin' && auth.userType !== 'platform_admin') {
+        return sendError(res, 403, 'Only platform_admin can grant the platform_admin role');
+      }
 
       const updates = [];
       const params = [];
@@ -340,6 +356,7 @@ module.exports = async (req, res) => {
   if (req.method === 'DELETE') {
     const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
     if (!auth) return;
+    if (await requireOrgActive(auth, res)) return;
 
     try {
       const { id } = req.query;
@@ -403,6 +420,7 @@ async function handleSettingsPut(req, res) {
   if (userType !== 'platform_admin' && userType !== 'org_admin') {
     return sendError(res, 403, 'Insufficient permissions to modify settings');
   }
+  if (await requireOrgActive(auth, res)) return;
 
   let data;
   try {

@@ -394,11 +394,12 @@ async function runOnvif(task) {
   // SSRF guard: reject loopback / link-local / multicast / metadata even
   // on a tenant node; RFC1918 + public are allowed (LAN cameras are the
   // product's core function).
-  await assertSafeTarget(ip, { allowPrivate: true });
+  const targetResult = await assertSafeTarget(ip, { allowPrivate: true });
+  const safeIp = targetResult.addresses[0];
   const port = task.onvif_port || 80;
   logTask('onvif.discover', task, { ip, port });
   const creds = getTaskCredentials(task);
-  const cam = await discoverCamera(ip, port, creds.username, creds.password);
+  const cam = await discoverCamera(safeIp, port, creds.username, creds.password);
   if (!cam || !Array.isArray(cam.rtsp_urls) || cam.rtsp_urls.length === 0) {
     throw new Error(`No RTSP streams found on ${ip} via ONVIF (check credentials and ONVIF port)`);
   }
@@ -423,9 +424,11 @@ async function runOnvif(task) {
 
 async function runManual(task) {
   if (!task.rtsp_url) throw new Error('rtsp_url is required for manual mode');
-  await assertSafeTarget(task.rtsp_url, { allowPrivate: true });
+  const targetResult = await assertSafeTarget(task.rtsp_url, { allowPrivate: true });
+  const safe = new URL(task.rtsp_url);
+  safe.hostname = targetResult.addresses[0];
   const creds = getTaskCredentials(task);
-  const rtspUrl = embedCredentials(task.rtsp_url, creds.username, creds.password);
+  const rtspUrl = embedCredentials(safe.toString(), creds.username, creds.password);
   await verifyRtsp(rtspUrl, creds, 'Camera');
   if (!await verifyTaskOwnership(task.id)) {
     throw new Error('Task was reclaimed by another node — aborting to prevent duplicate registration');
@@ -456,6 +459,8 @@ function streamLabel(uri, index) {
 async function runProbe(task) {
   const ip = task.ip;
   if (!ip) throw new Error('Camera IP is required for probe mode');
+  const targetResult = await assertSafeTarget(ip, { allowPrivate: true });
+  const safeIp = targetResult.addresses[0];
   const port = task.onvif_port || 80;
   logTask('probe.start', task, { ip, port });
   const creds = getTaskCredentials(task);
@@ -473,28 +478,28 @@ async function runProbe(task) {
     try {
       logTask('probe.try_connector', task, { connector_id: connector.id, connector_name: connector.name });
 
-      const result = await connector.discover(ip, {
+      const connectorResult = await connector.discover(safeIp, {
         username: creds.username,
         password: creds.password,
         port: connector.id === 'onvif' ? port : undefined,
       });
 
       // Merge results
-      if (result.onvif_supported) {
+      if (connectorResult.onvif_supported) {
         onvif_supported = true;
-        manufacturer = result.manufacturer || manufacturer;
-        model = result.model || model;
-        firmware_version = result.firmware_version || firmware_version;
+        manufacturer = connectorResult.manufacturer || manufacturer;
+        model = connectorResult.model || model;
+        firmware_version = connectorResult.firmware_version || firmware_version;
       }
 
-      if (result.dvrip_supported) {
+      if (connectorResult.dvrip_supported) {
         dvrip_supported = true;
-        manufacturer = result.manufacturer || manufacturer;
-        model = result.model || model;
+        manufacturer = connectorResult.manufacturer || manufacturer;
+        model = connectorResult.model || model;
       }
 
-      if (result.streams && result.streams.length > 0) {
-        streams = result.streams;
+      if (connectorResult.streams && connectorResult.streams.length > 0) {
+        streams = connectorResult.streams;
         logTask('probe.connector_success', task, { connector_id: connector.id, streams: streams.length });
         break; // Stop at first successful connector
       }
@@ -528,8 +533,11 @@ async function runProbe(task) {
  */
 async function runPreview(task) {
   if (!task.rtsp_url) throw new Error('rtsp_url is required for preview mode');
+  const targetResult = await assertSafeTarget(task.rtsp_url, { allowPrivate: true });
+  const safe = new URL(task.rtsp_url);
+  safe.hostname = targetResult.addresses[0];
   const creds = getTaskCredentials(task);
-  const rtspUrl = embedCredentials(task.rtsp_url, creds.username, creds.password);
+  const rtspUrl = embedCredentials(safe.toString(), creds.username, creds.password);
   await verifyRtsp(rtspUrl, creds, 'Camera');
   if (!await verifyTaskOwnership(task.id)) {
     throw new Error('Task was reclaimed by another node — aborting to prevent duplicate registration');
@@ -563,7 +571,8 @@ async function runDvrip(task) {
   if (!ip) throw new Error('Camera IP is required for DVRIP mode');
 
   // SSRF guard (same stance as onvif/manual: LAN cameras are the product).
-  await assertSafeTarget(ip, { allowPrivate: true });
+  const targetResult = await assertSafeTarget(ip, { allowPrivate: true });
+  const safeIp = targetResult.addresses[0];
 
   const port = Number(task.onvif_port) || DVRIP_PORT;
   const creds = getTaskCredentials(task);
@@ -575,21 +584,21 @@ async function runDvrip(task) {
   const connector = getConnector('xiongmai-dvrip');
   if (!connector) throw new Error('DVRIP connector is not registered on this node');
 
-  const cam = await connector.discover(ip, {
+  const cam = await connector.discover(safeIp, {
     username: creds.username,
     password: creds.password,
     port,
   });
 
   if (!cam || !cam.dvrip_supported) {
-    throw new Error(`DVRIP not supported or authentication failed on ${ip}:${port} (verify IP, port 34567 and credentials)`);
+    throw new Error(`DVRIP not supported or authentication failed on ${safeIp}:${port} (verify IP, port 34567 and credentials)`);
   }
 
   if (!await verifyTaskOwnership(task.id)) {
     throw new Error('Task was reclaimed by another node — aborting to prevent duplicate registration');
   }
 
-  const cameraId = await insertDvripCamera(task, ip, port, creds);
+  const cameraId = await insertDvripCamera(task, safeIp, port, creds);
   // Deliberately NO registerMediaPath here: DVRIP cameras have no RTSP URL.
   // The stream worker (xiongmai-stream-worker.js) creates the MediaMTX publish
   // path itself once it starts this camera (lazy-on-404).
@@ -748,3 +757,13 @@ process.on('SIGTERM', async () => {
   await pool.end();
   process.exit(0);
 });
+
+module.exports = {
+  runOnvif,
+  runManual,
+  runPreview,
+  runProbe,
+  runDvrip,
+  processTask,
+  insertDvripCamera,
+};
