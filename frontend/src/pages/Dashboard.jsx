@@ -609,6 +609,7 @@ export default function Dashboard() {
   // setup time (which is always null).
   const talkdownActiveRef = useRef(null);
   useEffect(() => { talkdownActiveRef.current = talkdownActive; }, [talkdownActive]);
+  const talkdownStartLockRef = useRef(null);
   const AUDIO_NOT_CONFIGURED = !isTalkdownConfigured();
 
   const isCameraTalkdownSupported = (cam) => {
@@ -621,6 +622,10 @@ export default function Dashboard() {
   const triggerTalkdown = async (camId) => {
     const cam = cameras.find((c) => c.id === camId);
     if (!isCameraTalkdownSupported(cam)) return;
+
+    // Atomic guard: if a start is already in progress for this camera,
+    // ignore the new click instead of creating a second pipeline.
+    if (talkdownStartLockRef.current === camId) return;
 
     const finishWith = (phase, error) => {
       if (talkdownStopTimerRef.current) {
@@ -639,12 +644,15 @@ export default function Dashboard() {
       }
       setTalkdownStatus((prev) => ({ ...prev, [camId]: { phase, error } }));
       setTalkdownActive((cur) => (cur === camId ? null : cur));
+      talkdownStartLockRef.current = null;
     };
 
     if (talkdownActive === camId) {
       await finishWith('stopped');
       return;
     }
+
+    talkdownStartLockRef.current = camId;
 
     const camName = cam.name || camId;
     setTalkdownStatus((prev) => ({ ...prev, [camId]: { phase: 'starting' } }));
@@ -703,7 +711,7 @@ export default function Dashboard() {
   // and the browser mic do not leak.
   useEffect(() => {
     return () => {
-      const camId = talkdownActiveRef.current; // current, not stale
+      const camId = talkdownActiveRef.current;
       if (camId) {
         if (talkdownStopTimerRef.current) {
           clearTimeout(talkdownStopTimerRef.current);
@@ -714,10 +722,10 @@ export default function Dashboard() {
         const token = talkdownTokenRef.current;
         talkdownTokenRef.current = null;
         if (token) {
-          // Fire-and-forget; component is unmounting.
           stopSession({ id: camId }, token).catch(() => {});
         }
       }
+      talkdownStartLockRef.current = null;
     };
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);

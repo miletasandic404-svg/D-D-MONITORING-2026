@@ -84,7 +84,14 @@ export async function sendFrame(camera, token, base64Pcm) {
     body: JSON.stringify({ audio: base64Pcm }),
   });
   // 202 = frame was dropped by server (backpressure); not an error.
-  if (!res.ok && res.status !== 202) throw await readError(res);
+  // 400/404/410 = session invalid; caller should stop sending.
+  if (!res.ok && res.status !== 202) {
+    const body = await res.json().catch(() => ({}));
+    const err = new Error(body && (body.error || body.message) || `HTTP ${res.status}`);
+    err.status = res.status;
+    err.body = body;
+    throw err;
+  }
   return res.json().catch(() => ({}));
 }
 
@@ -132,6 +139,8 @@ export function createMicPipeline({ onFrame, onError, targetSampleRate = TALKDOW
   let resampler = null;
   let stopped = false;
   let inputSampleRate = 0;
+  let sendInFlight = false;
+  let pendingFrame = null;
 
   function makeResampler(inputRate) {
     if (inputRate === targetSampleRate) return null;
@@ -175,15 +184,41 @@ export function createMicPipeline({ onFrame, onError, targetSampleRate = TALKDOW
       const input = e.inputBuffer.getChannelData(0);
       if (inputSampleRate === targetSampleRate) {
         for (let i = 0; i + frameSamples <= input.length; i += frameSamples) {
-          try { onFrame(float32ToBase64Pcm16Le(input.slice(i, i + frameSamples))); }
-          catch (err) { onError?.(err); }
+          const frame = float32ToBase64Pcm16Le(input.slice(i, i + frameSamples));
+          if (sendInFlight) {
+            pendingFrame = frame;
+          } else {
+            sendInFlight = true;
+            Promise.resolve(onFrame(frame)).finally(() => {
+              sendInFlight = false;
+              const next = pendingFrame;
+              pendingFrame = null;
+              if (next) {
+                sendInFlight = true;
+                Promise.resolve(onFrame(next)).finally(() => { sendInFlight = false; const n = pendingFrame; pendingFrame = null; if (n) { sendInFlight = true; Promise.resolve(onFrame(n)).finally(() => { sendInFlight = false; }); } });
+              }
+            });
+          }
         }
       } else if (resampler) {
         for (let i = 0; i < input.length; i++) {
           const frame = resampler.push([input[i]]);
           if (frame) {
-            try { onFrame(float32ToBase64Pcm16Le(frame)); }
-            catch (err) { onError?.(err); }
+            const encoded = float32ToBase64Pcm16Le(frame);
+            if (sendInFlight) {
+              pendingFrame = encoded;
+            } else {
+              sendInFlight = true;
+              Promise.resolve(onFrame(encoded)).finally(() => {
+                sendInFlight = false;
+                const next = pendingFrame;
+                pendingFrame = null;
+                if (next) {
+                  sendInFlight = true;
+                  Promise.resolve(onFrame(next)).finally(() => { sendInFlight = false; const n = pendingFrame; pendingFrame = null; if (n) { sendInFlight = true; Promise.resolve(onFrame(n)).finally(() => { sendInFlight = false; }); } });
+                }
+              });
+            }
           }
         }
       }
@@ -195,6 +230,8 @@ export function createMicPipeline({ onFrame, onError, targetSampleRate = TALKDOW
   function stop() {
     if (stopped) return;
     stopped = true;
+    sendInFlight = false;
+    pendingFrame = null;
     try { if (processor) { processor.disconnect(); processor.onaudioprocess = null; } } catch {}
     try { if (source) source.disconnect(); } catch {}
     try { if (audioContext) audioContext.close().catch(() => {}); } catch {}

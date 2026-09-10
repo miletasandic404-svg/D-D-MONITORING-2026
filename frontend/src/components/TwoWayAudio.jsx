@@ -42,6 +42,8 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
   const resampleStateRef = useRef(null);
   const listeningRef = useRef(false);
   const speakingRef = useRef(false);
+  const sendInFlightRef = useRef(false);
+  const pendingFrameRef = useRef(null);
 
   const caps = capabilities || { supported: false, reason: 'not loaded' };
 
@@ -77,8 +79,37 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
   async function sendAudioFrame(pcmFloat32) {
     if (!audioApiBaseUrl || !streamToken || !cameraId) return;
     if (!speakingRef.current) return;
+    if (sendInFlightRef.current) {
+      pendingFrameRef.current = pcmFloat32;
+      return;
+    }
 
-    // Convert Float32 [-1, 1] → Int16
+    sendInFlightRef.current = true;
+    try {
+      await sendAudioFrameOnce(pcmFloat32);
+      const next = pendingFrameRef.current;
+      pendingFrameRef.current = null;
+      if (next) {
+        sendInFlightRef.current = true;
+        await sendAudioFrameOnce(next);
+        const again = pendingFrameRef.current;
+        pendingFrameRef.current = null;
+        if (again) {
+          sendInFlightRef.current = true;
+          await sendAudioFrameOnce(again);
+        }
+      }
+    } finally {
+      sendInFlightRef.current = false;
+      const leftover = pendingFrameRef.current;
+      pendingFrameRef.current = null;
+      if (leftover && speakingRef.current) {
+        sendAudioFrameOnce(leftover).catch(() => {});
+      }
+    }
+  }
+
+  async function sendAudioFrameOnce(pcmFloat32) {
     const int16 = new Int16Array(pcmFloat32.length);
     for (let i = 0; i < pcmFloat32.length; i++) {
       const v = Math.max(-1, Math.min(1, pcmFloat32[i]));
@@ -91,14 +122,17 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
         .join('')
     );
 
-    try {
-      await fetch(`${audioApiBaseUrl}/api/audio/${cameraId}/send?token=${encodeURIComponent(streamToken)}`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ audio: base64 }),
-      });
-    } catch (err) {
-      setError('Failed to send audio');
+    const res = await fetch(`${audioApiBaseUrl}/api/audio/${cameraId}/send?token=${encodeURIComponent(streamToken)}`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ audio: base64 }),
+    });
+    if (!res.ok && res.status !== 202) {
+      const body = await res.json().catch(() => ({}));
+      const err = new Error(body && (body.error || body.message) || `HTTP ${res.status}`);
+      err.status = res.status;
+      err.body = body;
+      throw err;
     }
   }
 
@@ -113,6 +147,8 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
   // ── Cleanup audio pipeline ─────────────────────────────────────────
   const cleanupAudio = () => {
     speakingRef.current = false;
+    sendInFlightRef.current = false;
+    pendingFrameRef.current = null;
     if (processorRef.current) {
       processorRef.current.onaudioprocess = null;
       processorRef.current.disconnect();

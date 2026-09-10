@@ -112,56 +112,50 @@ describe('createMicPipeline', () => {
     const env = makeAudioEnv({ sampleRate: 8000 });
     global.window = { AudioContext: env.AudioContext, webkitAudioContext: env.AudioContext };
 
-    const onFrame = vi.fn();
+    const onFrame = vi.fn(() => Promise.resolve());
     const pipeline = createMicPipeline({ onFrame });
     await pipeline.start();
     expect(env.processors.length).toBe(1);
     const proc = env.processors[0];
 
-    // Simulate one full buffer of 8 kHz audio (4096 samples = 12.8 frames).
     const input = new Float32Array(4096);
     for (let i = 0; i < input.length; i++) input[i] = (i % 320) / 320;
     proc.onaudioprocess({ inputBuffer: { getChannelData: () => input } });
 
-    // 4096 / 320 = 12 full frames; 16 remainder samples are dropped.
-    expect(onFrame).toHaveBeenCalledTimes(12);
-    for (const call of onFrame.mock.calls) {
-      const b64 = call[0];
-      const int16 = base64ToInt16(b64);
-      expect(int16.length).toBe(TALKDOWN_FRAME_SAMPLES);
-    }
+    // With frontend backpressure, only the first frame is sent immediately;
+    // remaining frames are queued and sent after the previous one completes.
+    expect(onFrame).toHaveBeenCalledTimes(1);
+    const b64 = onFrame.mock.calls[0][0];
+    const int16 = base64ToInt16(b64);
+    expect(int16.length).toBe(TALKDOWN_FRAME_SAMPLES);
   });
 
   it('resamples 48 kHz -> 8 kHz and produces 40 ms frames', async () => {
     const env = makeAudioEnv({ sampleRate: 48000 });
     global.window = { AudioContext: env.AudioContext, webkitAudioContext: env.AudioContext };
 
-    const onFrame = vi.fn();
+    const onFrame = vi.fn(() => Promise.resolve());
     const pipeline = createMicPipeline({ onFrame });
     await pipeline.start();
     const proc = env.processors[0];
 
-    // 11520 input samples at 48 kHz. After the internal resampler
-    // fills its 4096-sample buffer it emits one 40 ms frame per 320
-    // new input samples, yielding at least one frame. We assert at
-    // least one frame was produced, and that every emitted frame is
-    // exactly 320 samples (40 ms @ 8 kHz).
     const input = new Float32Array(11520);
     for (let i = 0; i < input.length; i++) input[i] = Math.sin((i / 48000) * 2 * Math.PI * 440);
     proc.onaudioprocess({ inputBuffer: { getChannelData: () => input } });
 
+    // With frontend backpressure, only the first emitted frame is sent
+    // immediately; remaining queued frames are deferred until it completes.
     expect(onFrame.mock.calls.length).toBeGreaterThanOrEqual(1);
-    for (const call of onFrame.mock.calls) {
-      const int16 = base64ToInt16(call[0]);
-      expect(int16.length).toBe(TALKDOWN_FRAME_SAMPLES);
-    }
+    const b64 = onFrame.mock.calls[0][0];
+    const int16 = base64ToInt16(b64);
+    expect(int16.length).toBe(TALKDOWN_FRAME_SAMPLES);
   });
 
   it('stop() is idempotent and releases context + tracks', async () => {
     const env = makeAudioEnv({ sampleRate: 8000 });
     global.window = { AudioContext: env.AudioContext, webkitAudioContext: env.AudioContext };
 
-    const onFrame = vi.fn();
+    const onFrame = vi.fn(() => Promise.resolve());
     const pipeline = createMicPipeline({ onFrame });
     await pipeline.start();
 
