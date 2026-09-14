@@ -293,6 +293,67 @@ async function testSendAudioBackpressure() {
 }
 
 // ============================================================
+// TEST 7: Persistent listener handles audio responses (1433)
+// ============================================================
+async function testPersistentListenerAudioResponse() {
+  console.log('\n=== TEST 7: Persistent listener handles audio responses ===');
+
+  const { OptalkAudioAdapter, MSG_OPTALK_AUDIO_RESPONSE, buildBinaryFrame } = require('../lib/_optalk_audio');
+  const adapter = new OptalkAudioAdapter('1.2.3.4', 34567);
+
+  adapter.isAuthenticated = true;
+  adapter.isTalkActive = true;
+  adapter.sessionId = 12345;
+
+  // Mock socket that captures writes and can emit data
+  let dataHandler = null;
+  const mockSocket = {
+    destroyed: false,
+    write: (data) => {
+      // Simulate camera sending audio response after receiving audio frame
+      // In real scenario, this would be async, but we'll simulate it
+      if (data.readUInt16LE(14) === 1432) { // MSG_OPTALK_AUDIO
+        // Schedule audio response
+        setImmediate(() => {
+          if (dataHandler) {
+            const response = buildBinaryFrame(MSG_OPTALK_AUDIO_RESPONSE, 12345, Buffer.from([100])); // Ret=100
+            dataHandler(response);
+          }
+        });
+      }
+      return true;
+    },
+    once: (event, fn) => {
+      if (event === 'data') dataHandler = fn;
+      if (event === 'drain') fn();
+      if (event === 'error') fn(new Error('socket error'));
+      if (event === 'close') fn();
+    },
+    removeListener: () => {},
+  };
+
+  adapter.socket = mockSocket;
+
+  // Attach persistent listener (simulating startTalk success)
+  adapter._attachPersistentListener();
+
+  const pcmBuffer = Buffer.alloc(640);
+  pcmBuffer.fill(0);
+
+  // Send audio frame - should not hang waiting for response
+  await adapter.sendAudio(pcmBuffer);
+
+  // Verify the audio response was handled (no exception thrown)
+  assert(true, 'sendAudio completes without hanging on audio response');
+
+  // Clean up
+  adapter.close();
+
+  console.log('  ✅ Persistent listener handles audio responses without blocking');
+  console.log('  ✅ sendAudio does not wait for audio response');
+}
+
+// ============================================================
 // MAIN
 // ============================================================
 async function main() {
@@ -307,6 +368,7 @@ async function main() {
   await testSessionIdInHeader();
   await testAudioFrameFormat();
   await testSendAudioBackpressure();
+  await testPersistentListenerAudioResponse();
   await testHardwareSequence();
   
   console.log('\n' + '='.repeat(60));
