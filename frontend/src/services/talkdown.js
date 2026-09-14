@@ -145,24 +145,30 @@ export function createMicPipeline({ onFrame, onError, targetSampleRate = TALKDOW
   function makeResampler(inputRate) {
     if (inputRate === targetSampleRate) return null;
     const ratio = inputRate / targetSampleRate;
-    const buffer = new Float32Array(4096);
+    const inputSamplesPerFrame = Math.round(frameSamples * ratio);
+    const buffer = new Float32Array(inputSamplesPerFrame * 2); // double buffer
     let offset = 0;
     return {
       push(inputFrame) {
+        const outFrames = [];
         for (let i = 0; i < inputFrame.length; i++) {
           buffer[offset++] = inputFrame[i];
-          if (offset >= buffer.length) {
+          if (offset >= inputSamplesPerFrame) {
             const out = new Float32Array(frameSamples);
             for (let j = 0; j < frameSamples; j++) {
               const srcIdx = Math.floor(j * ratio);
-              out[j] = srcIdx < buffer.length ? buffer[srcIdx] : 0;
+              out[j] = srcIdx < offset ? buffer[srcIdx] : 0;
             }
-            buffer.copyWithin(0, frameSamples);
-            offset = Math.max(0, offset - frameSamples);
-            return out;
+            outFrames.push(out);
+            // Shift remaining samples to start of buffer
+            const remaining = offset - inputSamplesPerFrame;
+            if (remaining > 0) {
+              buffer.copyWithin(0, inputSamplesPerFrame, offset);
+            }
+            offset = remaining;
           }
         }
-        return null;
+        return outFrames;
       },
     };
   }
@@ -202,22 +208,24 @@ export function createMicPipeline({ onFrame, onError, targetSampleRate = TALKDOW
         }
       } else if (resampler) {
         for (let i = 0; i < input.length; i++) {
-          const frame = resampler.push([input[i]]);
-          if (frame) {
-            const encoded = float32ToBase64Pcm16Le(frame);
-            if (sendInFlight) {
-              pendingFrame = encoded;
-            } else {
-              sendInFlight = true;
-              Promise.resolve(onFrame(encoded)).finally(() => {
-                sendInFlight = false;
-                const next = pendingFrame;
-                pendingFrame = null;
-                if (next) {
-                  sendInFlight = true;
-                  Promise.resolve(onFrame(next)).finally(() => { sendInFlight = false; const n = pendingFrame; pendingFrame = null; if (n) { sendInFlight = true; Promise.resolve(onFrame(n)).finally(() => { sendInFlight = false; }); } });
-                }
-              });
+          const frames = resampler.push([input[i]]);
+          if (frames && frames.length > 0) {
+            for (const frame of frames) {
+              const encoded = float32ToBase64Pcm16Le(frame);
+              if (sendInFlight) {
+                pendingFrame = encoded;
+              } else {
+                sendInFlight = true;
+                Promise.resolve(onFrame(encoded)).finally(() => {
+                  sendInFlight = false;
+                  const next = pendingFrame;
+                  pendingFrame = null;
+                  if (next) {
+                    sendInFlight = true;
+                    Promise.resolve(onFrame(next)).finally(() => { sendInFlight = false; const n = pendingFrame; pendingFrame = null; if (n) { sendInFlight = true; Promise.resolve(onFrame(n)).finally(() => { sendInFlight = false; }); } });
+                  }
+                });
+              }
             }
           }
         }

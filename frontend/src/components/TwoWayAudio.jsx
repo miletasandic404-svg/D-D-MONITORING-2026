@@ -55,24 +55,30 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
   function createResampler(inputRate) {
     if (inputRate === SAMPLE_RATE) return null;
     const ratio = inputRate / SAMPLE_RATE;
-    const buffer = new Float32Array(4096);
+    const inputSamplesPerFrame = Math.round(FRAME_SAMPLES * ratio);
+    const buffer = new Float32Array(inputSamplesPerFrame * 2); // double buffer
     let offset = 0;
     return {
       push(inputFrame) {
+        const outFrames = [];
         for (let i = 0; i < inputFrame.length; i++) {
           buffer[offset++] = inputFrame[i];
-          if (offset >= buffer.length) {
+          if (offset >= inputSamplesPerFrame) {
             const out = new Float32Array(FRAME_SAMPLES);
             for (let j = 0; j < FRAME_SAMPLES; j++) {
               const srcIdx = Math.floor(j * ratio);
-              out[j] = srcIdx < buffer.length ? buffer[srcIdx] : 0;
+              out[j] = srcIdx < offset ? buffer[srcIdx] : 0;
             }
-            buffer.copyWithin(0, FRAME_SAMPLES);
-            offset = Math.max(0, offset - FRAME_SAMPLES);
-            return out;
+            outFrames.push(out);
+            // Shift remaining samples to start of buffer
+            const remaining = offset - inputSamplesPerFrame;
+            if (remaining > 0) {
+              buffer.copyWithin(0, inputSamplesPerFrame, offset);
+            }
+            offset = remaining;
           }
         }
-        return null;
+        return outFrames;
       },
     };
   }
@@ -207,15 +213,19 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
           for (let i = 0; i + FRAME_SAMPLES <= input.length; i += FRAME_SAMPLES) {
             sendAudioFrame(input.slice(i, i + FRAME_SAMPLES));
           }
-        } else {
-          const resampler = resampleStateRef.current;
-          if (resampler) {
-            for (let i = 0; i < input.length; i++) {
-              const frame = resampler.push([input[i]]);
-              if (frame) sendAudioFrame(frame);
+} else {
+      const resampler = resampleStateRef.current;
+      if (resampler) {
+        for (let i = 0; i < input.length; i++) {
+          const frames = resampler.push([input[i]]);
+          if (frames && frames.length > 0) {
+            for (const frame of frames) {
+              sendAudioFrame(frame);
             }
           }
         }
+      }
+    }
       };
 
       sourceRef.current.connect(processorRef.current);
