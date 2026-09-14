@@ -35,6 +35,7 @@ const PAGE_CSS = `
 export default function Alerts() {
   const [alerts, setAlerts] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
 
   useEffect(() => {
     fetchAlerts();
@@ -68,36 +69,37 @@ export default function Alerts() {
       setAlerts(formattedAlerts);
     } catch (err) {
       console.error('Failed to fetch alerts:', err);
+      setLoadError(err.response?.data?.error || 'Failed to load alerts.');
     } finally {
       setLoading(false);
     }
   };
 
-  const acknowledgeAlert = async (id) => {
+  const acknowledgeAlert = async (alert) => {
     try {
-      if (!id) {
-        alert('Cannot acknowledge alert: missing incident ID.');
+      if (!alert?.event_id) {
+        window.alert('Cannot acknowledge alert: missing incident ID.');
         return;
       }
 
-      await api.patch(`/incidents/${id}/status`, { status: 'Acknowledged' });
+      await api.patch(`/incidents/${alert.event_id}/status`, { status: 'Acknowledged' });
       
-      setAlerts(alerts.map(a => a.id === id ? { ...a, acknowledged: true } : a));
+      setAlerts(alerts.map(a => a.id === alert.id ? { ...a, acknowledged: true } : a));
     } catch (err) {
       console.error('Failed to acknowledge alert:', err);
     }
   };
 
-  const dismissAlert = async (id) => {
+  const dismissAlert = async (alert) => {
     try {
-      if (!id) {
-        alert('Cannot dismiss alert: missing incident ID.');
+      if (!alert?.event_id) {
+        window.alert('Cannot dismiss alert: missing incident ID.');
         return;
       }
 
-      await api.patch(`/incidents/${id}/status`, { status: 'Resolved' });
+      await api.patch(`/incidents/${alert.event_id}/status`, { status: 'Resolved' });
       
-      setAlerts(alerts.filter(a => a.id !== id));
+      setAlerts(alerts.filter(a => a.id !== alert.id));
     } catch (err) {
       console.error('Failed to dismiss alert:', err);
     }
@@ -130,6 +132,8 @@ export default function Alerts() {
 
         {loading ? (
           <div className="empty-alerts"><p>Loading alerts...</p></div>
+        ) : loadError ? (
+          <div className="empty-alerts"><p>{loadError}</p></div>
         ) : alerts.length === 0 ? (
           <div className="empty-alerts">
             <h2>No Active Alerts</h2>
@@ -153,11 +157,11 @@ export default function Alerts() {
                 </div>
                 <div className="alert-actions">
                   {!alert.acknowledged && (
-                    <button className="alert-btn alert-btn-acknowledge" onClick={() => acknowledgeAlert(alert.id)}>
+                    <button className="alert-btn alert-btn-acknowledge" onClick={() => acknowledgeAlert(alert)}>
                       Acknowledge
                     </button>
                   )}
-                  <button className="alert-btn alert-btn-dismiss" onClick={() => dismissAlert(alert.id)}>
+                  <button className="alert-btn alert-btn-dismiss" onClick={() => dismissAlert(alert)}>
                     Dismiss
                   </button>
                 </div>

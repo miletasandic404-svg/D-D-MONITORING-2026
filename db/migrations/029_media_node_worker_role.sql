@@ -48,7 +48,9 @@ BEGIN;
 DO $$
 BEGIN
   IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'media_node_worker') THEN
-    CREATE ROLE media_node_worker LOGIN PASSWORD 'change-me-in-production'
+    -- Provision the password out-of-band (for example with ALTER ROLE or a
+    -- deployment secret). Never ship a usable default credential in a migration.
+    CREATE ROLE media_node_worker LOGIN
       NOCREATEDB NOCREATEROLE NOSUPERUSER NOREPLICATION;
   END IF;
 END $$;

@@ -33,6 +33,7 @@ const db = require('../db/index');
 const detection = require('../lib/_person_detection');
 const { makeLogger } = require('../lib/_logger');
 const { initSentry } = require('../lib/_sentry');
+const { assertSafeTarget } = require('../lib/_network_security');
 const Sentry = require('@sentry/node');
 
 const logger = makeLogger('worker-person-detection');
@@ -130,6 +131,17 @@ async function fetchRtspCameras() {
  * @returns {Promise<Buffer|null>}
  */
 async function extractFrameFromRtsp(rtspUrl) {
+  try {
+    await assertSafeTarget(rtspUrl, {
+      allowPrivate: process.env.ALLOW_PRIVATE_NETWORK === 'true',
+    });
+  } catch (err) {
+    logger.warn('RTSP frame extraction blocked by network policy', {
+      error: err.message,
+    });
+    return null;
+  }
+
   return new Promise((resolve) => {
     const args = [
       '-rtsp_transport', 'tcp',

@@ -38,6 +38,7 @@ export default function VideoPlayback() {
   const [recordings, setRecordings] = useState([]);
   const [selectedRecording, setSelectedRecording] = useState(null);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [playbackError, setPlaybackError] = useState(null);
@@ -87,6 +88,7 @@ export default function VideoPlayback() {
       setRecordings(res.data.recordings || []);
     } catch (err) {
       console.error('Failed to fetch recordings:', err);
+      setLoadError(err.response?.data?.error || 'Failed to load recordings.');
       setRecordings([]);
     } finally {
       setLoading(false);
@@ -193,6 +195,8 @@ export default function VideoPlayback() {
 
             {loading ? (
               <div className="empty-state">Loading...</div>
+            ) : loadError ? (
+              <div className="empty-state">{loadError}</div>
             ) : filteredRecordings.length === 0 ? (
               <div className="empty-state">No recordings found</div>
             ) : (

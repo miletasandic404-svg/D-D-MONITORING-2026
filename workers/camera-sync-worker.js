@@ -71,14 +71,8 @@ if (!process.env.MEDIA_NODE_DATABASE_URL) {
 const pool = new Pool({ connectionString: WORKER_DB_URL, max: 2 });
 
 async function fetchCamerasFromDb() {
-  // Ako je MEDIA_NODE_ID podesen, sinhronizuj kamere dodeljene OVOM
-  // node-u (multi-node deployment) ILI kamere kojima media_node_id jos
-  // nije dodeljen (media_node_id IS NULL) -- ovo pokriva slucaj kad je
-  // kamera kreirana pre nego sto je node bio "online" i pickMediaNodeForCamera()
-  // nije mogao da dodeli node (vratio null). Bez ovog uslova, takve kamere
-  // bi trajno ostale neregistrovane u MediaMTX-u.
-  // Ako MEDIA_NODE_ID nije podesen, sinhronizuj sve kamere sa rtsp_url
-  // (single-node deployment, V2 pocetno stanje).
+  // A node may sync only cameras explicitly assigned to it. Unassigned
+  // cameras must be assigned by the API before a worker can process them.
   // Security (model B): when a node id is set, restrict the sync to
   // cameras of the node's OWN organization. This prevents a node on
   // org B's LAN from pulling streams of org A's cameras (whose rtsp_url
@@ -98,11 +92,11 @@ async function fetchCamerasFromDb() {
   const query = `SELECT c.id, c.rtsp_url, c.media_node_id, c.rtsp_username, c.rtsp_password_encrypted
      FROM cameras c
      JOIN media_nodes n ON n.id = $1
-     WHERE (c.media_node_id = $1 OR c.media_node_id IS NULL)
+     WHERE c.media_node_id = $1
        AND c.rtsp_url IS NOT NULL
        AND c.enabled = true
-       AND (n.organization_id IS NULL
-            OR c.organization_id = n.organization_id)`;
+        AND n.organization_id IS NOT NULL
+        AND c.organization_id = n.organization_id`;
   const params = [MEDIA_NODE_ID];
   const result = await pool.query(query, params);
   return result.rows.map((c) => {
@@ -135,11 +129,11 @@ async function fetchDvripCameraIdsFromDb() {
   const query = `SELECT c.id
      FROM cameras c
      JOIN media_nodes n ON n.id = $1
-     WHERE (c.media_node_id = $1 OR c.media_node_id IS NULL)
+     WHERE c.media_node_id = $1
        AND c.connection_type = 'dvrip'
        AND c.enabled = true
-       AND (n.organization_id IS NULL
-            OR c.organization_id = n.organization_id)`;
+       AND n.organization_id IS NOT NULL
+       AND c.organization_id = n.organization_id`;
   const params = [MEDIA_NODE_ID];
   const result = await pool.query(query, params);
   return result.rows.map((r) => r.id);

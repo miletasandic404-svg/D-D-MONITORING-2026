@@ -158,7 +158,7 @@ async function validateStreamTokenDb(token, cameraId) {
     if (result.rows.length === 0) return null;
     const row = result.rows[0];
     if (row.camera_id !== cameraId) return null;
-    return { userId: row.user_id };
+    return { userId: row.user_id, cameraId: row.camera_id };
   } catch (err) {
     return null;
   }

@@ -58,6 +58,7 @@ export default function LicensePlateRecognition() {
   const [detections, setDetections] = useState([]);
   const [knownPlates, setKnownPlates] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [searchTerm, setSearchTerm] = useState('');
   const [enrollPlate, setEnrollPlate] = useState('');
   const [enrollMake, setEnrollMake] = useState('');
@@ -93,6 +94,7 @@ export default function LicensePlateRecognition() {
       setKnownPlates(platesRes.data.known_plates || []);
     } catch (err) {
       console.error('Failed to fetch plate data:', err);
+      setLoadError(err.response?.data?.error || 'Failed to load license plate data.');
       setDetections([]);
       setKnownPlates([]);
     } finally {
@@ -303,6 +305,8 @@ export default function LicensePlateRecognition() {
 
         {loading ? (
           <div className="empty-state">Loading...</div>
+        ) : loadError ? (
+          <div className="empty-state">{loadError}</div>
         ) : filteredPlates.length === 0 ? (
           <div className="empty-state">No known plates found. Use the form above to enroll plates.</div>
         ) : (

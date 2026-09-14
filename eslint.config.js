@@ -1,4 +1,5 @@
 const globals = require("globals");
+const reactHooks = require("./frontend/node_modules/eslint-plugin-react-hooks");
 
 module.exports = [
   {
@@ -17,6 +18,36 @@ module.exports = [
       "no-unused-vars": "warn",
       "no-undef": "error",
       "no-console": "warn",
+      "react-hooks/exhaustive-deps": "warn",
+    },
+  },
+  {
+    files: ["frontend/**/*.jsx"],
+    languageOptions: {
+      parserOptions: {
+        ecmaFeatures: {
+          jsx: true,
+        },
+      },
+    },
+  },
+  {
+    files: ["frontend/src/test/**/*.{js,jsx}"],
+    languageOptions: {
+      globals: {
+        afterEach: "readonly",
+        beforeEach: "readonly",
+        describe: "readonly",
+        expect: "readonly",
+        it: "readonly",
+        vi: "readonly",
+      },
+    },
+  },
+  {
+    files: ["frontend/**/*.{js,jsx}"],
+    plugins: {
+      "react-hooks": reactHooks,
     },
   },
   {

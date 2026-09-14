@@ -57,6 +57,7 @@ export default function FaceRecognition() {
   const [detections, setDetections] = useState([]);
   const [knownFaces, setKnownFaces] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [enrollName, setEnrollName] = useState('');
   const [enrollImageUrl, setEnrollImageUrl] = useState('');
   const [enrollStatus, setEnrollStatus] = useState('active');
@@ -88,6 +89,7 @@ export default function FaceRecognition() {
       setKnownFaces(facesRes.data.known_faces || []);
     } catch (err) {
       console.error('Failed to fetch face data:', err);
+      setLoadError(err.response?.data?.error || 'Failed to load face data.');
       setDetections([]);
       setKnownFaces([]);
     } finally {
@@ -243,6 +245,8 @@ export default function FaceRecognition() {
 
         {loading ? (
           <div className="empty-state">Loading...</div>
+        ) : loadError ? (
+          <div className="empty-state">{loadError}</div>
         ) : knownFaces.length === 0 ? (
           <div className="empty-state">No known faces enrolled yet. Use the form above to add faces.</div>
         ) : (

@@ -11,7 +11,7 @@ const PAGE_CSS = `
   .setting-row:last-child { border-bottom: none; }
   .setting-label { color: var(--text-primary, #dff7ff); }
   .setting-desc { color: var(--text-secondary, #8ab0c9); font-size: .85rem; margin-top: .25rem; }
-  .toggle { width: 50px; height: 26px; background: rgba(87,125,196,.3); border-radius: 13px; position: relative; cursor: pointer; transition: background .2s; }
+  .toggle { width: 50px; height: 26px; padding: 0; border: 0; background: rgba(87,125,196,.3); border-radius: 13px; position: relative; cursor: pointer; transition: background .2s; }
   .toggle.active { background: linear-gradient(135deg,var(--accent-primary, #00d4ff),var(--accent-secondary, #8c4dff)); }
    .toggle::after { content: ''; position: absolute; width: 20px; height: 20px; background: white; border-radius: 50%; top: 3px; left: 3px; transition: transform .2s; }
    .toggle.active::after { transform: translateX(24px); }
@@ -129,9 +129,13 @@ export default function Settings() {
               <div className="setting-label">Email Alerts</div>
               <div className="setting-desc">Receive email notifications for critical alerts</div>
             </div>
-            <div 
+            <button
+              type="button"
               className={`toggle ${settings.email_alerts ? 'active' : ''}`} 
               onClick={() => updateSetting('email_alerts', !settings.email_alerts)}
+              disabled={saving}
+              aria-label="Toggle email alerts"
+              aria-pressed={settings.email_alerts}
             />
           </div>
           <div className="setting-row">
@@ -139,9 +143,13 @@ export default function Settings() {
               <div className="setting-label">Push Notifications</div>
               <div className="setting-desc">Browser push notifications for real-time alerts</div>
             </div>
-            <div 
+            <button
+              type="button"
               className={`toggle ${settings.push_notifications ? 'active' : ''}`}
               onClick={() => updateSetting('push_notifications', !settings.push_notifications)}
+              disabled={saving}
+              aria-label="Toggle push notifications"
+              aria-pressed={settings.push_notifications}
             />
           </div>
         </div>
@@ -153,9 +161,13 @@ export default function Settings() {
               <div className="setting-label">Automatic Reports</div>
               <div className="setting-desc">Generate daily security summary reports</div>
             </div>
-            <div 
+            <button
+              type="button"
               className={`toggle ${settings.auto_reports ? 'active' : ''}`} 
               onClick={() => updateSetting('auto_reports', !settings.auto_reports)}
+              disabled={saving}
+              aria-label="Toggle automatic reports"
+              aria-pressed={settings.auto_reports}
             />
           </div>
           <div className="setting-row">
@@ -163,9 +175,13 @@ export default function Settings() {
               <div className="setting-label">Weekly Summary</div>
               <div className="setting-desc">Send weekly incident summary to email</div>
             </div>
-            <div 
+            <button
+              type="button"
               className={`toggle ${settings.weekly_summary ? 'active' : ''}`}
               onClick={() => updateSetting('weekly_summary', !settings.weekly_summary)}
+              disabled={saving}
+              aria-label="Toggle weekly summary"
+              aria-pressed={settings.weekly_summary}
             />
           </div>
         </div>
@@ -177,9 +193,13 @@ export default function Settings() {
               <div className="setting-label">Map Overlays</div>
               <div className="setting-desc">Show camera coverage zones on map</div>
             </div>
-            <div 
+            <button
+              type="button"
               className={`toggle ${settings.map_overlays ? 'active' : ''}`} 
               onClick={() => updateSetting('map_overlays', !settings.map_overlays)}
+              disabled={saving}
+              aria-label="Toggle map overlays"
+              aria-pressed={settings.map_overlays}
             />
           </div>
           <div className="setting-row">
@@ -187,9 +207,13 @@ export default function Settings() {
               <div className="setting-label">Dark Mode</div>
               <div className="setting-desc">Always use dark theme</div>
             </div>
-            <div 
+            <button
+              type="button"
               className={`toggle ${settings.dark_mode ? 'active' : ''}`}
               onClick={() => updateSetting('dark_mode', !settings.dark_mode)}
+              disabled={saving}
+              aria-label="Toggle dark mode"
+              aria-pressed={settings.dark_mode}
             />
           </div>
         </div>
@@ -212,12 +236,15 @@ export default function Settings() {
                     placeholder="+1 555 000 0000"
                   />
                 </div>
-                <div
+                <button
+                  type="button"
                   className={`toggle ${contact.enabled ? 'active' : ''}`}
                   onClick={() => setEmergencyContacts((prev) => ({
                     ...prev,
                     [key]: { ...(prev[key] || { name: key, phone: '' }), enabled: !prev[key]?.enabled },
                   }))}
+                  aria-label={`Toggle ${contact.name || key}`}
+                  aria-pressed={contact.enabled}
                 />
               </div>
             );

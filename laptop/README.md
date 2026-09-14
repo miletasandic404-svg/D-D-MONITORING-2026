@@ -330,7 +330,7 @@ može trajati ~10s dok MediaMTX povuče izvor: `sourceOnDemand`).
 
 ## 11. (Opcionalno) Razdvajanje Fly i laptop noda
 
-Trenutno Fly worker sinhronizuje **sve** kamere (`MEDIA_NODE_ID` nije postavljen).
+Svaki media worker sada mora imati `MEDIA_NODE_ID` i obrađuje samo eksplicitno dodeljene kamere.
 Da laptop i Fly ne rade dupli sync:
 
 1. Registrujte Fly kao node (`public_hls_url: https://dnd-media-server.fly.dev`).

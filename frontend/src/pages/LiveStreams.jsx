@@ -64,6 +64,7 @@ const PAGE_CSS = `
 export default function LiveStreams() {
   const [cameras, setCameras] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [viewingCamera, setViewingCamera] = useState(null);
   const [snapshotPending, setSnapshotPending] = useState(false);
   const [snapshotStatus, setSnapshotStatus] = useState({});
@@ -78,6 +79,7 @@ export default function LiveStreams() {
       setCameras(res.data.cameras || []);
     } catch (err) {
       console.error('Failed to fetch cameras:', err);
+      setLoadError(err.response?.data?.error || 'Failed to load cameras.');
     } finally {
       setLoading(false);
     }
@@ -175,6 +177,8 @@ export default function LiveStreams() {
           <div className="empty-streams">
             <p>Loading cameras...</p>
           </div>
+        ) : loadError ? (
+          <div className="empty-streams"><p>{loadError}</p></div>
         ) : cameras.length === 0 ? (
           <div className="empty-streams">
             <h2>No Active Streams</h2>

@@ -264,7 +264,16 @@ export default function Users() {
                       {getUserAssignments(user.id).map(a => a.site_name).join(', ')}
                     </div>
                   )}
-                  <button
+                   {user.user_type === 'operator' && (
+                     <button
+                       className="btn-cancel"
+                       type="button"
+                       onClick={() => openAssignModal(user)}
+                     >
+                       Assign site
+                     </button>
+                   )}
+                   <button
                     className="btn-delete"
                     onClick={() => {
                       setUserToDelete(user);

@@ -100,12 +100,10 @@ async function fetchDvripCameras() {
     FROM cameras c
     JOIN media_nodes n ON n.id = $1
     WHERE c.connection_type = 'dvrip'
-      AND (c.media_node_id = $1 OR c.media_node_id IS NULL)
+      AND c.media_node_id = $1
       AND c.enabled = true
-      AND (
-        n.organization_id IS NULL
-        OR c.organization_id = n.organization_id
-      )
+      AND n.organization_id IS NOT NULL
+      AND c.organization_id = n.organization_id
   `;
   const result = await pool.query(query, [MEDIA_NODE_ID]);
   return result.rows;

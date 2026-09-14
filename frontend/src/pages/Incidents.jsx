@@ -43,6 +43,7 @@ const PAGE_CSS = `
 export default function Incidents() {
   const [incidents, setIncidents] = useState([]);
   const [loading, setLoading] = useState(true);
+  const [loadError, setLoadError] = useState('');
   const [statusFilter, setStatusFilter] = useState('all');
   const [expandedId, setExpandedId] = useState(null);
 
@@ -56,6 +57,7 @@ export default function Incidents() {
       setIncidents(res.data.incidents || []);
     } catch (err) {
       console.error('Failed to fetch incidents:', err);
+      setLoadError(err.response?.data?.error || 'Failed to load incidents.');
     } finally {
       setLoading(false);
     }
@@ -86,6 +88,18 @@ export default function Incidents() {
     return classes[severity] || 'sev-medium';
   };
 
+  const updateStatus = async (incident, status) => {
+    if (!incident?.event_id) return;
+    try {
+      await api.patch(`/incidents/${incident.event_id}/status`, { status });
+      setIncidents((current) => current.map((item) => (
+        item.id === incident.id ? { ...item, status } : item
+      )));
+    } catch (err) {
+      setLoadError(err.response?.data?.error || 'Failed to update incident.');
+    }
+  };
+
   return (
     <>
       <style>{PAGE_CSS}</style>
@@ -111,6 +125,8 @@ export default function Incidents() {
 
         {loading ? (
           <div className="empty-incidents"><p>Loading incidents...</p></div>
+        ) : loadError ? (
+          <div className="empty-incidents"><p>{loadError}</p></div>
         ) : filteredIncidents.length === 0 ? (
           <div className="empty-incidents">
             <h2>No Incidents Found</h2>
@@ -156,6 +172,22 @@ export default function Incidents() {
                       >
                         {expandedId === incident.id ? 'Hide' : 'View'}
                       </button>
+                      {incident.status === 'New' && (
+                        <button
+                          className="action-btn action-btn-view"
+                          onClick={() => updateStatus(incident, 'Acknowledged')}
+                        >
+                          Acknowledge
+                        </button>
+                      )}
+                      {incident.status !== 'Resolved' && (
+                        <button
+                          className="action-btn action-btn-view"
+                          onClick={() => updateStatus(incident, 'Resolved')}
+                        >
+                          Resolve
+                        </button>
+                      )}
                     </div>
                   </td>
                 </tr>

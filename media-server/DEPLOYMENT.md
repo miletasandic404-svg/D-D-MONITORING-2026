@@ -53,7 +53,7 @@ Dva nezavisna mehanizma drze bazu i MediaMTX usklađenim:
    fly secrets set DATABASE_URL="postgresql://...neon.tech/neondb?sslmode=require" -a dnd-media-server
    fly secrets set MEDIA_NODE_ID="<uuid iz media_nodes tabele>" -a dnd-media-server
    ```
-   `MEDIA_NODE_ID` je opciono — ako se izostavi, worker sinhronizuje **sve** kamere sa `rtsp_url`-om, bez obzira na `media_node_id` (dobro za deployment sa jednim media node-om).
+   `MEDIA_NODE_ID` je obavezan — worker sinhronizuje samo kamere eksplicitno dodeljene tom media node-u.
 
 2. **Deploy** (iz root-a repozitorijuma, gde je `fly.toml`):
    ```bash
@@ -78,7 +78,7 @@ Dva nezavisna mehanizma drze bazu i MediaMTX usklađenim:
 | Varijabla | Podrazumevano | Opis |
 |---|---|---|
 | `DATABASE_URL` | *(obavezno)* | Neon connection string |
-| `MEDIA_NODE_ID` | *(nijedan — sinhronizuje sve kamere)* | Ograniči sinhronizaciju na kamere dodeljene ovom media node-u |
+| `MEDIA_NODE_ID` | *(obavezno)* | Ograniči sinhronizaciju na kamere dodeljene ovom media node-u |
 | `CAMERA_SYNC_INTERVAL_SECONDS` | `60` | Koliko često se ponavlja puni resync |
 | `MEDIAMTX_API_URL` | `http://localhost:9997` | Interna adresa MediaMTX REST API-ja |
 | `MEDIAMTX_API_USER` / `MEDIAMTX_API_PASS` | *(prazno)* | Basic auth za REST API, ako je uključen u `mediamtx.yml` |

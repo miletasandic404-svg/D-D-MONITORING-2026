@@ -264,7 +264,7 @@ describe('xiongmai-stream-worker — fetchDvripCameras', () => {
     const q = queryCalls[0];
     assert.match(q.text, /connection_type = 'dvrip'/);
     assert.match(q.text, /JOIN media_nodes n ON n\.id = \$1/);
-    assert.match(q.text, /n\.organization_id IS NULL/);
+    assert.match(q.text, /n\.organization_id IS NOT NULL/);
     assert.match(q.text, /c\.organization_id = n\.organization_id/);
     assert.match(q.text, /c\.enabled = true/);
     assert.deepEqual(q.params, ['node-1']);
@@ -669,7 +669,7 @@ describe('xiongmai-stream-worker — tenant isolation', () => {
     assert.equal(queryCalls.length, 1);
     const q = queryCalls[0].text;
     assert.match(q, /FROM cameras c\s+JOIN media_nodes n ON n\.id = \$1/);
-    assert.match(q, /n\.organization_id IS NULL/);
+    assert.match(q, /n\.organization_id IS NOT NULL/);
     assert.match(q, /c\.organization_id = n\.organization_id/);
     assert.match(q, /c\.connection_type = 'dvrip'/);
     assert.ok(!q.includes('WHERE 1=1') && !q.includes('WHERE true'));
