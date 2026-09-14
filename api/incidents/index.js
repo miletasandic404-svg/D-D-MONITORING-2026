@@ -236,13 +236,17 @@ async function handleStatus(req, res, eventId) {
 
     const incidentResult = await db.queryAsOrg(
       auth.organizationId,
-      'SELECT id, organization_id, status FROM incidents WHERE event_id = $1',
+      'SELECT id, organization_id, status, acknowledged_at FROM incidents WHERE event_id = $1',
       [eventId],
     );
     if (incidentResult.rows.length === 0 || incidentResult.rows[0].organization_id !== auth.organizationId) {
       return sendError(res, 404, 'Incident not found in your organization');
     }
     const incident = incidentResult.rows[0];
+
+    if (status && incident.status === 'Resolved' && status !== 'Resolved') {
+      return sendError(res, 409, 'Resolved incidents cannot be reopened');
+    }
 
     let targetOperatorId;
     if (assignToSelf) {
@@ -253,6 +257,17 @@ async function handleStatus(req, res, eventId) {
         return sendError(res, 403, 'Only org_admin/platform_admin can assign incidents to other operators');
       }
       targetOperatorId = assignedOperatorId;
+    }
+
+    if (targetOperatorId) {
+      const operatorResult = await db.queryAsOrg(
+        auth.organizationId,
+        'SELECT id FROM users WHERE id = $1 AND organization_id = $2',
+        [targetOperatorId, auth.organizationId],
+      );
+      if (operatorResult.rows.length === 0) {
+        return sendError(res, 403, 'Assigned operator must belong to your organization');
+      }
     }
 
     const updates = [];

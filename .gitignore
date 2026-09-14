@@ -27,6 +27,10 @@ dist-ssr
 workers/.kilo/
 workers/auto.crt
 workers/auto.key
+laptop/auto.crt
+laptop/auto.key
+auto.crt
+auto.key
 workers/*.json
 workers/*.txt
 workers/*.mp4

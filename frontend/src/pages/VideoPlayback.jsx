@@ -34,6 +34,8 @@ const PAGE_CSS = `
   .error-state { color: var(--accent-danger, #ff5050); text-align: center; padding: 2rem; }
 `;
 
+const mediaNodeBaseUrl = (import.meta.env.VITE_AUDIO_API_BASE_URL || '').replace(/\/$/, '');
+
 export default function VideoPlayback() {
   const [recordings, setRecordings] = useState([]);
   const [selectedRecording, setSelectedRecording] = useState(null);
@@ -42,6 +44,7 @@ export default function VideoPlayback() {
   const [isPlaying, setIsPlaying] = useState(false);
   const [currentTime, setCurrentTime] = useState(0);
   const [playbackError, setPlaybackError] = useState(null);
+  const [playbackUrl, setPlaybackUrl] = useState(null);
   const [filters, setFilters] = useState({
     camera: '',
     date: '',
@@ -56,7 +59,7 @@ export default function VideoPlayback() {
 
   useEffect(() => {
     const video = videoRef.current;
-    if (!video || !selectedRecording?.storage_url) return;
+    if (!video || !playbackUrl) return;
 
     const handleTimeUpdate = () => setCurrentTime(video.currentTime);
     const handlePlay = () => setIsPlaying(true);
@@ -79,6 +82,35 @@ export default function VideoPlayback() {
       video.removeEventListener('pause', handlePause);
       video.removeEventListener('ended', handleEnded);
       video.removeEventListener('error', handleError);
+    };
+  }, [playbackUrl, selectedRecording]);
+
+  useEffect(() => {
+    let cancelled = false;
+    setPlaybackUrl(null);
+    if (!selectedRecording?.storage_url) return undefined;
+    if (!selectedRecording.storage_url.startsWith('local://')) {
+      setPlaybackUrl(selectedRecording.storage_url);
+      return undefined;
+    }
+    if (!mediaNodeBaseUrl || !selectedRecording.camera_id) {
+      setPlaybackError('Local recording playback is not configured for this camera.');
+      return undefined;
+    }
+
+    api.post('/camera-views', { camera_id: selectedRecording.camera_id })
+      .then((res) => {
+        if (cancelled) return;
+        const token = res.data?.streamToken;
+        if (!token) throw new Error('Playback session token was not issued.');
+        setPlaybackUrl(`${mediaNodeBaseUrl}/api/storage/recording/${encodeURIComponent(selectedRecording.id)}?token=${encodeURIComponent(token)}`);
+      })
+      .catch(() => {
+        if (!cancelled) setPlaybackError('Failed to authorize recording playback.');
+      });
+
+    return () => {
+      cancelled = true;
     };
   }, [selectedRecording]);
 
@@ -134,9 +166,9 @@ export default function VideoPlayback() {
   };
 
   const handleDownload = async () => {
-    if (!selectedRecording?.storage_url) return;
+    if (!playbackUrl) return;
     try {
-      const res = await api.get(selectedRecording.storage_url, { responseType: 'blob' });
+      const res = await api.get(playbackUrl, { responseType: 'blob' });
       const url = window.URL.createObjectURL(new Blob([res.data]));
       const link = document.createElement('a');
       link.href = url;
@@ -146,7 +178,7 @@ export default function VideoPlayback() {
       link.remove();
       window.URL.revokeObjectURL(url);
     } catch {
-      window.open(selectedRecording.storage_url, '_blank');
+      window.open(playbackUrl, '_blank');
     }
   };
 
@@ -199,6 +231,8 @@ export default function VideoPlayback() {
               <div className="empty-state">{loadError}</div>
             ) : filteredRecordings.length === 0 ? (
               <div className="empty-state">No recordings found</div>
+            ) : selectedRecording?.storage_url ? (
+              <div className="video-placeholder"><span>🔐</span><p>Authorizing recording playback...</p></div>
             ) : (
               filteredRecordings.map(rec => (
                 <div 
@@ -222,21 +256,13 @@ export default function VideoPlayback() {
           <div className="video-player">
             <div className="video-container">
               {selectedRecording ? (
-                isLocalRecording ? (
-                  <div className="error-state">
-                    <span style={{ fontSize: '3rem', display: 'block', marginBottom: '1rem' }}>📁</span>
-                    <p>Local recording playback requires a media node proxy.</p>
-                    <p style={{ fontSize: '0.85rem', color: 'var(--text-muted, #6a8aaa)' }}>
-                      Access this recording through the media server directly.
-                    </p>
-                  </div>
-                ) : selectedRecording.storage_url ? (
+                playbackUrl ? (
                   <>
                     <video
                       ref={videoRef}
                       controls
                       autoPlay
-                      src={selectedRecording.storage_url}
+                      src={playbackUrl}
                       onError={() => setPlaybackError('Failed to load recording.')}
                     />
                     {playbackError && (

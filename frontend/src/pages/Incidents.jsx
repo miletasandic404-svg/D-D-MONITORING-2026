@@ -162,7 +162,9 @@ export default function Incidents() {
                     </span>
                   </td>
                   <td className="incident-time">
-                    {incident.created_at ? new Date(incident.created_at).toLocaleString() : 'Unknown'}
+                    {(incident.created_at || incident.timestamp)
+                      ? new Date(incident.created_at || incident.timestamp).toLocaleString()
+                      : 'Unknown'}
                   </td>
                   <td>
                     <div className="incident-actions">

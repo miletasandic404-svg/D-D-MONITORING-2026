@@ -1,6 +1,7 @@
 'use strict';
 
 const { getSessionFromRequest } = require('../lib/auth');
+const { requireAuth } = require('../lib/_auth');
 const { sendError, sendSuccess } = require('../lib/_error');
 const { rateLimit } = require('../lib/_rate_limit');
 const { listPlanDefinitions } = require('../lib/payment_catalog');
@@ -83,19 +84,16 @@ module.exports = async (req, res) => {
     }
 
     if (req.method === 'GET' && path === 'status') {
-      const auth = await getOptionalSession(req);
-      if (!auth) {
-        return sendError(res, 401, 'Authentication required');
-      }
+      const auth = await requireAuth(req, res);
+      if (!auth) return;
       const state = await getSubscriptionState(auth);
       return sendSuccess(res, state);
     }
 
     if (req.method === 'POST' && path === 'retry') {
-      const auth = await getOptionalSession(req);
-      if (!auth?.organizationId) {
-        return sendError(res, 401, 'Authentication required');
-      }
+      const auth = await requireAuth(req, res, { roles: ['org_admin', 'platform_admin'] });
+      if (!auth) return;
+      if (!auth.organizationId) return sendError(res, 403, 'Organization context required');
       const retried = await retryPendingActivations({
         organizationId: auth.organizationId,
         userId: auth.userId,

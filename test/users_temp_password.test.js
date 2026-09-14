@@ -154,4 +154,17 @@ describe('api/users — temporary invitation password', () => {
     assert.equal(createCalls.length, 1);
     assert.equal(createCalls[0].userType, 'operator', 'default user_type must remain "operator"');
   });
+
+  test('response describes temporary credentials and does not claim email delivery', async () => {
+    const req = makeReq({ body: { email: 'delivery@example.com' } });
+    const res = makeRes();
+    await handler(req, res);
+
+    assert.equal(res.statusCode, 200);
+    assert.equal(res.body.emailSent, false);
+    assert.match(res.body.message, /temporary invitation credentials/i);
+    assert.match(res.body.message, /no email was sent/i);
+    assert.doesNotMatch(JSON.stringify(res.body), /[0-9a-f]{32}/i,
+      'temporary password must not be returned in the response');
+  });
 });

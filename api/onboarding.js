@@ -128,6 +128,37 @@ module.exports = async (req, res) => {
         );
         const newOrgId = orgResult.rows[0].id;
 
+        const userResult = await client.query(
+          `SELECT u.organization_id, o.name AS organization_name
+           FROM users u
+           LEFT JOIN organizations o ON o.id = u.organization_id
+           WHERE u.id = $1
+           FOR UPDATE`,
+          [auth.userId],
+        );
+        if (userResult.rows.length === 0) {
+          const err = new Error('Authenticated user profile not found');
+          err.statusCode = 403;
+          throw err;
+        }
+        const currentOrganization = userResult.rows[0];
+        if (currentOrganization.organization_id
+          && currentOrganization.organization_name !== 'Default Organization') {
+          const err = new Error('Your account already has an organization set up.');
+          err.statusCode = 409;
+          throw err;
+        }
+
+        // The new tenant does not exist before this transaction, so its
+        // context can only be installed after the organization INSERT and
+        // pre-tenant identity check. set_config(..., true) keeps the
+        // context transaction-local and avoids interpolating a database
+        // value into SET LOCAL SQL.
+        await client.query(
+          `SELECT set_config('app.current_org_id', $1, true)`,
+          [newOrgId],
+        );
+
         const siteResult = await client.query(
           `INSERT INTO sites (organization_id, name, address, timezone, status)
            VALUES ($1, $2, $3, 'UTC', 'active')
@@ -136,7 +167,13 @@ module.exports = async (req, res) => {
         );
 
         await client.query(
-          `UPDATE users SET organization_id = $1, user_type = 'org_admin' WHERE id = $2`,
+          `UPDATE users
+           SET organization_id = $1, user_type = 'org_admin'
+           WHERE id = $2
+             AND (organization_id IS NULL OR organization_id = (
+               SELECT id FROM organizations WHERE name = 'Default Organization'
+               ORDER BY created_at ASC LIMIT 1
+             ))`,
           [newOrgId, auth.userId],
         );
 
@@ -176,7 +213,11 @@ module.exports = async (req, res) => {
     } catch (dbErr) {
       logger.error('[onboarding/register] DB error', { error: dbErr.message });
       Sentry.captureException(dbErr);
-      return sendError(res, 500, `Failed to create organization: ${dbErr.message}`);
+      return sendError(
+        res,
+        dbErr.statusCode || 500,
+        dbErr.statusCode ? dbErr.message : `Failed to create organization: ${dbErr.message}`,
+      );
     }
 
     await logAudit({

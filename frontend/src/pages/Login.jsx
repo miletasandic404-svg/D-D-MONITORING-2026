@@ -1,6 +1,6 @@
 import React, { useState, useEffect, useRef } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { signIn } from '../services/auth-client';
+import { getSession, signIn } from '../services/auth-client';
 import api from '../services/api';
 import {
   clearPendingPayment,
@@ -124,6 +124,19 @@ export default function Login() {
   const contactsFilled = [district, contacts.police, contacts.fire, contacts.ambulance, contacts.command].every(
     (v) => String(v || '').trim().length > 0
   );
+
+  useEffect(() => {
+    let cancelled = false;
+    getSession().then((session) => {
+      if (!cancelled && session?.user) {
+        navigate('/dashboard', { replace: true });
+      }
+    });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [navigate]);
 
   useEffect(() => {
     let cancelled = false;

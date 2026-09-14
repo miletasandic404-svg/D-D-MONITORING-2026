@@ -21,7 +21,7 @@ version: "3.8"
 
 services:
   mediamtx:
-    image: bluenviron/mediamtx:latest
+    image: bluenviron/mediamtx@sha256:7797ed3f88df21e8c04ecd0aff08ce49a5232d1db453e51f5480ef36bc80865
     container_name: dnd-mediamtx
     restart: unless-stopped
     volumes:

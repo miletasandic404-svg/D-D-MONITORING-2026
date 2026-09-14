@@ -47,8 +47,8 @@ rateLimitModule.rateLimit = async () => true;
 
 const handler = require('../api/incidents');
 
-function makeReq({ method = 'GET', query = {} } = {}) {
-  return { method, query, headers: {}, socket: { remoteAddress: '127.0.0.1' } };
+function makeReq({ method = 'GET', query = {}, body = {} } = {}) {
+  return { method, query, body, headers: {}, socket: { remoteAddress: '127.0.0.1' } };
 }
 
 function makeRes() {
@@ -301,6 +301,46 @@ describe('api/incidents — Incidents Today date filter', () => {
       const countSql = queryCalls.find((c) => c.text.includes('count(*)::int AS total'));
       assert.equal(countSql, undefined, 'count query must be skipped when no accessible cameras');
       assert.equal(res.body.total, 0);
+    });
+
+    describe('incident status authorization and lifecycle', () => {
+      test('does not reopen a resolved incident', async () => {
+        dbScript = (text) => {
+          if (text.includes('SELECT id, organization_id, status')) {
+            return { rows: [{ id: 'inc-1', organization_id: 'org-1', status: 'Resolved', acknowledged_at: new Date() }], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 0 };
+        };
+        const res = makeRes();
+        await handler(makeReq({
+          method: 'PATCH',
+          query: { eventId: 42, path: 'status' },
+          body: { status: 'In Progress' },
+        }), res);
+        assert.equal(res.statusCode, 409);
+        assert.match(res.body.error, /cannot be reopened/i);
+        assert.equal(queryCalls.some((call) => call.text.startsWith('UPDATE incidents SET')), false);
+      });
+
+      test('rejects assigning an incident to an operator from another organization', async () => {
+        authResponse = { userId: 'admin-1', organizationId: 'org-1', userType: 'org_admin' };
+        dbScript = (text) => {
+          if (text.includes('SELECT id, organization_id, status')) {
+            return { rows: [{ id: 'inc-1', organization_id: 'org-1', status: 'New', acknowledged_at: null }], rowCount: 1 };
+          }
+          if (text.includes('SELECT id FROM users')) return { rows: [], rowCount: 0 };
+          return { rows: [], rowCount: 0 };
+        };
+        const res = makeRes();
+        await handler(makeReq({
+          method: 'PATCH',
+          query: { eventId: 42, path: 'status' },
+          body: { assigned_operator_id: '11111111-1111-4111-8111-111111111111' },
+        }), res);
+        assert.equal(res.statusCode, 403);
+        assert.match(res.body.error, /belong to your organization/i);
+        assert.equal(queryCalls.some((call) => call.text.startsWith('UPDATE incidents SET')), false);
+      });
     });
   });
 });

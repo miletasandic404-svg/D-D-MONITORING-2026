@@ -18,17 +18,22 @@ function freshRequire() {
 }
 
 const TEST_HEARTBEAT_FILE = path.join(require('os').tmpdir(), 'dnd-worker-heartbeat-test.json');
+const TEST_HEALTH_DIR = path.join(require('os').tmpdir(), 'dnd-worker-health-test');
 
 describe('lib/_worker_heartbeat', () => {
   beforeEach(() => {
     // Force a unique file path for each test run via env override
     process.env.WORKER_HEARTBEAT_FILE = TEST_HEARTBEAT_FILE;
+    process.env.WORKER_HEALTH_DIR = TEST_HEALTH_DIR;
     try { fs.unlinkSync(TEST_HEARTBEAT_FILE); } catch {}
+    fs.rmSync(TEST_HEALTH_DIR, { recursive: true, force: true });
   });
 
   after(() => {
     try { fs.unlinkSync(TEST_HEARTBEAT_FILE); } catch {}
     delete process.env.WORKER_HEARTBEAT_FILE;
+    delete process.env.WORKER_HEALTH_DIR;
+    fs.rmSync(TEST_HEALTH_DIR, { recursive: true, force: true });
   });
 
   test('beat() creates a heartbeat entry for a named worker', () => {
@@ -124,5 +129,39 @@ describe('lib/_worker_heartbeat', () => {
     const status = getWorkerStatus();
     assert.equal(status.workers.length, 1);
     assert.equal(status.workers[0].name, 'camera-setup-agent');
+  });
+
+  test('supervisor terminal failure is visible without exposing secrets', () => {
+    fs.mkdirSync(TEST_HEALTH_DIR, { recursive: true });
+    fs.writeFileSync(path.join(TEST_HEALTH_DIR, 'xiongmai-stream-worker.health.json'), JSON.stringify({
+      worker_name: 'xiongmai-stream-worker',
+      status: 'FAILED/UNHEALTHY',
+      timestamp: '2026-09-14T11:25:40.856Z',
+      failure_count: 3,
+      exit_code: 1,
+    }), 'utf-8');
+
+    const { getWorkerStatus } = freshRequire();
+    const worker = getWorkerStatus().workers[0];
+    assert.equal(worker.status, 'FAILED/UNHEALTHY');
+    assert.deepEqual(worker.supervisor, { failure_count: 3, exit_code: 1 });
+    assert.doesNotMatch(JSON.stringify(worker), /password|token|secret/i);
+  });
+
+  test('running supervisor state clears a stale terminal failure state', () => {
+    fs.mkdirSync(TEST_HEALTH_DIR, { recursive: true });
+    fs.writeFileSync(path.join(TEST_HEALTH_DIR, 'camera-sync-worker.health.json'), JSON.stringify({
+      worker_name: 'camera-sync-worker',
+      status: 'running',
+      timestamp: '2026-09-14T11:26:00.000Z',
+      failure_count: 0,
+      exit_code: null,
+    }), 'utf-8');
+
+    const { getWorkerStatus } = freshRequire();
+    const worker = getWorkerStatus().workers[0];
+    assert.equal(worker.status, 'running');
+    assert.equal(worker.supervisor.failure_count, 0);
+    assert.equal(worker.supervisor.exit_code, null);
   });
 });

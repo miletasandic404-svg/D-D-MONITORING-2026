@@ -39,8 +39,13 @@ describe('users API - invite user tempPassword exposure', () => {
     assert.doesNotMatch(sendSuccessCall, /password/,
       'password must NOT be present in sendSuccess response');
 
-    // Verify the message indicates password reset flow
-    assert.match(sendSuccessCall, /password reset/i,
-      'Response message should indicate password reset flow');
+    // The endpoint does not create a reset token or send email. Its response
+    // must not claim that either happened.
+    assert.doesNotMatch(sendSuccessCall, /password reset link sent/i,
+      'Response must not claim that a reset link was sent');
+    assert.match(sendSuccessCall, /temporary invitation credentials/i,
+      'Response must describe the actual temporary-credential flow');
+    assert.match(sendSuccessCall, /no email was sent/i,
+      'Response must disclose that this endpoint does not send email');
   });
 });

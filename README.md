@@ -21,7 +21,7 @@ IP camera (LAN) ──RTSP──▶ Desktop/Laptop media node (MediaMTX)
 | Component | Where | Role |
 |---|---|---|
 | **Dashboard + API** | Vercel (serverless, `api/`) | Auth (Better Auth), cameras/sites/incidents, billing, wizard task queue |
-| **Database** | Neon (PostgreSQL) | 21 tables, RLS `tenant_isolation` on tenant data, migrations `db/migrations/001–028` |
+| **Database** | Neon (PostgreSQL) | 21 tables, RLS `tenant_isolation` on tenant data, authoritative migrations in `db/migrations/` |
 | **Media node** | Your PC/Laptop (`laptop/`) | MediaMTX (RTSP→HLS), `camera-sync-worker`, `camera-setup-agent`, `media-node-heartbeat`, `cloudflared` tunnel |
 | **Streaming** | MediaMTX + Cloudflare Tunnel | Publishes HLS publicly; every HLS request is token-checked via `/api/verify-stream-token` |
 
@@ -32,7 +32,9 @@ IP camera (LAN) ──RTSP──▶ Desktop/Laptop media node (MediaMTX)
 ### 1. Database (Neon)
 
 1. Create a Neon project and copy the **connection string** (owner role).
-2. Run the migrations in order: `db/migrations/001_*.sql` → … → `028_wizard_v3_health.sql`.
+2. Run the authoritative migrations in `db/migrations/` in numeric order.
+   The timestamped files under `supabase/migrations/` are a legacy snapshot
+   and must not be used as an alternative migration source.
    Apply 028 (Wizard V3 health + task modes):
 
 ```sql

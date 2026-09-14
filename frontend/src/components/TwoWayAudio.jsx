@@ -44,6 +44,8 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
   const speakingRef = useRef(false);
   const sendInFlightRef = useRef(false);
   const pendingFrameRef = useRef(null);
+  const startInFlightRef = useRef(false);
+  const startGenerationRef = useRef(0);
 
   const caps = capabilities || { supported: false, reason: 'not loaded' };
 
@@ -171,7 +173,9 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
   // ── Start speaking (push-to-talk) ───────────────────────────────────
   const startSpeaking = async () => {
     if (!listeningRef.current) return;
-    if (speakingRef.current) return;
+    if (speakingRef.current || startInFlightRef.current) return;
+    const generation = ++startGenerationRef.current;
+    startInFlightRef.current = true;
 
     try {
       setError(null);
@@ -225,16 +229,29 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
         const errBody = await startRes.json().catch(() => ({ error: 'Start failed' }));
         throw new Error(errBody.error || `Start failed: ${startRes.status}`);
       }
+      if (generation !== startGenerationRef.current || !listeningRef.current) {
+        await fetch(
+          `${audioApiBaseUrl}/api/audio/${cameraId}/stop?token=${encodeURIComponent(streamToken)}`,
+          { method: 'POST', headers: { 'Content-Type': 'application/json' } },
+        ).catch(() => {});
+        cleanupAudio();
+        return;
+      }
       speakingRef.current = true;
       setSpeaking(true);
       setSessionActive(true);
     } catch (err) {
-      setError('Failed to start talk session');
-      cleanupAudio();
+      if (generation === startGenerationRef.current) {
+        setError('Failed to start talk session');
+        cleanupAudio();
+      }
+    } finally {
+      startInFlightRef.current = false;
     }
   };
 
   const stopSpeaking = async () => {
+    ++startGenerationRef.current;
     speakingRef.current = false;
     setSpeaking(false);
     try {

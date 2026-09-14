@@ -1,6 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { getSession, signOut } from '../services/auth-client';
+import { getSession } from '../services/auth-client';
 
 export function useAuth() {
   const navigate = useNavigate();
@@ -13,7 +13,7 @@ export function useAuth() {
         const session = await getSession();
         if (!session || !session.user) {
           localStorage.removeItem('currentUser');
-          await signOut();
+          setAuthChecked(true);
           navigate('/', { replace: true });
         } else {
           localStorage.setItem('currentUser', JSON.stringify(session.user));
@@ -22,6 +22,7 @@ export function useAuth() {
         }
       } catch (err) {
         localStorage.removeItem('currentUser');
+        setAuthChecked(true);
         navigate('/', { replace: true });
       }
     })();

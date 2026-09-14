@@ -80,7 +80,7 @@ export function useIncidents(authChecked) {
       case 'In Progress':
         return ['Resolved', 'False Alarm'];
       case 'Resolved':
-        return ['In Progress', 'False Alarm'];
+        return [];
       case 'False Alarm':
         return ['New', 'Acknowledged'];
       default:

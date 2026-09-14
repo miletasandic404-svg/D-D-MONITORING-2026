@@ -30,9 +30,10 @@ fly logs -a dnd-media-server
 - Proveri da li se build pokreće iz **root-a** repozitorijuma (fly.toml
   mora biti tu, ne u `media-server/`) — build kontekst mora obuhvatiti
   `workers/` i `lib/_mediamtx_client.js`.
-- `Dockerfile` koristi multi-stage build (`bluenviron/mediamtx:latest`
-  + `node:20-alpine`) — proveri da Fly build agent ima pristup Docker
-  Hub-u (retko, ali moguće u restriktivnim mrežama).
+- `Dockerfile` koristi multi-stage build sa pinned MediaMTX 1.19.3
+  image digest (`bluenviron/mediamtx@sha256:...`) + `node:20-alpine` —
+  proveri da Fly build agent ima pristup Docker Hub-u (retko, ali moguće
+  u restriktivnim mrežama).
 
 ### Simptom: mašina se pokrene, ali odmah pada (restart loop)
 

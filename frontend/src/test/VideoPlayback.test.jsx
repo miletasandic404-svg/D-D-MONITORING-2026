@@ -91,4 +91,5 @@ describe('VideoPlayback', () => {
     fireEvent.click(screen.getByText(/Cam 1/));
     expect(screen.getByText('0:00 / 2:05')).toBeInTheDocument();
   });
+
 });

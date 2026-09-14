@@ -84,6 +84,8 @@ const {
   upsertPaymentTransaction,
   activatePaymentForOrganization,
   handleRefundedActivation,
+  reconcileStripeIntent,
+  capturePayPalCheckout,
 } = require('../lib/payment_service');
 
 // ── helpers ──────────────────────────────────────────────────────────────────

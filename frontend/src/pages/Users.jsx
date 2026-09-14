@@ -125,7 +125,7 @@ export default function Users() {
       const res = await api.post('/users', { email, user_type: userType });
 
       if (res.data.success) {
-        setSuccess(res.data.message || `Invitation sent to ${email}!`);
+        setSuccess(res.data.message || `Invitation created for ${email}. No email was sent.`);
         setEmail('');
         setShowModal(false);
         fetchUsers(); // Refresh the list

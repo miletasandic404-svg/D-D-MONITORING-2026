@@ -9,7 +9,8 @@ WORKDIR /worker
 COPY media-server/package.json ./package.json
 RUN npm install --production --omit=dev
 
-FROM bluenviron/mediamtx:latest AS mediamtx-src
+# Pinned to the locally validated MediaMTX 1.19.3 multi-arch image.
+FROM bluenviron/mediamtx@sha256:7797ed3f88df21e8c04ecd0aff08ce49a5232d1db453e51f5480ef36bc80865 AS mediamtx-src
 
 FROM node:20-alpine
 RUN apk add --no-cache bash curl ca-certificates ffmpeg
