@@ -95,7 +95,7 @@ const sessionSweepTimer = setInterval(() => {
 const startRateLimits = new Map(); // cameraId -> [timestamps]
 const START_RATE_WINDOW_MS = 60_000;
 const START_RATE_MAX = 5;
-const MAX_SESSION_DURATION_MS = 30_000;
+const MAX_SESSION_DURATION_MS = 120_000;
 
 function checkStartRateLimit(cameraId) {
   const now = Date.now();
@@ -376,18 +376,12 @@ const server = http.createServer(async (req, res) => {
 
     const existing = talkSessions.get(cameraId);
     if (existing) {
-      if (Date.now() - existing.createdAt > MAX_SESSION_DURATION_MS) {
-        try { existing.adapter.stopTalk(); } catch (_) {}
-        try { existing.adapter.close(); } catch (_) {}
-        talkSessions.delete(cameraId);
-      } else {
-        existing.lastActivity = Date.now();
-        return jsonResponse(res, 200, {
-          success: true,
-          session_id: existing.sessionId,
-          resumed: true,
-        });
-      }
+      // Always create a fresh session for a new push-to-talk.
+      // The previous session may have been stopped but not cleaned up,
+      // or may be close to the wall-clock limit.
+      try { await existing.adapter.stopTalk(); } catch (_) {}
+      try { existing.adapter.close(); } catch (_) {}
+      talkSessions.delete(cameraId);
     }
 
     const camera = await getCamera(cameraId);

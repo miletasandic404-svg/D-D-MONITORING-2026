@@ -107,6 +107,16 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
           await sendAudioFrameOnce(again);
         }
       }
+    } catch (err) {
+      // Terminal session error: stop speaking immediately
+      if (err.terminal) {
+        speakingRef.current = false;
+        setSpeaking(false);
+        setError(err.message || 'Session ended');
+        stopSpeaking();
+        return;
+      }
+      throw err;
     } finally {
       sendInFlightRef.current = false;
       const leftover = pendingFrameRef.current;
@@ -140,6 +150,10 @@ const TwoWayAudio = ({ cameraId, cameraName, streamToken, capabilities }) => {
       const err = new Error(body && (body.error || body.message) || `HTTP ${res.status}`);
       err.status = res.status;
       err.body = body;
+      // Terminal session errors: stop sending immediately
+      if (res.status === 410 || res.status === 404 || res.status === 400) {
+        err.terminal = true;
+      }
       throw err;
     }
   }
