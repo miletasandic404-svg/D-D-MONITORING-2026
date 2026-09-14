@@ -1,5 +1,5 @@
 const db = require('../../db/index');
-const { requireAuth, getAccessibleCameraIds } = require('../../lib/_auth');
+const { requireAuth, getAccessibleCameraIds, canAccessCamera } = require('../../lib/_auth');
 const { logAudit, getIp } = require('../../lib/_audit');
 const { keyFromPublicUrl, getPresignedDownloadUrl, isConfigured } = require('../../lib/_storage');
 const { z } = require('zod');
@@ -236,13 +236,21 @@ async function handleStatus(req, res, eventId) {
 
     const incidentResult = await db.queryAsOrg(
       auth.organizationId,
-      'SELECT id, organization_id, status, acknowledged_at FROM incidents WHERE event_id = $1',
+      'SELECT i.id, i.organization_id, i.status, i.acknowledged_at, e.camera_id FROM incidents i JOIN events e ON e.id = i.event_id WHERE i.event_id = $1',
       [eventId],
     );
     if (incidentResult.rows.length === 0 || incidentResult.rows[0].organization_id !== auth.organizationId) {
       return sendError(res, 404, 'Incident not found in your organization');
     }
     const incident = incidentResult.rows[0];
+
+    // Camera/site authorization for non-admin operators
+    if (auth.userType !== 'org_admin' && auth.userType !== 'platform_admin') {
+      const hasAccess = await canAccessCamera(auth, incident.camera_id);
+      if (!hasAccess) {
+        return sendError(res, 403, 'You are not authorized to modify this incident');
+      }
+    }
 
     if (status && incident.status === 'Resolved' && status !== 'Resolved') {
       return sendError(res, 409, 'Resolved incidents cannot be reopened');
@@ -349,6 +357,14 @@ async function handleEvidence(req, res, eventId) {
       return sendError(res, 404, 'Event not found in your organization');
     }
     const event = eventResult.rows[0];
+
+    // Camera/site authorization for non-admin operators
+    if (auth.userType !== 'org_admin' && auth.userType !== 'platform_admin') {
+      const hasAccess = await canAccessCamera(auth, event.camera_id);
+      if (!hasAccess) {
+        return sendError(res, 403, 'You are not authorized to access evidence for this camera');
+      }
+    }
 
     const recordingsResult = await db.queryAsOrg(
       auth.organizationId,

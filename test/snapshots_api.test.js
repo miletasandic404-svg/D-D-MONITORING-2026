@@ -25,8 +25,8 @@ function resetFakes() {
   lastInsert = null;
   db.queryAsOrg = (orgId, text, params) => {
     queryCalls.push({ orgId, text, params });
-    if (/SELECT id FROM cameras WHERE id = \$1 AND organization_id = \$2/.test(text)) {
-      return { rows: [{ id: params[0] }] };
+    if (/SELECT id(?:, site_id)? FROM cameras WHERE id = \$1 AND organization_id = \$2/.test(text)) {
+      return { rows: [{ id: params[0], site_id: 'site-1' }] };
     }
     if (/INSERT INTO snapshots/.test(text)) {
       lastInsert = { text, params };
@@ -51,6 +51,7 @@ storage.uploadObject = async ({ key, body, contentType }) => {
 // ── fake auth ────────────────────────────────────────────────────────────────
 const authModule = require('../lib/_auth');
 let authResponse = { userId: 'user-1', organizationId: 'org-1', userType: 'org_admin' };
+let canAccessCameraResult = true;
 
 authModule.requireAuth = async (req, res) => {
   if (authResponse === null) {
@@ -59,6 +60,8 @@ authModule.requireAuth = async (req, res) => {
   }
   return authResponse;
 };
+
+authModule.canAccessCamera = async () => canAccessCameraResult;
 
 // ── fake rate limit ──────────────────────────────────────────────────────────
 const rateLimitModule = require('../lib/_rate_limit');
@@ -102,6 +105,7 @@ describe('POST /api/snapshots', () => {
     storageConfigured = true;
     presignedCalls = [];
     authResponse = { userId: 'user-1', organizationId: 'org-1', userType: 'org_admin' };
+    canAccessCameraResult = true;
   });
 
   test('auth required — 401 when no session', async () => {
@@ -154,7 +158,7 @@ describe('POST /api/snapshots', () => {
     await handler(makeReq({ camera_id: 'cam-1', image_base64: JFIF_BYTES.toString('base64') }), res);
 
     assert.ok(queryCalls.every(c => c.orgId === 'org-1'));
-    const camCheck = queryCalls.find(c => /SELECT id FROM cameras/.test(c.text));
+    const camCheck = queryCalls.find(c => /SELECT id(?:, site_id)? FROM cameras/.test(c.text));
     assert.deepEqual(camCheck.params, ['cam-1', 'org-1']);
   });
 
@@ -215,8 +219,8 @@ describe('POST /api/snapshots', () => {
         err.code = 'ECONNREFUSED';
         throw err;
       }
-      if (/SELECT id FROM cameras WHERE id = \$1 AND organization_id = \$2/.test(text)) {
-        return { rows: [{ id: params[0] }] };
+      if (/SELECT id, site_id FROM cameras WHERE id = \$1 AND organization_id = \$2/.test(text)) {
+        return { rows: [{ id: params[0], site_id: 'site-1' }] };
       }
       return { rows: [] };
     };
@@ -228,5 +232,57 @@ describe('POST /api/snapshots', () => {
     assert.ok('error' in res.body.details[0].debug, 'debug object must contain error');
     assert.ok('code' in res.body.details[0].debug, 'debug object must contain code');
     assert.ok('name' in res.body.details[0].debug, 'debug object must contain name');
+  });
+
+  // ── Camera authorization tests ────────────────────────────────────────────
+
+  test('operator cannot create snapshot for unassigned camera in same org', async () => {
+    authResponse = { userId: 'operator-1', organizationId: 'org-1', userType: 'operator' };
+    canAccessCameraResult = false;
+
+    const res = makeRes();
+    await handler(makeReq({ camera_id: 'cam-2', image_base64: JFIF_BYTES.toString('base64') }), res);
+
+    assert.equal(res.statusCode, 403);
+    assert.match(res.body.error, /not authorized to create snapshots/i);
+    assert.equal(uploadCalls.length, 0);
+    assert.equal(queryCalls.filter(c => /INSERT INTO snapshots/.test(c.text)).length, 0);
+  });
+
+  test('authorized operator can create snapshot for assigned camera', async () => {
+    authResponse = { userId: 'operator-1', organizationId: 'org-1', userType: 'operator' };
+    canAccessCameraResult = true;
+
+    const res = makeRes();
+    await handler(makeReq({ camera_id: 'cam-1', image_base64: JFIF_BYTES.toString('base64') }), res);
+
+    assert.equal(res.statusCode, 201);
+    assert.equal(uploadCalls.length, 1);
+    assert.ok(res.body.snapshot.storage_url);
+    assert.ok(!res.body.snapshot.storage_url.startsWith('data:image'));
+  });
+
+  test('org_admin can create snapshot for any camera in org', async () => {
+    authResponse = { userId: 'admin-1', organizationId: 'org-1', userType: 'org_admin' };
+    canAccessCameraResult = true;
+
+    const res = makeRes();
+    await handler(makeReq({ camera_id: 'cam-2', image_base64: JFIF_BYTES.toString('base64') }), res);
+
+    assert.equal(res.statusCode, 201);
+    assert.equal(uploadCalls.length, 1);
+    assert.ok(res.body.snapshot.storage_url);
+  });
+
+  test('platform_admin can create snapshot for any camera in org', async () => {
+    authResponse = { userId: 'padmin-1', organizationId: 'org-1', userType: 'platform_admin' };
+    canAccessCameraResult = true;
+
+    const res = makeRes();
+    await handler(makeReq({ camera_id: 'cam-2', image_base64: JFIF_BYTES.toString('base64') }), res);
+
+    assert.equal(res.statusCode, 201);
+    assert.equal(uploadCalls.length, 1);
+    assert.ok(res.body.snapshot.storage_url);
   });
 });

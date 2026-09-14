@@ -417,7 +417,6 @@ export default function Cameras() {
         const video = videoRef.current;
         if (!video) return;
         const manifestUrl = `${buildHlsManifestUrl(targetCamera.id, targetCamera.hls_base_url)}?token=${encodeURIComponent(streamToken)}`;
-        console.log('HLS URL:', manifestUrl);
         if (hlsRef.current) {
           hlsRef.current.destroy();
           hlsRef.current = null;

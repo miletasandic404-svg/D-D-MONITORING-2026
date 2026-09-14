@@ -24,6 +24,7 @@ function resetFakes() {
   dbScript = null;
   authResponse = { userId: 'user-1', organizationId: 'org-1', role: 'org_admin' };
   cameraAccess = null;
+  canAccessCameraResult = true;
 }
 
 db.queryAsOrg = async (orgId, text, params) => {
@@ -41,6 +42,9 @@ db.queryAsPlatformAdmin = async (text, params) => {
 const authModule = require('../lib/_auth');
 authModule.requireAuth = async () => authResponse;
 authModule.getAccessibleCameraIds = async () => cameraAccess;
+// Mock canAccessCamera for authorization tests
+let canAccessCameraResult = true;
+authModule.canAccessCamera = async () => canAccessCameraResult;
 
 const rateLimitModule = require('../lib/_rate_limit');
 rateLimitModule.rateLimit = async () => true;
@@ -306,8 +310,8 @@ describe('api/incidents — Incidents Today date filter', () => {
     describe('incident status authorization and lifecycle', () => {
       test('does not reopen a resolved incident', async () => {
         dbScript = (text) => {
-          if (text.includes('SELECT id, organization_id, status')) {
-            return { rows: [{ id: 'inc-1', organization_id: 'org-1', status: 'Resolved', acknowledged_at: new Date() }], rowCount: 1 };
+          if (text.includes('SELECT i.id, i.organization_id, i.status, i.acknowledged_at, e.camera_id')) {
+            return { rows: [{ id: 'inc-1', organization_id: 'org-1', status: 'Resolved', acknowledged_at: new Date(), camera_id: 'CAM-1' }], rowCount: 1 };
           }
           return { rows: [], rowCount: 0 };
         };
@@ -325,8 +329,8 @@ describe('api/incidents — Incidents Today date filter', () => {
       test('rejects assigning an incident to an operator from another organization', async () => {
         authResponse = { userId: 'admin-1', organizationId: 'org-1', userType: 'org_admin' };
         dbScript = (text) => {
-          if (text.includes('SELECT id, organization_id, status')) {
-            return { rows: [{ id: 'inc-1', organization_id: 'org-1', status: 'New', acknowledged_at: null }], rowCount: 1 };
+          if (text.includes('SELECT i.id, i.organization_id, i.status, i.acknowledged_at, e.camera_id')) {
+            return { rows: [{ id: 'inc-1', organization_id: 'org-1', status: 'New', acknowledged_at: null, camera_id: 'CAM-1' }], rowCount: 1 };
           }
           if (text.includes('SELECT id FROM users')) return { rows: [], rowCount: 0 };
           return { rows: [], rowCount: 0 };
@@ -340,6 +344,271 @@ describe('api/incidents — Incidents Today date filter', () => {
         assert.equal(res.statusCode, 403);
         assert.match(res.body.error, /belong to your organization/i);
         assert.equal(queryCalls.some((call) => call.text.startsWith('UPDATE incidents SET')), false);
+      });
+    });
+
+    describe('incident evidence authorization', () => {
+      test('operator cannot access evidence for unassigned camera in same org', async () => {
+        // Operator user (not admin)
+        authResponse = { userId: 'operator-1', organizationId: 'org-1', userType: 'operator' };
+        // Operator has access to CAM-1 only
+        cameraAccess = ['CAM-1'];
+        // canAccessCamera will return false for CAM-2
+        canAccessCameraResult = false;
+
+        // Incident is for CAM-2 (unassigned)
+        dbScript = (text, params) => {
+          if (text.includes('SELECT e.id, e.camera_id')) {
+            return { rows: [{ id: 42, camera_id: 'CAM-2', event_type: 'motion', severity: 'medium', description: 'test', timestamp: new Date() }], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 0 };
+        };
+
+        const res = makeRes();
+        await handler(makeReq({
+          method: 'GET',
+          query: { eventId: 42, path: 'evidence' },
+        }), res);
+
+        assert.equal(res.statusCode, 403);
+        assert.match(res.body.error, /not authorized to access evidence/i);
+        // Should not query recordings or snapshots
+        const recordingsQuery = queryCalls.find(c => c.text.includes('FROM recordings'));
+        const snapshotsQuery = queryCalls.find(c => c.text.includes('FROM snapshots'));
+        assert.equal(recordingsQuery, undefined, 'recordings query should not run when unauthorized');
+        assert.equal(snapshotsQuery, undefined, 'snapshots query should not run when unauthorized');
+      });
+
+      test('authorized operator can access evidence for assigned camera', async () => {
+        authResponse = { userId: 'operator-1', organizationId: 'org-1', userType: 'operator' };
+        cameraAccess = ['CAM-1'];
+        canAccessCameraResult = true;
+
+        dbScript = (text, params) => {
+          if (text.includes('SELECT e.id, e.camera_id')) {
+            return { rows: [{ id: 42, camera_id: 'CAM-1', event_type: 'motion', severity: 'medium', description: 'test', timestamp: new Date() }], rowCount: 1 };
+          }
+          if (text.includes('FROM recordings')) {
+            return { rows: [{ id: 'rec-1', storage_url: 'url', status: 'completed', duration_seconds: 10, size_bytes: 100, start_time: new Date(), end_time: new Date() }], rowCount: 1 };
+          }
+          if (text.includes('FROM snapshots')) {
+            return { rows: [{ id: 'snap-1', storage_url: 'url', taken_at: new Date(), trigger: 'manual' }], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 0 };
+        };
+
+        const res = makeRes();
+        await handler(makeReq({
+          method: 'GET',
+          query: { eventId: 42, path: 'evidence' },
+        }), res);
+
+        assert.equal(res.statusCode, 200);
+        assert.ok(res.body.recordings);
+        assert.ok(res.body.snapshots);
+      });
+
+      test('org_admin can access evidence for any camera in org', async () => {
+        authResponse = { userId: 'admin-1', organizationId: 'org-1', userType: 'org_admin' };
+        cameraAccess = null; // admin has unrestricted access
+        canAccessCameraResult = true; // not used for admin but set for consistency
+
+        dbScript = (text, params) => {
+          if (text.includes('SELECT e.id, e.camera_id')) {
+            return { rows: [{ id: 42, camera_id: 'CAM-2', event_type: 'motion', severity: 'medium', description: 'test', timestamp: new Date() }], rowCount: 1 };
+          }
+          if (text.includes('FROM recordings')) {
+            return { rows: [{ id: 'rec-1', storage_url: 'url', status: 'completed', duration_seconds: 10, size_bytes: 100, start_time: new Date(), end_time: new Date() }], rowCount: 1 };
+          }
+          if (text.includes('FROM snapshots')) {
+            return { rows: [{ id: 'snap-1', storage_url: 'url', taken_at: new Date(), trigger: 'manual' }], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 0 };
+        };
+
+        const res = makeRes();
+        await handler(makeReq({
+          method: 'GET',
+          query: { eventId: 42, path: 'evidence' },
+        }), res);
+
+        assert.equal(res.statusCode, 200);
+        assert.ok(res.body.recordings);
+        assert.ok(res.body.snapshots);
+      });
+
+      test('platform_admin can access evidence for any camera in org', async () => {
+        authResponse = { userId: 'padmin-1', organizationId: 'org-1', userType: 'platform_admin' };
+        cameraAccess = null;
+        canAccessCameraResult = true;
+
+        dbScript = (text, params) => {
+          if (text.includes('SELECT e.id, e.camera_id')) {
+            return { rows: [{ id: 42, camera_id: 'CAM-2', event_type: 'motion', severity: 'medium', description: 'test', timestamp: new Date() }], rowCount: 1 };
+          }
+          if (text.includes('FROM recordings')) {
+            return { rows: [{ id: 'rec-1', storage_url: 'url', status: 'completed', duration_seconds: 10, size_bytes: 100, start_time: new Date(), end_time: new Date() }], rowCount: 1 };
+          }
+          if (text.includes('FROM snapshots')) {
+            return { rows: [{ id: 'snap-1', storage_url: 'url', taken_at: new Date(), trigger: 'manual' }], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 0 };
+        };
+
+        const res = makeRes();
+        await handler(makeReq({
+          method: 'GET',
+          query: { eventId: 42, path: 'evidence' },
+        }), res);
+
+        assert.equal(res.statusCode, 200);
+        assert.ok(res.body.recordings);
+        assert.ok(res.body.snapshots);
+      });
+    });
+
+    describe('incident status authorization (camera scope)', () => {
+      test('operator cannot acknowledge incident for unassigned camera in same org', async () => {
+        authResponse = { userId: 'operator-1', organizationId: 'org-1', userType: 'operator' };
+        // Operator assigned to CAM-1 only
+        cameraAccess = ['CAM-1'];
+        canAccessCameraResult = false;
+
+        // Incident is for CAM-2 (unassigned)
+        dbScript = (text, params) => {
+          if (text.includes('SELECT i.id, i.organization_id, i.status, i.acknowledged_at, e.camera_id')) {
+            return { rows: [{ id: 'inc-1', organization_id: 'org-1', status: 'New', acknowledged_at: null, camera_id: 'CAM-2' }], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 0 };
+        };
+
+        const res = makeRes();
+        await handler(makeReq({
+          method: 'PATCH',
+          query: { eventId: 42, path: 'status' },
+          body: { status: 'Acknowledged' },
+        }), res);
+
+        assert.equal(res.statusCode, 403);
+        assert.match(res.body.error, /not authorized to modify this incident/i);
+        // Should not update the incident
+        const updateQuery = queryCalls.find(c => c.text.startsWith('UPDATE incidents SET'));
+        assert.equal(updateQuery, undefined, 'UPDATE should not run when unauthorized');
+      });
+
+      test('authorized operator can acknowledge incident for assigned camera', async () => {
+        authResponse = { userId: 'operator-1', organizationId: 'org-1', userType: 'operator' };
+        cameraAccess = ['CAM-1'];
+        canAccessCameraResult = true;
+
+        dbScript = (text, params) => {
+          if (text.includes('SELECT i.id, i.organization_id, i.status, i.acknowledged_at, e.camera_id')) {
+            return { rows: [{ id: 'inc-1', organization_id: 'org-1', status: 'New', acknowledged_at: null, camera_id: 'CAM-1' }], rowCount: 1 };
+          }
+          if (text.startsWith('UPDATE incidents SET')) {
+            return { rows: [], rowCount: 1 };
+          }
+          if (text.includes('INSERT INTO incident_activity_log')) {
+            return { rows: [], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 0 };
+        };
+
+        const res = makeRes();
+        await handler(makeReq({
+          method: 'PATCH',
+          query: { eventId: 42, path: 'status' },
+          body: { status: 'Acknowledged' },
+        }), res);
+
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.body.status, 'Acknowledged');
+        // Verify UPDATE was called
+        const updateQuery = queryCalls.find(c => c.text.startsWith('UPDATE incidents SET'));
+        assert.ok(updateQuery, 'UPDATE should run when authorized');
+      });
+
+      test('org_admin can update status for any camera in org', async () => {
+        authResponse = { userId: 'admin-1', organizationId: 'org-1', userType: 'org_admin' };
+        cameraAccess = null;
+        canAccessCameraResult = true;
+
+        dbScript = (text, params) => {
+          if (text.includes('SELECT i.id, i.organization_id, i.status, i.acknowledged_at, e.camera_id')) {
+            return { rows: [{ id: 'inc-1', organization_id: 'org-1', status: 'New', acknowledged_at: null, camera_id: 'CAM-2' }], rowCount: 1 };
+          }
+          if (text.startsWith('UPDATE incidents SET')) {
+            return { rows: [], rowCount: 1 };
+          }
+          if (text.includes('INSERT INTO incident_activity_log')) {
+            return { rows: [], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 0 };
+        };
+
+        const res = makeRes();
+        await handler(makeReq({
+          method: 'PATCH',
+          query: { eventId: 42, path: 'status' },
+          body: { status: 'Acknowledged' },
+        }), res);
+
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.body.status, 'Acknowledged');
+      });
+
+      test('platform_admin can update status for any camera in org', async () => {
+        authResponse = { userId: 'padmin-1', organizationId: 'org-1', userType: 'platform_admin' };
+        cameraAccess = null;
+        canAccessCameraResult = true;
+
+        dbScript = (text, params) => {
+          if (text.includes('SELECT i.id, i.organization_id, i.status, i.acknowledged_at, e.camera_id')) {
+            return { rows: [{ id: 'inc-1', organization_id: 'org-1', status: 'New', acknowledged_at: null, camera_id: 'CAM-2' }], rowCount: 1 };
+          }
+          if (text.startsWith('UPDATE incidents SET')) {
+            return { rows: [], rowCount: 1 };
+          }
+          if (text.includes('INSERT INTO incident_activity_log')) {
+            return { rows: [], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 0 };
+        };
+
+        const res = makeRes();
+        await handler(makeReq({
+          method: 'PATCH',
+          query: { eventId: 42, path: 'status' },
+          body: { status: 'Acknowledged' },
+        }), res);
+
+        assert.equal(res.statusCode, 200);
+        assert.equal(res.body.status, 'Acknowledged');
+      });
+
+      test('operator cannot resolve incident for unassigned camera', async () => {
+        authResponse = { userId: 'operator-1', organizationId: 'org-1', userType: 'operator' };
+        cameraAccess = ['CAM-1'];
+        canAccessCameraResult = false;
+
+        dbScript = (text, params) => {
+          if (text.includes('SELECT i.id, i.organization_id, i.status, i.acknowledged_at, e.camera_id')) {
+            return { rows: [{ id: 'inc-1', organization_id: 'org-1', status: 'Acknowledged', acknowledged_at: new Date(), camera_id: 'CAM-2' }], rowCount: 1 };
+          }
+          return { rows: [], rowCount: 0 };
+        };
+
+        const res = makeRes();
+        await handler(makeReq({
+          method: 'PATCH',
+          query: { eventId: 42, path: 'status' },
+          body: { status: 'Resolved' },
+        }), res);
+
+        assert.equal(res.statusCode, 403);
+        assert.match(res.body.error, /not authorized to modify this incident/i);
+        const updateQuery = queryCalls.find(c => c.text.startsWith('UPDATE incidents SET'));
+        assert.equal(updateQuery, undefined, 'UPDATE should not run when unauthorized');
       });
     });
   });

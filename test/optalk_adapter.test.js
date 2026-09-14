@@ -18,7 +18,9 @@ const {
 
 const CAMERA_IP = '192.168.1.3';
 const CAMERA_PORT = 34567;
-const PASSWORD = 'd23061988';
+// Use environment variable for credentials, fallback to fake test fixture
+// Real camera passwords MUST NOT be committed to source control.
+const PASSWORD = process.env.OPTALK_TEST_PASSWORD || 'FAKE_TEST_PASSWORD_REPLACE_IN_CI';
 
 let passed = 0;
 let failed = 0;
@@ -144,8 +146,9 @@ async function testAudioFrameFormat() {
 async function testHardwareSequence() {
   console.log('\n=== TEST 4: Login → Claim → Start (Hardware) ===');
 
-  if (process.env.CI === 'true') {
-    console.log('  ⏭️  Skipped in CI environment (requires local DVRIP camera)');
+  // Skip if no test credentials provided or no camera available
+  if (!process.env.OPTALK_TEST_PASSWORD || process.env.OPTALK_TEST_PASSWORD === 'FAKE_TEST_PASSWORD_REPLACE_IN_CI') {
+    console.log('  ⏭️  Skipped: OPTALK_TEST_PASSWORD not set (no local DVRIP camera available)');
     skipped++;
     return;
   }

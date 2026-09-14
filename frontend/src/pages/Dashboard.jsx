@@ -1332,7 +1332,6 @@ export default function Dashboard() {
       openViewLogIds.push(viewLogId);
 
       const manifestUrl = `${buildHlsManifestUrl(cam.id, cam.hls_base_url)}?token=${encodeURIComponent(streamToken)}`;
-      console.log('HLS URL for camera', cam.id, ':', manifestUrl);
 
       let detachVideoListeners = () => {};
       if (Hls.isSupported()) {
