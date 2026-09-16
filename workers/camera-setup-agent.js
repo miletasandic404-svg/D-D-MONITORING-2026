@@ -741,22 +741,23 @@ async function main() {
 
   // Immediate first pass, then poll.
   tick();
-  setInterval(tick, POLL_INTERVAL_MS);
-}
+  const pollInterval = setInterval(tick, POLL_INTERVAL_MS);
 
-if (require.main === module) {
-  main().catch((err) => {
-    console.error('[camera-setup] Fatal error, exiting:', err);
-    Sentry.captureException(err);
-    process.exit(1);
+  if (require.main === module) {
+    main().catch((err) => {
+      console.error('[camera-setup] Fatal error, exiting:', err);
+      Sentry.captureException(err);
+      process.exit(1);
+    });
+  }
+
+  process.on('SIGTERM', async () => {
+    logger.info('worker.sigterm');
+    clearInterval(pollInterval);
+    await pool.end();
+    process.exit(0);
   });
 }
-
-process.on('SIGTERM', async () => {
-  logger.info('worker.sigterm');
-  await pool.end();
-  process.exit(0);
-});
 
 module.exports = {
   runOnvif,

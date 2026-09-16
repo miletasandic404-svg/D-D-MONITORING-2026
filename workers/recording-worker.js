@@ -196,6 +196,22 @@ async function main() {
 
 if (require.main === module) {
   main();
+
+  process.on('SIGTERM', async () => {
+    logger.info('worker.sigterm');
+    if (listenClient) {
+      try { await listenClient.end(); } catch {}
+    }
+    process.exit(0);
+  });
+
+  process.on('SIGINT', async () => {
+    logger.info('worker.sigint');
+    if (listenClient) {
+      try { await listenClient.end(); } catch {}
+    }
+    process.exit(0);
+  });
 }
 
 module.exports = { handleEvent, recordSegment };
