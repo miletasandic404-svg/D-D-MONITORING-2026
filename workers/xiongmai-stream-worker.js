@@ -350,17 +350,43 @@ async function startStreamForCamera(cameraId) {
     return;
   }
 
-  logger.info('stream.auth_success', { camera_id: cameraId, session_id: authResult.SessionId });
+logger.info('stream.auth_success', { camera_id: cameraId, session_id: authResult.SessionId });
 
-  await ensureMtxPublishPath(cameraId);
+    await ensureMtxPublishPath(cameraId);
 
-  ctx.videoStream = new XiongmaiVideoStream(cam.ip, port);
+    // Verify the path was actually registered in MediaMTX before starting video.
+    // If verification fails, do NOT start the DVRIP/FFmpeg stream;
+    // instead, schedule a reconnect using the existing retry mechanism.
+    let pathVerified = false;
+    try {
+      const { getPathStatus } = require('../lib/_mediamtx_client');
+      const pathStatus = await getPathStatus(cameraId);
+      if (!pathStatus) {
+        throw new Error('MediaMTX path not registered after addOrUpdateCameraPath');
+      }
+      logger.info('stream.path_verified', { camera_id: cameraId, path_status: pathStatus.ready || 'unknown' });
+      pathVerified = true;
+    } catch (verifyErr) {
+      logger.error('stream.path_verification_failed', {
+        camera_id: cameraId,
+        error: verifyErr.message,
+      });
+    }
 
-  try {
-    await ctx.videoStream.startStreaming(
-      ctx.adapter.socket,
-      authResult.SessionId,
-      { channel: 0, streamType: 'Main', transMode: 'TCP' },
+    if (!pathVerified) {
+      logger.warn('stream.start_blocked', { camera_id: cameraId, reason: 'MediaMTX path not verified' });
+      ctx.starting = false;
+      scheduleReconnect(cameraId, ctx, 'MediaMTX path not verified');
+      return;
+    }
+
+    ctx.videoStream = new XiongmaiVideoStream(cam.ip, port);
+
+    try {
+      await ctx.videoStream.startStreaming(
+        ctx.adapter.socket,
+        authResult.SessionId,
+        { channel: 0, streamType: 'Main', transMode: 'TCP' },
        (frame) => {
           if (frame.kind === 'video' && frame.data) {
            ctx.lastFrameAt = Date.now();
@@ -535,4 +561,28 @@ module.exports = {
   MAX_RECONNECT_ATTEMPTS,
   MAX_BACKOFF_MS,
   FRAME_TIMEOUT_MS,
+  getStreamHealth,
 };
+
+function getStreamHealth() {
+  const health = {};
+  for (const [cameraId, ctx] of activeStreams) {
+    const hasAdapter = !!ctx.adapter;
+    const hasVideoStream = !!ctx.videoStream;
+    const hasFfmpeg = !!ctx.ffmpegProcess && !ctx.ffmpegProcess.killed;
+    const isStarting = ctx.starting;
+    const lastFrameAgo = ctx.lastFrameAt ? Date.now() - ctx.lastFrameAt : null;
+    const isHealthy = hasAdapter && hasVideoStream && hasFfmpeg && !isStarting;
+    health[cameraId] = {
+      healthy: isHealthy,
+      starting: isStarting,
+      hasAdapter,
+      hasVideoStream,
+      hasFfmpeg,
+      reconnectAttempts: ctx.reconnectAttempts,
+      lastFrameMsAgo: lastFrameAgo,
+      detectedCodec: ctx.detectedCodec,
+    };
+  }
+  return health;
+}

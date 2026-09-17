@@ -94,6 +94,10 @@ mediamtXModule.addOrUpdateCameraPath = async (cameraId, rtspUrl) => {
   return { status: 200, body: null };
 };
 
+// Mock getPathStatus to return a valid path status by default
+let mtxPathStatus = { ready: true };
+mediamtXModule.getPathStatus = async (cameraId) => mtxPathStatus;
+
 // ── Fake XiongmaiDvripAdapter ─────────────────────────────────────────────
 const dvripModule = require('../lib/_xiongmai_dvrip');
 const videoModule = require('../lib/_xiongmai_video');
@@ -220,6 +224,7 @@ function resetFakes() {
   streamCodec = 'h265';
   streamFrames = null;
   mtxRegisterCalls = [];
+  mtxPathStatus = { ready: true };
 }
 
 function cleanupAllStreams() {
