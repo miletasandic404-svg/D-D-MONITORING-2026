@@ -175,6 +175,11 @@ function cleanupStream(cameraId, reason) {
     ctx.frameTimer = null;
   }
 
+  if (ctx.readyCheckInterval) {
+    clearInterval(ctx.readyCheckInterval);
+    ctx.readyCheckInterval = null;
+  }
+
   if (ctx.videoStream) {
     ctx.videoStream.stopStreaming();
     ctx.videoStream = null;
@@ -352,20 +357,22 @@ async function startStreamForCamera(cameraId) {
 
 logger.info('stream.auth_success', { camera_id: cameraId, session_id: authResult.SessionId });
 
+    // Step 1: Register/verify path exists in MediaMTX (config accepted)
     await ensureMtxPublishPath(cameraId);
 
-    // Verify the path was actually registered in MediaMTX before starting video.
-    // If verification fails, do NOT start the DVRIP/FFmpeg stream;
-    // instead, schedule a reconnect using the existing retry mechanism.
-    let pathVerified = false;
+    // Step 2: Start DVRIP/FFmpeg publisher.
+    // The publisher is what makes the path ready by pushing video.
+    // We do NOT require ready=true before starting the publisher
+    // because the publisher is what MAKES the path ready.
+    let pathRegistered = false;
     try {
       const { getPathStatus } = require('../lib/_mediamtx_client');
       const pathStatus = await getPathStatus(cameraId);
       if (!pathStatus) {
         throw new Error('MediaMTX path not registered after addOrUpdateCameraPath');
       }
-      logger.info('stream.path_verified', { camera_id: cameraId, path_status: pathStatus.ready || 'unknown' });
-      pathVerified = true;
+      logger.info('stream.path_registered', { camera_id: cameraId });
+      pathRegistered = true;
     } catch (verifyErr) {
       logger.error('stream.path_verification_failed', {
         camera_id: cameraId,
@@ -373,13 +380,15 @@ logger.info('stream.auth_success', { camera_id: cameraId, session_id: authResult
       });
     }
 
-    if (!pathVerified) {
-      logger.warn('stream.start_blocked', { camera_id: cameraId, reason: 'MediaMTX path not verified' });
+    if (!pathRegistered) {
+      logger.warn('stream.start_blocked', { camera_id: cameraId, reason: 'MediaMTX path not registered' });
       ctx.starting = false;
-      scheduleReconnect(cameraId, ctx, 'MediaMTX path not verified');
+      scheduleReconnect(cameraId, ctx, 'MediaMTX path not registered');
       return;
     }
 
+    // Step 3: Start DVRIP video stream and FFmpeg publisher.
+    // The publisher will make the path ready by pushing video frames.
     ctx.videoStream = new XiongmaiVideoStream(cam.ip, port);
 
     try {
@@ -429,6 +438,53 @@ logger.info('stream.auth_success', { camera_id: cameraId, session_id: authResult
 
     logger.info('stream.started', { camera_id: cameraId });
     resetFrameTimer(cameraId, ctx);
+
+    // Step 4: Monitor path readiness after publisher starts.
+    // The FFmpeg publisher should make the path ready within a few seconds.
+    // If path doesn't become ready within READY_TIMEOUT_MS, treat as failure.
+    const READY_TIMEOUT_MS = parseInt(process.env.XM_READY_TIMEOUT_MS || '30000', 10);
+    const readyCheckInterval = setInterval(async () => {
+      const ctxCheck = activeStreams.get(cameraId);
+      if (!ctxCheck || ctxCheck.starting) {
+        clearInterval(readyCheckInterval);
+        return;
+      }
+      try {
+        const { getPathStatus } = require('../lib/_mediamtx_client');
+        const pathStatus = await getPathStatus(cameraId);
+        if (pathStatus && pathStatus.ready === true) {
+          logger.info('stream.path_ready', { camera_id: cameraId });
+          clearInterval(readyCheckInterval);
+        }
+      } catch (err) {
+        logger.warn('stream.readiness_check_failed', { camera_id: cameraId, error: err.message });
+      }
+    }, 2000);
+
+    // Store the interval ID so we can clean it up
+    ctx.readyCheckInterval = readyCheckInterval;
+
+    // Timeout for path readiness
+    setTimeout(() => {
+      clearInterval(readyCheckInterval);
+      const ctxCheck = activeStreams.get(cameraId);
+      if (ctxCheck && !ctxCheck.starting) {
+        try {
+          const { getPathStatus } = require('../lib/_mediamtx_client');
+          getPathStatus(cameraId).then(pathStatus => {
+            if (!pathStatus || pathStatus.ready !== true) {
+              logger.warn('stream.readiness_timeout', {
+                camera_id: cameraId,
+                reason: 'MediaMTX path did not become ready in time',
+              });
+              cleanupStream(cameraId, 'readiness_timeout');
+            }
+          });
+        } catch (err) {
+          logger.warn('stream.readiness_timeout_check_failed', { camera_id: cameraId, error: err.message });
+        }
+      }
+    }, READY_TIMEOUT_MS);
   } catch (err) {
     logger.error('stream.video_start_failed', { camera_id: cameraId, error: err.message });
     ctx.starting = false;
