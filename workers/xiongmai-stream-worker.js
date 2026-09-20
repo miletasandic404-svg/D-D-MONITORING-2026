@@ -124,14 +124,25 @@ function startFfmpeg(cameraId, codec) {
   const args = [
     '-f', ffmpegFormat,
     '-i', 'pipe:0',
+    // Audio input: G.711 A-law (8kHz, mono) from DVRIP
+    '-f', 'alaw',
+    '-ar', '8000',
+    '-ac', '1',
+    '-i', 'pipe:3',
     '-c:v', 'copy',
+    '-c:a', 'aac',
+    '-b:a', '64k',
+    '-ar', '44100',
+    '-ac', '1',
   ];
   if (codec === 'h265' || codec === 'hevc') {
     args.push('-tag:v', 'hvc1');
   }
-  args.push('-f', 'rtsp', '-rtsp_transport', 'tcp', rtspUrl);
+  args.push('-f', 'rtsp', '-rtsp_transport', 'tcp', `${MEDIAMTX_RTSP_BASE}/${cameraId}`);
 
-  const proc = spawn(FFMPEG_PATH, args);
+  const proc = spawn(FFMPEG_PATH, args, {
+    stdio: ['pipe', 'pipe', 'pipe', 'pipe'],
+  });
 
   proc.stdout.on('data', () => {});
   proc.stderr.on('data', (data) => {
@@ -193,14 +204,17 @@ function cleanupStream(cameraId, reason) {
     ctx.adapter = null;
   }
 
-  if (ctx.ffmpegProcess) {
+if (ctx.ffmpegProcess) {
     if (!ctx.ffmpegProcess.killed) {
       ctx.ffmpegProcess.stdin.destroy();
-       ctx.ffmpegProcess.kill('SIGTERM');
-     }
-     ctx.ffmpegProcess = null;
-     ctx.detectedCodec = null;
-   }
+      if (ctx.ffmpegProcess.stdin[1]) {
+        ctx.ffmpegProcess.stdin[1].destroy();
+      }
+      ctx.ffmpegProcess.kill('SIGTERM');
+    }
+    ctx.ffmpegProcess = null;
+    ctx.detectedCodec = null;
+  }
 
    ctx.starting = false;
    activeStreams.delete(cameraId);
@@ -391,35 +405,44 @@ logger.info('stream.auth_success', { camera_id: cameraId, session_id: authResult
     // The publisher will make the path ready by pushing video frames.
     ctx.videoStream = new XiongmaiVideoStream(cam.ip, port);
 
-    try {
+try {
       await ctx.videoStream.startStreaming(
         ctx.adapter.socket,
         authResult.SessionId,
         { channel: 0, streamType: 'Main', transMode: 'TCP' },
-       (frame) => {
+        (frame) => {
           if (frame.kind === 'video' && frame.data) {
-           ctx.lastFrameAt = Date.now();
-           // Stream is now active: clear starting flag
-           ctx.starting = false;
-           resetFrameTimer(cameraId, ctx);
+            ctx.lastFrameAt = Date.now();
+            // Stream is now active: clear starting flag
+            ctx.starting = false;
+            resetFrameTimer(cameraId, ctx);
 
-           if (frame.codec && frame.codec !== ctx.detectedCodec) {
-             if (ctx.ffmpegProcess) {
-               if (!ctx.ffmpegProcess.killed) {
-                 ctx.ffmpegProcess.stdin.destroy();
-                 ctx.ffmpegProcess.kill('SIGTERM');
-               }
-               ctx.ffmpegProcess = null;
-             }
-             ctx.detectedCodec = frame.codec;
-             ctx.ffmpegProcess = startFfmpeg(cameraId, ctx.detectedCodec);
-             logger.info('stream.ffmpeg_started', { camera_id: cameraId, codec: ctx.detectedCodec });
-           }
+            if (frame.codec && frame.codec !== ctx.detectedCodec) {
+              if (ctx.ffmpegProcess) {
+                if (!ctx.ffmpegProcess.killed) {
+                  ctx.ffmpegProcess.stdin.destroy();
+                  ctx.ffmpegProcess.kill('SIGTERM');
+                }
+                ctx.ffmpegProcess = null;
+              }
+              ctx.detectedCodec = frame.codec;
+              ctx.ffmpegProcess = startFfmpeg(cameraId, ctx.detectedCodec);
+              logger.info('stream.ffmpeg_started', { camera_id: cameraId, codec: ctx.detectedCodec });
+            }
 
-           if (ctx.ffmpegProcess && !ctx.ffmpegProcess.killed && ctx.ffmpegProcess.stdin.writable) {
-             ctx.ffmpegProcess.stdin.write(frame.data);
-           }
-         } else if (frame.kind === 'jpeg' && frame.data && personDetection) {
+            if (ctx.ffmpegProcess && !ctx.ffmpegProcess.killed && ctx.ffmpegProcess.stdin.writable) {
+              ctx.ffmpegProcess.stdin.write(frame.data);
+            }
+          } else if (frame.kind === 'audio' && frame.data) {
+            // Forward audio frames (G.711 A-law) to FFmpeg's audio stdin (pipe:3 -> FD 3)
+            if (ctx.ffmpegProcess && !ctx.ffmpegProcess.killed && ctx.ffmpegProcess.stdio[3] && ctx.ffmpegProcess.stdio[3].writable) {
+              try {
+                ctx.ffmpegProcess.stdio[3].write(frame.data);
+              } catch (e) {
+                logger.debug('audio_write_failed', { camera_id: cameraId, error: e.message });
+              }
+            }
+          } else if (frame.kind === 'jpeg' && frame.data && personDetection) {
            // Pass JPEG frames to person detection worker (non-blocking)
            try {
              personDetection.submitFrame(cameraId, frame.data);
@@ -452,8 +475,18 @@ logger.info('stream.auth_success', { camera_id: cameraId, session_id: authResult
       try {
         const { getPathStatus } = require('../lib/_mediamtx_client');
         const pathStatus = await getPathStatus(cameraId);
-        if (pathStatus && pathStatus.ready === true) {
-          logger.info('stream.path_ready', { camera_id: cameraId });
+
+        const hasPublisher =
+          pathStatus &&
+          pathStatus.online === true &&
+          pathStatus.source != null &&
+          pathStatus.inboundBytes > 0;
+
+        const isReady = pathStatus && (pathStatus.ready === true || hasPublisher);
+
+        if (isReady) {
+          const mode = pathStatus && pathStatus.ready === true ? 'ready' : 'publisher';
+          logger.info('stream.path_ready', { camera_id: cameraId, readiness_mode: mode });
           clearInterval(readyCheckInterval);
         }
       } catch (err) {
@@ -472,7 +505,15 @@ logger.info('stream.auth_success', { camera_id: cameraId, session_id: authResult
         try {
           const { getPathStatus } = require('../lib/_mediamtx_client');
           getPathStatus(cameraId).then(pathStatus => {
-            if (!pathStatus || pathStatus.ready !== true) {
+            const hasPublisher =
+              pathStatus &&
+              pathStatus.online === true &&
+              pathStatus.source != null &&
+              pathStatus.inboundBytes > 0;
+
+            const isReady = pathStatus && (pathStatus.ready === true || hasPublisher);
+
+            if (!isReady) {
               logger.warn('stream.readiness_timeout', {
                 camera_id: cameraId,
                 reason: 'MediaMTX path did not become ready in time',
