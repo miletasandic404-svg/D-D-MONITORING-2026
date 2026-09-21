@@ -324,8 +324,14 @@ describe('xiongmai-stream-worker — login success + stream start', () => {
     assert.equal(ffmpegArgs[0], '-f');
     assert.equal(ffmpegArgs[1], 'hevc');
     assert.equal(ffmpegArgs[3], 'pipe:0');
-    assert.equal(ffmpegArgs[5], 'copy');
-    assert.ok(allArgs.includes('-tag:v hvc1'), 'H.265 should include -tag:v hvc1');
+    // H.265 should now be transcoded to H.264 with libx264
+    assert.ok(allArgs.includes('-c:v libx264'), 'H.265 should be transcoded to H.264');
+    assert.ok(allArgs.includes('-preset ultrafast'), 'should use ultrafast preset');
+    assert.ok(allArgs.includes('-tune zerolatency'), 'should use zerolatency tune');
+    assert.ok(allArgs.includes('-profile:v baseline'), 'should use baseline profile');
+    assert.ok(allArgs.includes('-level 3.1'), 'should use level 3.1');
+    assert.ok(allArgs.includes('-pix_fmt yuv420p'), 'should use yuv420p pixel format');
+    assert.ok(allArgs.includes('-tag:v hvc1'), 'H.265 input should include -tag:v hvc1');
     assert.strictEqual(ffmpegArgs[ffmpegArgs.length - 1], 'rtsp://127.0.0.1:8554/cam-1');
 
     assert.ok(!allArgs.includes('mySecret123'), 'password must not appear in FFmpeg args');

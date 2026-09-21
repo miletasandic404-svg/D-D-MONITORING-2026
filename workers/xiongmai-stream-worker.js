@@ -129,7 +129,15 @@ function startFfmpeg(cameraId, codec) {
     '-ar', '8000',
     '-ac', '1',
     '-i', 'pipe:3',
-    '-c:v', 'copy',
+    // Transcode H.265 to H.264 for browser compatibility (Chrome/Edge/Firefox don't support HEVC in MSE)
+    // Use ultrafast preset for minimal latency, tune zerolatency for live streaming
+    '-c:v', 'libx264',
+    '-preset', 'ultrafast',
+    '-tune', 'zerolatency',
+    '-profile:v', 'baseline',
+    '-level', '3.1',
+    '-pix_fmt', 'yuv420p',
+    // Audio: G.711 A-law (8kHz, mono) from DVRIP → AAC
     '-c:a', 'aac',
     '-b:a', '64k',
     '-ar', '44100',
