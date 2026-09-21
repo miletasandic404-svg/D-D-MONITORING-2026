@@ -329,7 +329,7 @@ describe('xiongmai-stream-worker — login success + stream start', () => {
     assert.ok(allArgs.includes('-preset ultrafast'), 'should use ultrafast preset');
     assert.ok(allArgs.includes('-tune zerolatency'), 'should use zerolatency tune');
     assert.ok(allArgs.includes('-profile:v baseline'), 'should use baseline profile');
-    assert.ok(allArgs.includes('-level 3.1'), 'should use level 3.1');
+    assert.ok(allArgs.includes('-level 4.1'), 'should use level 4.1 for 1080p');
     assert.ok(allArgs.includes('-pix_fmt yuv420p'), 'should use yuv420p pixel format');
     assert.ok(allArgs.includes('-tag:v hvc1'), 'H.265 input should include -tag:v hvc1');
     assert.strictEqual(ffmpegArgs[ffmpegArgs.length - 1], 'rtsp://127.0.0.1:8554/cam-1');

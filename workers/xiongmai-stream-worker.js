@@ -121,6 +121,7 @@ async function ensureMtxPublishPath(cameraId) {
 function startFfmpeg(cameraId, codec) {
   const ffmpegFormat = codec === 'h264' ? 'h264' : 'hevc';
   const rtspUrl = `${MEDIAMTX_RTSP_BASE}/${cameraId}`;
+  const isH265Input = codec === 'h265' || codec === 'hevc';
   const args = [
     '-f', ffmpegFormat,
     '-i', 'pipe:0',
@@ -135,7 +136,8 @@ function startFfmpeg(cameraId, codec) {
     '-preset', 'ultrafast',
     '-tune', 'zerolatency',
     '-profile:v', 'baseline',
-    '-level', '3.1',
+    // Level 4.1 supports 1920x1080@30fps (level 3.1 max is 1280x720)
+    '-level', '4.1',
     '-pix_fmt', 'yuv420p',
     // Audio: G.711 A-law (8kHz, mono) from DVRIP → AAC
     '-c:a', 'aac',
@@ -143,9 +145,13 @@ function startFfmpeg(cameraId, codec) {
     '-ar', '44100',
     '-ac', '1',
   ];
-  if (codec === 'h265' || codec === 'hevc') {
+  // H.265 input needs -tag:v hvc1 to tell FFmpeg the input is HEVC
+  // H.264 output uses avc1 tag automatically (no -tag:v needed)
+  if (isH265Input) {
     args.push('-tag:v', 'hvc1');
   }
+  // No -tag:v hvc1 on H.264 output (that's HEVC tag)
+  // H.264 will use avc1 tag automatically
   args.push('-f', 'rtsp', '-rtsp_transport', 'tcp', `${MEDIAMTX_RTSP_BASE}/${cameraId}`);
 
   const proc = spawn(FFMPEG_PATH, args, {
