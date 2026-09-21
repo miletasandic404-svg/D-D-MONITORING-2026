@@ -29,6 +29,19 @@ IP camera (LAN) ──RTSP──▶ Desktop/Laptop media node (MediaMTX)
 
 ## Quick start (from scratch)
 
+### Local dashboard development
+
+Install dependencies once, then run `npm run dev` from the repository root.
+This starts the existing Vite frontend development server only; API routes and
+media-node workers remain separately deployed/configured and are not simulated
+by this command.
+
+```bash
+npm ci
+cd frontend && npm ci && cd ..
+npm run dev
+```
+
 ### 1. Database (Neon)
 
 1. Create a Neon project and copy the **connection string** (owner role).

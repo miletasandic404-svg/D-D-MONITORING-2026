@@ -46,6 +46,7 @@ const crypto = require('crypto');
 const { checkCameraCompatibility, COMPAT_TIMEOUT_MS } = require('../lib/_camera_compatibility');
 const { initSentry } = require('../lib/_sentry');
 const Sentry = require('@sentry/node');
+const { beat } = require('../lib/_worker_heartbeat');
 
 initSentry();
 
@@ -182,10 +183,14 @@ async function main() {
   });
 
   // Run initial check
+  beat('camera-compatibility-worker', { status: 'running' });
   await checkAllCameras();
 
   // Periodic re-check
-  setInterval(async () => {
+  const heartbeatTimer = setInterval(() => {
+    beat('camera-compatibility-worker', { status: 'running' });
+  }, 15000);
+  const pollTimer = setInterval(async () => {
     try {
       await checkAllCameras();
     } catch (err) {
@@ -196,11 +201,17 @@ async function main() {
 
   process.on('SIGTERM', () => {
     logger.info('worker.sigterm');
+    beat('camera-compatibility-worker', { status: 'stopped' });
+    clearInterval(heartbeatTimer);
+    clearInterval(pollTimer);
     pool.end().then(() => process.exit(0));
   });
 
   process.on('SIGINT', () => {
     logger.info('worker.sigint');
+    beat('camera-compatibility-worker', { status: 'stopped' });
+    clearInterval(heartbeatTimer);
+    clearInterval(pollTimer);
     pool.end().then(() => process.exit(0));
   });
 }

@@ -140,6 +140,7 @@ describe('streams_diagnostics + api_reachable', () => {
       await handler(makeReq(), r);
       assert.equal(r.body.api_reachable, false);
       assert.equal(r.body.api_status, 'offline');
+      assert.equal(r.body.api_degraded, false);
     } finally {
       if (prevUrl !== undefined) process.env.DATABASE_URL = prevUrl;
       if (prevSecret !== undefined) process.env.BETTER_AUTH_SECRET = prevSecret;
@@ -163,6 +164,7 @@ describe('streams_diagnostics + api_reachable', () => {
       assert.equal(r.body.api_reachable, false);
       assert.equal(r.body.api_status, 'offline');
       assert.equal(r.body.api_degraded, true);
+      assert.equal(r.body.api_reason, 'db ping failed');
     } finally {
       db.queryAsOrg = origQueryAsOrg;
       db.query = origQuery;
