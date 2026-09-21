@@ -331,7 +331,8 @@ describe('xiongmai-stream-worker — login success + stream start', () => {
     assert.ok(allArgs.includes('-profile:v baseline'), 'should use baseline profile');
     assert.ok(allArgs.includes('-level 4.1'), 'should use level 4.1 for 1080p');
     assert.ok(allArgs.includes('-pix_fmt yuv420p'), 'should use yuv420p pixel format');
-    assert.ok(allArgs.includes('-tag:v hvc1'), 'H.265 input should include -tag:v hvc1');
+    // H.264 output should NOT have -tag:v hvc1 (that's HEVC tag)
+    assert.ok(!allArgs.includes('-tag:v hvc1'), 'H.264 output must NOT have -tag:v hvc1');
     assert.strictEqual(ffmpegArgs[ffmpegArgs.length - 1], 'rtsp://127.0.0.1:8554/cam-1');
 
     assert.ok(!allArgs.includes('mySecret123'), 'password must not appear in FFmpeg args');
@@ -610,15 +611,17 @@ describe('xiongmai-stream-worker — codec detection (lazy FFmpeg startup)', () 
     assert.equal(spawnCalls.length, 1, 'FFmpeg should be spawned after first frame');
   });
 
-  test('H.265 frame → FFmpeg spawned with -f hevc and -tag:v hvc1', async () => {
+  test('H.265 frame → FFmpeg spawned with -f hevc input and NO -tag:v hvc1 on output', async () => {
     streamCodec = 'h265';
     await worker.startStreamForCamera('cam-1');
     await new Promise(r => setTimeout(r, 50));
 
     assert.equal(spawnCalls.length, 1);
     assert.equal(spawnCalls[0].args[1], 'hevc');
-    assert.ok(spawnCalls[0].args.includes('-tag:v'), 'h265 should include -tag:v');
-    assert.ok(spawnCalls[0].args.includes('hvc1'), 'h265 should include hvc1');
+    // Input is H.265 (-f hevc -i pipe:0), output is H.264 - NO -tag:v hvc1 on output
+    assert.ok(!spawnCalls[0].args.includes('-tag:v'), 'H.265 input → H.264 output should NOT have -tag:v hvc1');
+    assert.ok(spawnCalls[0].args.includes('libx264'), 'should use libx264 for transcoding');
+    assert.ok(spawnCalls[0].args.includes('hevc'), 'input format should be hevc');
   });
 
   test('H.264 frame → FFmpeg spawned with -f h264 and NO -tag:v', async () => {
@@ -646,7 +649,8 @@ describe('xiongmai-stream-worker — codec detection (lazy FFmpeg startup)', () 
 
     assert.equal(spawnCalls.length, 2, 'FFmpeg should be spawned twice (codec change)');
     assert.equal(spawnCalls[0].args[1], 'hevc');
-    assert.ok(spawnCalls[0].args.includes('-tag:v'), 'h265 args should include -tag:v');
+    // First spawn: H.265 input, but output is H.264 so NO -tag:v hvc1
+    assert.ok(!spawnCalls[0].args.includes('-tag:v'), 'h265 args should NOT include -tag:v hvc1 on output');
     assert.equal(spawnCalls[1].args[1], 'h264');
     assert.ok(!spawnCalls[1].args.includes('-tag:v'), 'h264 args should NOT include -tag:v');
 

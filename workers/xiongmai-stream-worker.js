@@ -145,11 +145,6 @@ function startFfmpeg(cameraId, codec) {
     '-ar', '44100',
     '-ac', '1',
   ];
-  // H.265 input needs -tag:v hvc1 to tell FFmpeg the input is HEVC
-  // H.264 output uses avc1 tag automatically (no -tag:v needed)
-  if (isH265Input) {
-    args.push('-tag:v', 'hvc1');
-  }
   // No -tag:v hvc1 on H.264 output (that's HEVC tag)
   // H.264 will use avc1 tag automatically
   args.push('-f', 'rtsp', '-rtsp_transport', 'tcp', `${MEDIAMTX_RTSP_BASE}/${cameraId}`);
