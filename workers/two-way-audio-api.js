@@ -115,8 +115,25 @@ if (DB_URL) {
   pool = new Pool({ connectionString: DB_URL, max: 5 });
 }
 
+function normalizeOrigin(origin) {
+  if (!origin) return '';
+  try {
+    const url = new URL(origin);
+    // Normalize: lowercase host, remove default ports, no trailing slash
+    let host = url.hostname.toLowerCase();
+    const port = url.port;
+    if ((url.protocol === 'https:' && port === '443') || (url.protocol === 'http:' && port === '80')) {
+      return `${url.protocol}//${host}`;
+    }
+    return `${url.protocol}//${host}${port ? ':' + port : ''}`;
+  } catch {
+    return origin.toLowerCase().replace(/\/+$/, '');
+  }
+}
+
 function isOriginAllowed(origin) {
-  return ALLOWED_ORIGINS.includes(origin);
+  const normalized = normalizeOrigin(origin);
+  return ALLOWED_ORIGINS.some(allowed => normalizeOrigin(allowed) === normalizeOrigin(origin));
 }
 
 function corsHeaders(req) {
