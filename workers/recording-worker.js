@@ -41,6 +41,7 @@ const db = require('../db/index');
 const { uploadObject, getBackend } = require('../lib/_storage');
 const { assertSafeTarget } = require('../lib/_network_security');
 const { makeLogger } = require('../lib/_logger');
+const { beat } = require('../lib/_worker_heartbeat');
 const Sentry = require('@sentry/node');
 const { initSentry } = require('../lib/_sentry');
 
@@ -49,6 +50,8 @@ const logger = makeLogger('worker-recording-worker');
 initSentry();
 
 const RECORDING_DURATION_SECONDS = parseInt(process.env.RECORDING_DURATION_SECONDS || '15', 10);
+let listenClient = null;
+let heartbeatTimer = null;
 
 async function recordSegment(rtspUrl, outputPath, durationSeconds) {
   // SSRF guard (shared infrastructure -- Fly/VPS, NOT a tenant laptop):
@@ -146,7 +149,6 @@ async function main() {
     process.exit(1);
   }
 
-  let listenClient = null;
   let listenRetryDelay = 1000;
 
   async function connectListener() {
@@ -163,6 +165,11 @@ async function main() {
     Sentry.captureException(err);
     process.exit(1);
   });
+
+  beat('recording-worker', { status: 'running' });
+  heartbeatTimer = setInterval(() => {
+    beat('recording-worker', { status: 'running' });
+  }, 15000);
 
   listenClient.on('notification', (msg) => {
     let payload;
@@ -199,6 +206,8 @@ if (require.main === module) {
 
   process.on('SIGTERM', async () => {
     logger.info('worker.sigterm');
+    beat('recording-worker', { status: 'stopped' });
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (listenClient) {
       try { await listenClient.end(); } catch {}
     }
@@ -207,6 +216,8 @@ if (require.main === module) {
 
   process.on('SIGINT', async () => {
     logger.info('worker.sigint');
+    beat('recording-worker', { status: 'stopped' });
+    if (heartbeatTimer) clearInterval(heartbeatTimer);
     if (listenClient) {
       try { await listenClient.end(); } catch {}
     }

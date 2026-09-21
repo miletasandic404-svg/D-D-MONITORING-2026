@@ -52,6 +52,7 @@ const { URL } = require('url');
 const L = require('../lib/_logger');
 const Sentry = require('@sentry/node');
 const { initSentry } = require('../lib/_sentry');
+const { beat } = require('../lib/_worker_heartbeat');
 
 const logger = L.makeLogger('heartbeat');
 
@@ -162,6 +163,7 @@ async function sendHeartbeat() {
   if (res.statusCode === 200) {
     logger.info('heartbeat.ok', { at: new Date().toISOString() });
     consecutiveFailures = 0;
+    beat('media-node-heartbeat', { status: 'running' });
   } else {
     logger.error('heartbeat.rejected', { http_status: res.statusCode, body: data.slice(0, 500) });
     consecutiveFailures += 1;
@@ -169,11 +171,20 @@ async function sendHeartbeat() {
 }
 
 logger.info('worker.start', { node_id: MEDIA_NODE_ID, interval_seconds: INTERVAL_SECONDS, api_base_url: API_BASE_URL });
+beat('media-node-heartbeat', { status: 'running' });
 sendHeartbeat();
 scheduleHeartbeat();
 
 process.on('SIGTERM', () => {
   logger.info('worker.sigterm');
+  beat('media-node-heartbeat', { status: 'stopped' });
+  clearHeartbeatTimer();
+  process.exit(0);
+});
+
+process.on('SIGINT', () => {
+  logger.info('worker.sigint');
+  beat('media-node-heartbeat', { status: 'stopped' });
   clearHeartbeatTimer();
   process.exit(0);
 });

@@ -1,8 +1,8 @@
 # Disaster Recovery Plan
 
 **Repository:** https://github.com/miletasandic7/D-D-MONITORING-2026
-**Platform stack:** Vercel (API/frontend) · Neon (PostgreSQL) · Fly.io `dnd-media-server` (MediaMTX + workers) · Cloudflare Tunnel (HLS) · Media Node(s) on LAN
-**Goal:** Recover the platform from any failure class with minimal downtime and **zero data loss** for tenant data.
+**Platform stack:** Vercel (API/frontend) · Neon (PostgreSQL) · LAN media node(s) (MediaMTX + workers) · Cloudflare Tunnel (HLS)
+**Goal:** Provide a documented recovery procedure. RPO/RTO values below are planning assumptions until a recorded disaster-recovery exercise validates them.
 
 ---
 
@@ -10,12 +10,14 @@
 
 | Class | Blast radius | RTO target | RPO target |
 |---|---|---|---|
-| Media Node crash / reinstall | One node's cameras offline | < 30 min | n/a (no local state) |
-| MediaMTX / Fly app crash | HLS playback down | < 15 min | n/a |
-| Vercel deployment broken | API + dashboard down | < 30 min | n/a |
-| Environment secret lost | Auth/DB/storage broken | < 1 h | n/a |
-| Neon database loss/corruption | Everything | < 2 h | Neon PITR (configurable, default ~24 h) |
-| GitHub repository loss | Source of truth | < 1 h (local clones) | n/a |
+| Media Node crash / reinstall | One node's cameras offline | Target: < 30 min | n/a (no local state) |
+| MediaMTX crash | HLS playback down | Target: < 15 min | n/a |
+| Vercel deployment broken | API + dashboard down | Target: < 30 min | n/a |
+| Environment secret lost | Auth/DB/storage broken | Target: < 1 h | n/a |
+| Neon database loss/corruption | Everything | Target: < 2 h | Depends on verified Neon PITR retention / export frequency |
+| GitHub repository loss | Source of truth | Target: < 1 h | Depends on verified mirror/clone currency |
+
+**Validation status:** the procedures are documented but a full restore has not yet been recorded. Do not present these targets as an SLA or validated result.
 
 ---
 
@@ -77,7 +79,7 @@ SELECT tablename FROM pg_tables WHERE rowsecurity AND schemaname='public';
 -- worker role still exists
 SELECT rolname FROM pg_roles WHERE rolname='media_node_worker';
 ```
-Then hit `GET /api/health` and confirm `database.connected: true`.
+Then hit `GET /api/health` and confirm HTTP 200 with `success: true` and `status: "online"`.
 
 ### Credential note
 After any restore, confirm the following match the environment: `media_node_worker` password (`MEDIA_NODE_DATABASE_URL`), `CREDENTIAL_ENCRYPTION_KEY` (camera passwords are AES-256-GCM — **lost key = unrecoverable camera passwords**, but cameras can be re-onboarded; keep the key in a password manager).
@@ -151,23 +153,9 @@ Cameras are stored in Neon with their RTSP URLs and encrypted credentials. After
 
 ---
 
-## 4. Fly.io media server (MediaMTX on cloud)
+## 4. Recovery runbook (ordered)
 
-### Restart / redeploy
-```bash
-fly status -a dnd-media-server
-fly logs -a dnd-media-server | grep camera-sync
-fly deploy -a dnd-media-server    # from repo root (fly.toml + media-server/Dockerfile)
-fly secrets set DATABASE_URL=... MEDIA_NODE_ID=... API_BASE_URL=... \
-  MEDIA_NODE_HEARTBEAT_SECRET=... -a dnd-media-server
-```
-### Recovery notes
-- MediaMTX paths are rebuilt automatically by `camera-sync-worker` from the database (pull mode). No manual path config to restore.
-- HLS port 8888 is exposed via Fly services; RTSP 8554 is intentionally internal-only.
 
----
-
-## 5. Recovery runbook (ordered)
 
 | # | Scenario | Action |
 |---|---|---|
@@ -181,19 +169,19 @@ fly secrets set DATABASE_URL=... MEDIA_NODE_ID=... API_BASE_URL=... \
 
 ---
 
-## 6. Backup schedule (recommended)
+## 5. Backup schedule (recommended)
 
 | Item | Frequency | Location |
 |---|---|---|
 | Neon PITR (automatic) | continuous | Neon |
 | Weekly pg_dump export | weekly | S3/R2 (30–90 day retention) |
 | GitHub code | every commit | GitHub + local clone + optional mirror |
-| Env secrets | on change | password manager (Vercel/Fly/Neon/Cloudflare) |
+| Env secrets | on change | password manager (Vercel/Neon/Cloudflare/media node) |
 | Tunnel config | on change | local `~/.cloudflared/` + note in README |
 
 ---
 
-## 7. Validation test (quarterly, ~30 min)
+## 6. Validation test (quarterly, ~30 min)
 
 1. Create a Neon **branch** from production.
 2. Restore the latest weekly dump into it.
@@ -203,10 +191,10 @@ fly secrets set DATABASE_URL=... MEDIA_NODE_ID=... API_BASE_URL=... \
 
 ---
 
-## 8. Validation Log
+## 7. Validation Log
 
 | Date | Performed By | Test Type | Result | Notes | RTO Recorded |
 |---|---|---|---|---|---|
 | 2026-08-06 | System | Retention Policy Verification | ✅ Passed | Verified retention_expires_at calculation in recording-worker.js uses camera.retention_days from DB (migration 004). Default 30 days. Calculation: `endTime + (retention_days * 24 * 60 * 60 * 1000)`. Matches DB schema. | N/A |
 | 2026-08-06 | System | Logging & Sentry Integration | ✅ Passed | Structured logging and Sentry error tracking integrated across all API routes, handlers, lib files, and workers. Sentry initialization module created. Sensitive data filtering configured. | N/A |
-| TBD | TBD | Full DR Exercise | Pending | Schedule quarterly DR exercise per section 7 | TBD |
+| TBD | TBD | Full DR Exercise | Pending | Schedule quarterly DR exercise per section 6 | TBD |

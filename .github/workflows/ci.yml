@@ -25,14 +25,16 @@ jobs:
     - name: Install backend dependencies
       run: npm ci
 
+    # The root ESLint configuration loads the React Hooks plugin from the
+    # frontend dependency tree, so install it before linting in a clean runner.
+    - name: Install frontend dependencies
+      run: cd frontend && npm ci
+
     - name: Run backend tests
       run: npm test
 
     - name: Run ESLint
       run: npx eslint .
-
-    - name: Install frontend dependencies
-      run: cd frontend && npm ci
 
     - name: Run frontend tests
       run: cd frontend && npm test

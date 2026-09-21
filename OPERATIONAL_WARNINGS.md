@@ -12,6 +12,17 @@ The platform uses a **laptop as the media node** for local camera processing. Th
    - No automatic failover mechanism exists
    - Manual intervention required to restore service
 
+### Current failure signaling (not failover)
+
+- A node whose `last_heartbeat_at` is older than the configured 90-second
+  freshness threshold is excluded from new camera assignment and active-stream
+  counts. The dashboard classifies such a node as offline rather than active.
+- Media-node health reports include local worker heartbeats. A stopped or stale
+  worker is visible in `media_nodes.health_json`; this is diagnostic signaling,
+  not a replacement node or automatic failover.
+- Existing streams can remain unavailable until the original node recovers or
+  an operator explicitly assigns cameras to a separately provisioned node.
+
 2. **Windows Update Interruptions**
    - Windows automatic updates can force restarts without warning
    - Camera streaming stops during restart and does not auto-recover
@@ -110,18 +121,23 @@ If deploying with laptop media node temporarily:
 - **Priority:** High - Critical for systems handling RTSP credentials and emergency services data
 
 ### Logging and Monitoring
-- **Status:** ⚠️ Mixed - 135+ console.log/console.error calls
-- **Action Required:** Replace with structured logger + Sentry integration
+- **Status:** ⚠️ Improved but incomplete — long-running media workers emit
+  structured startup/failure events and local heartbeats; legacy console calls
+  remain outside that focused path.
+- **Action Required:** Continue replacing remaining console calls and connect
+  worker-health data to external alert delivery.
 - **Priority:** High - Essential for production debugging
 
 ### Background Worker Monitoring
-- **Status:** ⚠️ No health checks or alerts
+- **Status:** ⚠️ Local health signaling exists, external alerting does not
 - **Workers at risk:**
   - retention-job.js (GDPR compliance)
   - recording-worker.js (video storage)
   - pending-activation-worker.js (payment processing)
   - media-node-heartbeat.js (camera connectivity)
-- **Action Required:** Add health check endpoints + alerting
+- **Action Required:** Consume existing node `health_json` / worker heartbeat
+  status in an external alerting process; do not claim HA until a second node
+  and tested failover exist.
 - **Priority:** High - Critical for service reliability
 
 ---

@@ -17,7 +17,7 @@
 const { test, describe, beforeEach, afterEach } = require('node:test');
 const assert = require('assert/strict');
 
-// ── Mock onnxruntime-node before requiring detection module ─────────
+// ── Inject a mock ONNX runtime without requiring the optional native module ──
 
 const mockOrt = {
   Tensor: class MockTensor {
@@ -46,14 +46,6 @@ const mockOrt = {
   },
 };
 
-// Replace the require cache for onnxruntime-node
-require.cache[require.resolve('onnxruntime-node')] = {
-  id: require.resolve('onnxruntime-node'),
-  filename: require.resolve('onnxruntime-node'),
-  loaded: true,
-  exports: mockOrt,
-};
-
 // ── Test detection module internals ──────────────────────────────────
 
 describe('lib/_person_detection', () => {
@@ -61,6 +53,7 @@ describe('lib/_person_detection', () => {
 
   beforeEach(() => {
     detection = require('../lib/_person_detection');
+    detection._internal.setOnnxRuntimeLoaderForTest(() => mockOrt);
   });
 
   describe('preprocessing', () => {
@@ -519,6 +512,7 @@ describe('person detection inference (mocked ONNX)', () => {
     // Clear module cache to get fresh detection module
     delete require.cache[require.resolve('../lib/_person_detection')];
     detection = require('../lib/_person_detection');
+    detection._internal.setOnnxRuntimeLoaderForTest(() => mockOrt);
   });
 
   afterEach(() => {

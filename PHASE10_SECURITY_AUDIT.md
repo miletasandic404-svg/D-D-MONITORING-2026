@@ -56,9 +56,11 @@
 
 ---
 
-## Verdict
+## Audit scope and verdict
 
-**✅ PASS — no critical issues found. 1 warning (non-blocking):**
+**✅ Self-audit pass — no critical issues found within the reviewed code and
+tests. This document is not an independent penetration test or external
+security certification.**
 
 > 🟡 **SSL certificate validation is disabled** (`rejectUnauthorized: false`) in API/Better-Auth pools. TLS encryption is active (Neon requires it), so data in transit is encrypted. **Recommended before go-live (Phase 13):** verify Neon's CA chain with strict TLS enabled in a staging environment, then switch to `rejectUnauthorized: true`.
 
@@ -66,5 +68,8 @@
 - Strict SSL validation enablement (Phase 13 deployment verification)
 - Backup & disaster recovery plan (Phase 11)
 - Performance testing (Phase 12)
+- Independent penetration test before public launch, covering authenticated
+  tenant isolation, media-node network boundaries, token handling and payment
+  webhooks.
 
-No code changes were required during this audit.
+No external audit was performed as part of this document.

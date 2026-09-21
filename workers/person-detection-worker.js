@@ -32,6 +32,7 @@ const { EventEmitter } = require('events');
 const db = require('../db/index');
 const detection = require('../lib/_person_detection');
 const { makeLogger } = require('../lib/_logger');
+const { beat } = require('../lib/_worker_heartbeat');
 const { initSentry } = require('../lib/_sentry');
 const { assertSafeTarget } = require('../lib/_network_security');
 const Sentry = require('@sentry/node');
@@ -575,10 +576,17 @@ async function main() {
     rtspFrameIntervalMs: RTSP_FRAME_INTERVAL_MS,
   });
 
+  beat('person-detection-worker', { status: 'running' });
+  heartbeatInterval = setInterval(() => {
+    beat('person-detection-worker', { status: 'running' });
+  }, 15000);
   startProcessing();
   startRtspExtraction();
 
   const shutdown = () => {
+    beat('person-detection-worker', { status: 'stopped' });
+    if (heartbeatInterval) clearInterval(heartbeatInterval);
+    heartbeatInterval = null;
     stopProcessing();
     stopRtspExtraction();
     for (const child of childProcesses) {
@@ -643,7 +651,7 @@ let started = false;
 let rtspStarted = false;
 let processInterval = null;
 let statusInterval = null;
-rtspInterval = null;
+let heartbeatInterval = null;
 
 if (require.main === module) {
   main().catch((err) => {
