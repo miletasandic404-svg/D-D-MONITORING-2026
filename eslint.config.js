@@ -1,5 +1,5 @@
 const globals = require("globals");
-const reactHooks = require("./frontend/node_modules/eslint-plugin-react-hooks");
+const reactHooks = require("eslint-plugin-react-hooks");
 
 module.exports = [
   {
@@ -13,6 +13,9 @@ module.exports = [
         ...globals.node,
         ...globals.browser,
       },
+    },
+    plugins: {
+      "react-hooks": require("eslint-plugin-react-hooks"),
     },
     rules: {
       "no-unused-vars": "warn",
@@ -30,6 +33,9 @@ module.exports = [
         },
       },
     },
+    plugins: {
+      "react-hooks": require("eslint-plugin-react-hooks"),
+    },
   },
   {
     files: ["frontend/src/test/**/*.{js,jsx}"],
@@ -43,11 +49,14 @@ module.exports = [
         vi: "readonly",
       },
     },
+    plugins: {
+      "react-hooks": require("eslint-plugin-react-hooks"),
+    },
   },
   {
     files: ["frontend/**/*.{js,jsx}"],
     plugins: {
-      "react-hooks": reactHooks,
+      "react-hooks": require("eslint-plugin-react-hooks"),
     },
   },
   {
@@ -56,7 +65,7 @@ module.exports = [
     files: ["**/sw.js", "**/service-worker.js"],
     languageOptions: {
       globals: {
-        ...globals.serviceworker,
+        ...require("globals").serviceworker,
       },
     },
   },
