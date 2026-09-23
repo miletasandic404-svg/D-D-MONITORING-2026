@@ -50,6 +50,8 @@ initSentry();
 
 const RECORDING_DURATION_SECONDS = parseInt(process.env.RECORDING_DURATION_SECONDS || '15', 10);
 
+let listenClient = null;
+
 async function recordSegment(rtspUrl, outputPath, durationSeconds) {
   // SSRF guard (shared infrastructure -- Fly/VPS, NOT a tenant laptop):
   // only public hosts may be reached. Private/loopback/link-local/
@@ -146,7 +148,6 @@ async function main() {
     process.exit(1);
   }
 
-  let listenClient = null;
   let listenRetryDelay = 1000;
 
   async function connectListener() {

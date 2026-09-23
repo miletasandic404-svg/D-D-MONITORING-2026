@@ -10,6 +10,7 @@ let dvripVideoResults = new Map();
 let mediamtxResults = new Map();
 let twoWayAudioResults = new Map();
 let onvifResults = new Map();
+let probeResults = new Map();
 
 function resetGlobals() {
   fetchResponses = new Map();
@@ -19,6 +20,7 @@ function resetGlobals() {
   mediamtxResults = new Map();
   twoWayAudioResults = new Map();
   onvifResults = new Map();
+  probeResults = new Map();
 }
 
 const originalFetch = globalThis.fetch;
