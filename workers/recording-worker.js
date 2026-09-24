@@ -28,9 +28,20 @@
  * It's a trusted background process, not a user-facing request.
  *
  * Run with:  node workers/recording-worker.js
- * Required env: DATABASE_URL, STORAGE_* (see api/_storage.js), and
+ * Required env: MEDIA_NODE_DATABASE_URL, STORAGE_* (see api/_storage.js), and
  * ffmpeg must be installed on the host.
  */
+
+// Load .env from the app directory (C:\dnd-media\app\.env) BEFORE any other requires.
+// This ensures MEDIA_NODE_DATABASE_URL is available for all subsequent requires.
+// Use override: true to ensure .env values take precedence over any batch-file-set variables.
+require('dotenv').config({ path: 'C:\\dnd-media\\app\\.env', override: true });
+
+console.error('[recording-worker] MODULE LOAD START');
+console.error('[recording-worker] MEDIA_NODE_DATABASE_URL:', process.env.MEDIA_NODE_DATABASE_URL ? 'SET' : 'undefined');
+console.error('[recording-worker] DATABASE_URL:', process.env.DATABASE_URL ? 'SET' : 'undefined');
+console.error('[recording-worker] MEDIA_NODE_DATABASE_URL value:', process.env.MEDIA_NODE_DATABASE_URL ? process.env.MEDIA_NODE_DATABASE_URL.substring(0, 60) : 'undefined');
+console.error('[recording-worker] DATABASE_URL value:', process.env.DATABASE_URL ? process.env.DATABASE_URL.substring(0, 60) : 'undefined');
 
 const fs = require('fs');
 const os = require('os');
@@ -143,19 +154,30 @@ async function handleEvent(payload) {
 }
 
 async function main() {
-  if (!process.env.DATABASE_URL) {
-    logger.error('DATABASE_URL is not set. Exiting.');
+  // CRITICAL: Only use MEDIA_NODE_DATABASE_URL, never fall back to DATABASE_URL.
+  // The MEDIA_NODE_DATABASE_URL uses the media_node_worker credentials which have correct permissions.
+  // DATABASE_URL uses neondb_owner which has incorrect/rotated password.
+  if (!process.env.MEDIA_NODE_DATABASE_URL) {
+    logger.error('MEDIA_NODE_DATABASE_URL is required for recording-worker. Exiting.');
     process.exit(1);
   }
 
+  const mediaNodeUrl = process.env.MEDIA_NODE_DATABASE_URL;
+  console.error('[recording-worker] Using MEDIA_NODE_DATABASE_URL:', mediaNodeUrl ? mediaNodeUrl.substring(0, 60) + '...' : 'undefined');
+
   let listenRetryDelay = 1000;
+  let listenClient = null;
 
   async function connectListener() {
-    const directUrl = process.env.DIRECT_DATABASE_URL || process.env.DATABASE_URL;
-    listenClient = new Client({ connectionString: directUrl });
+    const mediaNodeUrl = process.env.MEDIA_NODE_DATABASE_URL;
+    console.error('[recording-worker] connectListener - MEDIA_NODE_DATABASE_URL:', process.env.MEDIA_NODE_DATABASE_URL ? 'SET (' + process.env.MEDIA_NODE_DATABASE_URL.substring(0, 60) + ')' : 'undefined');
+    console.error('[recording-worker] process.env.DATABASE_URL:', process.env.DATABASE_URL ? 'SET' : 'undefined');
+    console.error('[recording-worker] mediaNodeUrl:', mediaNodeUrl ? mediaNodeUrl.substring(0, 60) : 'undefined');
+    console.error('[recording-worker] About to create Client with connectionString:', mediaNodeUrl ? mediaNodeUrl.substring(0, 60) : 'undefined');
+    listenClient = new Client({ connectionString: mediaNodeUrl, ssl: true });
     await listenClient.connect();
     await listenClient.query('LISTEN new_camera_event');
-    logger.info('Listening on new_camera_event channel', { backend: directUrl === process.env.DIRECT_DATABASE_URL ? 'direct' : 'pooled' });
+    logger.info('Listening on new_camera_event channel', { backend: 'media_node' });
     listenRetryDelay = 1000;
   }
 
@@ -212,7 +234,7 @@ if (require.main === module) {
       try { await listenClient.end(); } catch {}
     }
     process.exit(0);
-  });
+  }
 }
 
 module.exports = { handleEvent, recordSegment };
