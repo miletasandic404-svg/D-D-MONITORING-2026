@@ -36,7 +36,14 @@ const { initSentry } = require('../lib/_sentry');
 const { assertSafeTarget } = require('../lib/_network_security');
 const Sentry = require('@sentry/node');
 
-const logger = makeLogger('worker-person-detection');
+let logger = null;
+
+function getLogger() {
+  if (!logger) {
+    logger = makeLogger('worker-person-detection');
+  }
+  return logger;
+}
 
 initSentry();
 
@@ -67,9 +74,9 @@ initSentry();
   }
 })();
 
-const logger = makeLogger('worker-person-detection');
-
 initSentry();
+
+// ── Configuration ───────────────────────────────────────────────────
 
 // ── Configuration ───────────────────────────────────────────────────
 
@@ -117,7 +124,8 @@ function submitFrame(cameraId, jpegBuffer) {
   // Backpressure: drop oldest if queue is full
   if (queue.length >= FRAME_QUEUE_MAX) {
     queue.shift();
-    logger.warn('Frame queue full, dropping oldest', { cameraId, queueSize: queue.length });
+getLogger().warn('Frame queue full, dropping oldest', { cameraId, queueSize:
+queue.length });
   }
 
   queue.push({
@@ -150,7 +158,7 @@ async function fetchRtspCameras() {
     );
     return result.rows;
   } catch (err) {
-    logger.error('Failed to fetch RTSP cameras', { error: err.message });
+    getLogger().error('Failed to fetch RTSP cameras', { error: err.message });
     return [];
   }
 }
@@ -167,7 +175,7 @@ async function extractFrameFromRtsp(rtspUrl) {
       allowPrivate: process.env.ALLOW_PRIVATE_NETWORK === 'true',
     });
   } catch (err) {
-    logger.warn('RTSP frame extraction blocked by network policy', {
+    getLogger().warn('RTSP frame extraction blocked by network policy', {
       error: err.message,
     });
     return null;
@@ -201,7 +209,7 @@ async function extractFrameFromRtsp(rtspUrl) {
       if (!settled) {
         settled = true;
         childProcesses.delete(ffmpeg);
-        logger.warn('RTSP frame extraction ffmpeg error', { error: err.message, rtsp_url: rtspUrl });
+        getLogger().warn('RTSP frame extraction ffmpeg error', { error: err.message, rtsp_url: rtspUrl });
         resolve(null);
       }
     });
@@ -245,17 +253,17 @@ async function rtspExtractionLoop() {
   const cameras = await fetchRtspCameras();
   if (cameras.length === 0) return;
 
-  logger.info('RTSP frame extraction started', { camera_count: cameras.length });
+  getLogger().info('RTSP frame extraction started', { camera_count: cameras.length });
 
   for (const cam of cameras) {
     try {
       const frame = await extractFrameFromRtsp(cam.rtsp_url);
       if (frame) {
         submitFrame(cam.id, frame);
-        logger.debug('RTSP frame extracted', { camera_id: cam.id });
+        getLogger().debug('RTSP frame extracted', { camera_id: cam.id });
       }
     } catch (err) {
-      logger.warn('RTSP frame extraction failed', { camera_id: cam.id, error: err.message });
+      getLogger().warn('RTSP frame extraction failed', { camera_id: cam.id, error: err.message });
     }
   }
 }
@@ -348,10 +356,10 @@ async function cleanupStaleState() {
     }
 
     if (staleIds.size > 0) {
-      logger.info('Cleaned stale detection state', { staleCameraIds: [...staleIds] });
+      getLogger().info('Cleaned stale detection state', { staleCameraIds: [...staleIds] });
     }
   } catch (err) {
-    logger.error('Failed to cleanup stale state', { error: err.message });
+    getLogger().error('Failed to cleanup stale state', { error: err.message });
   }
 }
 
@@ -377,7 +385,7 @@ async function createDetectionEvent(cameraId, confidence, boundingBoxes) {
     );
     const organizationId = cameraResult.rows[0]?.organization_id;
     if (!organizationId) {
-      logger.error('Cannot create detection event: camera has no organization_id', { cameraId });
+      getLogger().error('Cannot create detection event: camera has no organization_id', { cameraId });
       return null;
     }
 
@@ -390,7 +398,7 @@ async function createDetectionEvent(cameraId, confidence, boundingBoxes) {
 
     const eventId = result.rows[0]?.id;
     if (!eventId) {
-      logger.error('Failed to create event: no id returned', { cameraId });
+      getLogger().error('Failed to create event: no id returned', { cameraId });
       return null;
     }
 
@@ -403,7 +411,7 @@ async function createDetectionEvent(cameraId, confidence, boundingBoxes) {
         [eventId, confidence, JSON.stringify(boundingBoxes), organizationId],
       );
     } catch (err) {
-      logger.error('Failed to insert ai_detections', { eventId, error: err.message });
+      getLogger().error('Failed to insert ai_detections', { eventId, error: err.message });
       // Roll back the event so we don't have an incident without a detection
       try {
         await db.queryAsPlatformAdmin('DELETE FROM events WHERE id = $1', [eventId]);
@@ -413,10 +421,10 @@ async function createDetectionEvent(cameraId, confidence, boundingBoxes) {
       return null;
     }
 
-    logger.info('Detection event created', { eventId, cameraId, confidence, organizationId });
+    getLogger().info('Detection event created', { eventId, cameraId, confidence, organizationId });
     return { eventId };
   } catch (err) {
-    logger.error('Failed to create detection event', { error: err.message, cameraId });
+    getLogger().error('Failed to create detection event', { error: err.message, cameraId });
     if (Sentry) Sentry.captureException(err);
     return null;
   }
@@ -449,7 +457,7 @@ async function sendNotifications(cameraId, eventId, confidence) {
   );
 
     if (rules.rows.length === 0) {
-      logger.debug('No active notification rules for person_detected');
+      getLogger().debug('No active notification rules for person_detected');
       return;
     }
 
@@ -464,16 +472,16 @@ async function sendNotifications(cameraId, eventId, confidence) {
             timestamp: new Date().toISOString(),
           });
         } else if (rule.channel === 'email') {
-          logger.info('Email notification skipped (no SMTP configured)', { ruleId: rule.id });
+          getLogger().info('Email notification skipped (no SMTP configured)', { ruleId: rule.id });
         } else if (rule.channel === 'sms') {
-          logger.info('SMS notification skipped (no SMS provider configured)', { ruleId: rule.id });
+          getLogger().info('SMS notification skipped (no SMS provider configured)', { ruleId: rule.id });
         }
       } catch (err) {
-        logger.error('Notification failed', { ruleId: rule.id, error: err.message });
+        getLogger().error('Notification failed', { ruleId: rule.id, error: err.message });
       }
     }
   } catch (err) {
-    logger.error('Failed to check notification rules', { error: err.message });
+    getLogger().error('Failed to check notification rules', { error: err.message });
   }
 }
 
@@ -530,7 +538,7 @@ async function processFrame(cameraId, frame) {
   const result = await detection.detectPersons(frame.jpegBuffer);
 
   if (result.error) {
-    logger.warn('Detection error', { cameraId, error: result.error });
+    getLogger().warn('Detection error', { cameraId, error: result.error });
     return;
   }
 
@@ -541,7 +549,7 @@ async function processFrame(cameraId, frame) {
   // Find highest confidence detection
   const best = result.persons.reduce((a, b) => a.confidence > b.confidence ? a : b);
 
-  logger.info('Person detected', {
+  getLogger().info('Person detected', {
     cameraId,
     confidence: best.confidence,
     count: result.persons.length,
@@ -577,7 +585,7 @@ async function processLoop() {
     try {
       await processFrame(cameraId, frame);
     } catch (err) {
-      logger.error('Frame processing failed', { cameraId, error: err.message });
+      getLogger().error('Frame processing failed', { cameraId, error: err.message });
       if (Sentry) Sentry.captureException(err);
     }
   }
@@ -587,17 +595,17 @@ async function processLoop() {
 
 async function main() {
   if (process.env.PERSON_DETECTION_ENABLED === 'false') {
-    logger.info('Person detection disabled via PERSON_DETECTION_ENABLED=false');
+    getLogger().info('Person detection disabled via PERSON_DETECTION_ENABLED=false');
     return;
   }
 
   // Check detection availability
   const available = await detection.isAvailable();
   if (!available) {
-    logger.warn('Person detection not available (model missing or onnxruntime not installed). Worker will retry periodically.');
+    getLogger().warn('Person detection not available (model missing or onnxruntime not installed). Worker will retry periodically.');
   }
 
-  logger.info('Person detection worker started', {
+  getLogger().info('Person detection worker started', {
     debounceMs: DEBOUNCE_MS,
     cooldownMs: COOLDOWN_MS,
     maxAlertsPerHour: MAX_ALERTS_PER_HOUR,
@@ -616,7 +624,7 @@ async function main() {
       try { child.kill('SIGKILL'); } catch {}
     }
     childProcesses.clear();
-    logger.info('Person detection worker shutting down');
+    getLogger().info('Person detection worker shutting down');
     process.exit(0);
   };
 
@@ -651,12 +659,12 @@ function startProcessing() {
   statusInterval = setInterval(async () => {
     const status = detection.getStatus();
     if (!status.modelLoaded && status.modelExists) {
-      logger.info('Attempting model reload...');
+      getLogger().info('Attempting model reload...');
       await detection.loadModel();
     }
   }, DB_CHECK_INTERVAL_MS);
 
-  logger.info('Person detection processing started');
+  getLogger().info('Person detection processing started');
 }
 
 function startRtspExtraction() {
@@ -665,7 +673,7 @@ function startRtspExtraction() {
 
   rtspInterval = setInterval(rtspExtractionLoop, RTSP_FRAME_INTERVAL_MS);
 
-  logger.info('RTSP frame extraction started', {
+  getLogger().info('RTSP frame extraction started', {
     intervalMs: RTSP_FRAME_INTERVAL_MS,
   });
 }
@@ -678,7 +686,7 @@ rtspInterval = null;
 
 if (require.main === module) {
   main().catch((err) => {
-    logger.error('Fatal error', { error: err.message });
+    getLogger().error('Fatal error', { error: err.message });
     process.exit(1);
   });
 } else {
