@@ -32,7 +32,7 @@ function assertValidUuid(value, label) {
   }
 }
 
-const connectionString = process.env.DATABASE_URL;
+const connectionString = process.env.MEDIA_NODE_DATABASE_URL || process.env.DATABASE_URL;
 const hasDatabase = Boolean(connectionString) && Boolean(Pool);
 
 // ── Pool configuration with timeouts ─────────────────────────────────────
